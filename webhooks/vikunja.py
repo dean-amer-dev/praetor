@@ -71,6 +71,19 @@ async def vikunja_webhook(request: Request) -> dict:
         dispatched.append("agent:research")
         logger.info("dispatched agent:research for task %s", task_id)
 
+    if LABEL_GO in label_ids:
+        _get_hatchet().client.event.push(
+            "agent:code",
+            {
+                "task_id": task_id,
+                "task_title": task.get("title", ""),
+                "task_description": task.get("description", ""),
+            },
+            additional_metadata={"vikunja_task_id": str(task_id)},
+        )
+        dispatched.append("agent:code")
+        logger.info("dispatched agent:code for task %s", task_id)
+
     return {"status": "ok", "dispatched": dispatched}
 
 
