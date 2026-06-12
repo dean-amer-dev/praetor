@@ -34,7 +34,7 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
     prompt = (
         f"Task #{input.task_id}: {input.task_title}\n\n"
         f"Description: {input.task_description}\n\n"
-        f"Implement this task on the referenced repo. Create branch dean-coder/task-{input.task_id}, "
+        f"Implement this task on the referenced repo. Create branch amerenda-coder/task-{input.task_id}, "
         f"implement, commit, push, open a draft PR. Store key decisions in memory under "
         f"agent_id='task-{input.task_id}'. When done, post the PR URL as a Vikunja comment on "
         f"task {input.task_id} and mark it done."
