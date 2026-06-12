@@ -4,7 +4,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .vikunja import register_webhook_on_startup, router
+from .vikunja import register_webhook_on_startup, router as vikunja_router
+from .github import router as github_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -16,7 +17,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="praetor-webhook-adapter", lifespan=lifespan)
-app.include_router(router)
+app.include_router(vikunja_router)
+app.include_router(github_router)
 
 
 @app.get("/healthz")
