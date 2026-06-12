@@ -4,6 +4,8 @@ Paste this prompt to continue implementing the next unfinished phase.
 
 ---
 
+/clear
+
 Read `/home/alex/claude/projects/praetor/docs/status.md` and `/home/alex/claude/projects/praetor/docs/phase-N.md` for the next incomplete phase, then implement it.
 
 **Rules:**
