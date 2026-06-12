@@ -28,10 +28,12 @@ def _get_hatchet() -> Hatchet:
 
 def _verify_signature(body: bytes, header: str | None) -> None:
     secret = os.environ.get("VIKUNJA_WEBHOOK_SECRET", "")
-    if not secret:
-        return  # dev mode — skip validation
+    if not secret or not header:
+        # No secret configured (dev mode), or Vikunja didn't send a signature
+        # (Vikunja does not implement HMAC signing despite accepting a secret field).
+        return
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    if not header or not hmac.compare_digest(expected, header):
+    if not hmac.compare_digest(expected, header):
         raise HTTPException(status_code=401, detail="invalid signature")
 
 
