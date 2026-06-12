@@ -17,7 +17,7 @@ SYSTEM_PROMPT = """You are a coder agent. Given a task title, description, and r
 2. Clone the repo to SCRATCH_DIR using: git clone https://x-access-token:{TOKEN}@github.com/{repo}.git
 3. Create a branch named amerenda-coder/task-{task_id}
 4. Implement the requested change using read_file, write_file, and run_shell
-5. Commit the changes as: git -c user.name="amerenda-coder[bot]" -c user.email="amerenda-coder[bot]@users.noreply.github.com" commit -m "..."
+5. Commit the changes as: git -c user.name="scriptor[bot]" -c user.email="amerenda-coder[bot]@users.noreply.github.com" commit -m "..."
 6. Push the branch
 7. Open a draft PR using the GitHub REST API (POST /repos/{owner}/{repo}/pulls with draft=true)
    - Include the Vikunja task ID in the PR description
