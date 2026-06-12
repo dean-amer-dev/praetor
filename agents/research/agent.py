@@ -49,19 +49,21 @@ async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> 
     token = os.environ["VIKUNJA_TOKEN"]
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=10) as client:
-        # Post comment
-        await client.put(
+        comment_resp = await client.put(
             f"{base}/api/v1/tasks/{task_id}/comments",
             json={"comment": comment},
             headers=headers,
         )
-        # Mark done if requested
+        if comment_resp.status_code == 401:
+            return "error: Vikunja token expired — research complete but task not updated"
+        comment_resp.raise_for_status()
         if done:
-            await client.post(
+            done_resp = await client.post(
                 f"{base}/api/v1/tasks/{task_id}",
                 json={"done": True},
                 headers=headers,
             )
+            done_resp.raise_for_status()
     return "task updated"
 
 

@@ -2,7 +2,7 @@
 from datetime import timedelta
 
 from hatchet_sdk import Context, Hatchet
-from hatchet_sdk.types.concurrency import ConcurrencyExpression
+from hatchet_sdk.types.concurrency import ConcurrencyExpression, ConcurrencyLimitStrategy
 from pydantic import BaseModel
 
 from .agent import build_agent
@@ -47,7 +47,11 @@ def main() -> None:
         execution_timeout=timedelta(minutes=10),
         retries=1,
         # One active run per task_id — deduplicates duplicate webhook deliveries
-        concurrency=ConcurrencyExpression(expression="input.task_id", max_runs=1),
+        concurrency=ConcurrencyExpression(
+            expression="input.task_id",
+            max_runs=1,
+            limit_strategy=ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
+        ),
     )(_run_research)
 
     worker = hatchet.worker("research-worker", workflows=[run_research])

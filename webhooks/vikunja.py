@@ -87,29 +87,38 @@ async def register_webhook_on_startup() -> None:
         return
 
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(f"{base}/api/v1/projects/{project_id}/webhooks", headers=headers)
-        if resp.status_code == 404:
-            logger.warning("project %s not found — webhook registration skipped", project_id)
-            return
-        resp.raise_for_status()
-        existing = resp.json() or []
-
-        for wh in existing:
-            if wh.get("target_url") == target_url:
-                logger.info("Vikunja webhook already registered (id=%s)", wh.get("id"))
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{base}/api/v1/projects/{project_id}/webhooks", headers=headers)
+            if resp.status_code == 401:
+                logger.error(
+                    "Vikunja token is invalid/expired (401) — webhook not registered. "
+                    "Update vikjuna-api-key-full-access in BWS with a fresh token."
+                )
                 return
+            if resp.status_code == 404:
+                logger.warning("project %s not found — webhook registration skipped", project_id)
+                return
+            resp.raise_for_status()
+            existing = resp.json() or []
 
-        body = {
-            "target_url": target_url,
-            "events": ["task.updated", "task.created"],
-            "secret": secret,
-        }
-        create_resp = await client.put(
-            f"{base}/api/v1/projects/{project_id}/webhooks",
-            json=body,
-            headers=headers,
-        )
-        create_resp.raise_for_status()
-        wh_id = create_resp.json().get("id")
-        logger.info("registered Vikunja webhook id=%s for project %s", wh_id, project_id)
+            for wh in existing:
+                if wh.get("target_url") == target_url:
+                    logger.info("Vikunja webhook already registered (id=%s)", wh.get("id"))
+                    return
+
+            body = {
+                "target_url": target_url,
+                "events": ["task.updated", "task.created"],
+                "secret": secret,
+            }
+            create_resp = await client.put(
+                f"{base}/api/v1/projects/{project_id}/webhooks",
+                json=body,
+                headers=headers,
+            )
+            create_resp.raise_for_status()
+            wh_id = create_resp.json().get("id")
+            logger.info("registered Vikunja webhook id=%s for project %s", wh_id, project_id)
+    except httpx.HTTPStatusError as exc:
+        logger.error("webhook registration failed (%s) — adapter will still handle requests", exc)
