@@ -1,0 +1,58 @@
+"""Hatchet worker: handles agent:research events (Hatchet SDK v1.x)."""
+from datetime import timedelta
+
+from hatchet_sdk import Context, Hatchet
+from hatchet_sdk.types.concurrency import ConcurrencyExpression
+from pydantic import BaseModel
+
+from .agent import build_agent
+
+_agent = None
+
+
+def _get_agent():
+    global _agent
+    if _agent is None:
+        _agent = build_agent()
+    return _agent
+
+
+class ResearchInput(BaseModel):
+    task_id: int
+    task_title: str
+    task_description: str = ""
+
+
+async def _run_research(input: ResearchInput, context: Context) -> dict:
+    prompt = f"Task #{input.task_id}: {input.task_title}"
+    if input.task_description:
+        prompt += f"\n\nDescription: {input.task_description}"
+    prompt += (
+        f"\n\nResearch this topic thoroughly. "
+        f"Store key findings in memory under agent_id='task-{input.task_id}'. "
+        f"When done, call update_vikunja_task with task_id={input.task_id} and your summary."
+    )
+    agent = _get_agent()
+    result = await agent.run(prompt)
+    return {"summary": result.data, "task_id": input.task_id}
+
+
+def main() -> None:
+    hatchet = Hatchet()
+
+    run_research = hatchet.task(
+        name="research",
+        on_events=["agent:research"],
+        input_validator=ResearchInput,
+        execution_timeout=timedelta(minutes=10),
+        retries=1,
+        # One active run per task_id — deduplicates duplicate webhook deliveries
+        concurrency=ConcurrencyExpression(expression="input.task_id", max_runs=1),
+    )(_run_research)
+
+    worker = hatchet.worker("research-worker", workflows=[run_research])
+    worker.start()
+
+
+if __name__ == "__main__":
+    main()
