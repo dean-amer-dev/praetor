@@ -53,66 +53,19 @@ jobs:
       - name: Login to Docker Hub
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
-      - name: Build and push ${{ matrix.component }} (amd64)
+      - name: Build and push ${{ matrix.component }}
         run: |
           docker build \
-            -t "${{ matrix.image }}:${{ needs.set-tag.outputs.tag }}-amd64" \
+            -t "${{ matrix.image }}:${{ needs.set-tag.outputs.tag }}" \
+            -t "${{ matrix.image }}:latest" \
             -f ${{ matrix.dockerfile }} \
             .
-          docker push "${{ matrix.image }}:${{ needs.set-tag.outputs.tag }}-amd64"
-
-  build-arm64:
-    needs: [set-tag]
-    if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, mac-mini]
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Login to Docker Hub
-        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
-
-      - name: Build and push all images (arm64)
-        env:
-          TAG: ${{ needs.set-tag.outputs.tag }}
-        run: |
-          for entry in \
-            "coder:Dockerfile.coder-worker:amerenda/praetor-coder" \
-            "pipeline:Dockerfile.pipeline-worker:amerenda/praetor-pipeline" \
-            "research:Dockerfile.research-worker:amerenda/praetor-research" \
-            "webhook:Dockerfile.webhook-adapter:amerenda/praetor-webhook" \
-            "qa:Dockerfile.qa-worker:amerenda/praetor-qa" \
-            "reviewer:Dockerfile.reviewer-worker:amerenda/praetor-reviewer"; do
-            COMPONENT=$(echo "$entry" | cut -d: -f1)
-            DOCKERFILE=$(echo "$entry" | cut -d: -f2)
-            IMAGE=$(echo "$entry" | cut -d: -f3)
-            echo "Building $COMPONENT arm64..."
-            docker build --no-cache -t "${IMAGE}:${TAG}-arm64" -f "${DOCKERFILE}" .
-            docker push "${IMAGE}:${TAG}-arm64"
-          done
-
-  manifest:
-    needs: [set-tag, build-amd64, build-arm64]
-    runs-on: arc-runner-praetor
-    steps:
-      - name: Login to Docker Hub
-        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
-
-      - name: Create multi-arch manifests
-        env:
-          TAG: ${{ needs.set-tag.outputs.tag }}
-        run: |
-          for IMAGE in praetor-coder praetor-pipeline praetor-research praetor-webhook praetor-qa praetor-reviewer; do
-            docker buildx imagetools create -t "amerenda/${IMAGE}:${TAG}" \
-              "amerenda/${IMAGE}:${TAG}-amd64" \
-              "amerenda/${IMAGE}:${TAG}-arm64"
-            docker buildx imagetools create -t "amerenda/${IMAGE}:latest" \
-              "amerenda/${IMAGE}:${TAG}-amd64" \
-              "amerenda/${IMAGE}:${TAG}-arm64"
-          done
+          docker push "${{ matrix.image }}:${{ needs.set-tag.outputs.tag }}"
+          docker push "${{ matrix.image }}:latest"
 
   notify-failure:
     if: failure()
-    needs: [build-amd64, build-arm64, manifest]
+    needs: [build-amd64]
     runs-on: ubuntu-latest
     steps:
       - name: Create GitHub Issue for build failure
