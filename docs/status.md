@@ -16,6 +16,15 @@
 | 11 | Scaffold Worker | ⬜ Not started | |
 | 12 | Control Plane UI | ⏭ Skipped | Marked manual — do not implement |
 
+## OpenWebUI (claw.amer.dev)
+
+Admin credentials reset on 2026-06-13. Login with:
+- **URL:** https://claw.amer.dev
+- **Email:** `amerenda@proton.me`
+- **Password:** stored in BWS as `openwebui-dean-admin-password`
+
+---
+
 ## Phase 7 Blocker — GitHub Org Webhook
 
 The reviewer worker and QA worker are deployed. The webhook handler at
