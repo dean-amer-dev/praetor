@@ -39,7 +39,7 @@ def get_github_token() -> str:
     return get_reviewer_installation_token()
 
 
-def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
+def fetch_pr_diff(repo: str, pr_number: str, token: str) -> str:
     """Fetch the unified diff for a pull request (capped at 32KB)."""
     resp = httpx.get(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
@@ -55,7 +55,7 @@ def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
     return resp.text[:32000]
 
 
-def post_review_comment(repo: str, pr_number: int, body: str, token: str) -> str:
+def post_review_comment(repo: str, pr_number: str, body: str, token: str) -> str:
     """Post a review comment on a GitHub PR. Returns the review URL."""
     resp = httpx.post(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews",
