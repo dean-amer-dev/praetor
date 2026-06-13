@@ -10,7 +10,7 @@
 | 5 | Research Agent | ✅ Complete | Vikunja ai-research label → research worker |
 | 6 | Coder Agent | ✅ Complete | Vikunja ai-go label → coder worker, PRs via dean-coder[bot] |
 | 7 | PR Reviewer + QA | 🟡 Partial | Code deployed; GitHub org webhook requires manual registration (see below) |
-| 8 | Multi-Agent Pipeline | ⬜ Not started | |
+| 8 | Multi-Agent Pipeline | ✅ Complete | Dual-label tasks → pipeline:research_code DAG; pipeline-worker deployed |
 | 9 | Observability + Prompts | ⬜ Not started | |
 | 10 | MCP Gateway | ⬜ Not started | |
 | 11 | Scaffold Worker | ⬜ Not started | |

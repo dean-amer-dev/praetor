@@ -57,34 +57,28 @@ async def vikunja_webhook(request: Request) -> dict:
     label_ids = {lbl["id"] for lbl in labels if isinstance(lbl, dict)}
 
     dispatched = []
+    payload = {
+        "task_id": task_id,
+        "task_title": task.get("title", ""),
+        "task_description": task.get("description", ""),
+    }
+    meta = {"vikunja_task_id": str(task_id)}
 
-    if LABEL_RESEARCH in label_ids:
-        # additional_metadata carries a dedup hint (informational — concurrency on
-        # the workflow side is the real dedup gate for duplicate webhook deliveries)
-        _get_hatchet().client.event.push(
-            "agent:research",
-            {
-                "task_id": task_id,
-                "task_title": task.get("title", ""),
-                "task_description": task.get("description", ""),
-            },
-            additional_metadata={"vikunja_task_id": str(task_id)},
-        )
-        dispatched.append("agent:research")
-        logger.info("dispatched agent:research for task %s", task_id)
+    if LABEL_RESEARCH in label_ids and LABEL_GO in label_ids:
+        # Both labels → run research then code as a single DAG pipeline
+        _get_hatchet().client.event.push("pipeline:research_code", payload, additional_metadata=meta)
+        dispatched.append("pipeline:research_code")
+        logger.info("dispatched pipeline:research_code for task %s", task_id)
+    else:
+        if LABEL_RESEARCH in label_ids:
+            _get_hatchet().client.event.push("agent:research", payload, additional_metadata=meta)
+            dispatched.append("agent:research")
+            logger.info("dispatched agent:research for task %s", task_id)
 
-    if LABEL_GO in label_ids:
-        _get_hatchet().client.event.push(
-            "agent:code",
-            {
-                "task_id": task_id,
-                "task_title": task.get("title", ""),
-                "task_description": task.get("description", ""),
-            },
-            additional_metadata={"vikunja_task_id": str(task_id)},
-        )
-        dispatched.append("agent:code")
-        logger.info("dispatched agent:code for task %s", task_id)
+        if LABEL_GO in label_ids:
+            _get_hatchet().client.event.push("agent:code", payload, additional_metadata=meta)
+            dispatched.append("agent:code")
+            logger.info("dispatched agent:code for task %s", task_id)
 
     return {"status": "ok", "dispatched": dispatched}
 
