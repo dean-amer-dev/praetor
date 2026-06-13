@@ -1,0 +1,126 @@
+name: Build and Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  GITOPS_REPO: amerenda/k3s-dean-gitops
+
+jobs:
+  set-tag:
+    if: github.event_name != 'pull_request'
+    runs-on: arc-runner-set
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Set image tag
+        id: tag
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  build-amd64:
+    needs: [set-tag]
+    if: github.event_name != 'pull_request'
+    runs-on: arc-runner-set
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: coder
+            image: amerenda/praetor-coder
+            dockerfile: Dockerfile.coder-worker
+          - component: pipeline
+            image: amerenda/praetor-pipeline
+            dockerfile: Dockerfile.pipeline-worker
+          - component: research
+            image: amerenda/praetor-research
+            dockerfile: Dockerfile.research-worker
+          - component: webhook
+            image: amerenda/praetor-webhook
+            dockerfile: Dockerfile.webhook-adapter
+          - component: qa
+            image: amerenda/praetor-qa
+            dockerfile: Dockerfile.qa-worker
+          - component: reviewer
+            image: amerenda/praetor-reviewer
+            dockerfile: Dockerfile.reviewer-worker
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Login to Docker Hub
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+
+      - name: Build and push ${{ matrix.component }} (amd64)
+        run: |
+          docker build \
+            -t "${{ matrix.image }}:${{ needs.set-tag.outputs.tag }}-amd64" \
+            -f ${{ matrix.dockerfile }} \
+            .
+          docker push "${{ matrix.image }}:${{ needs.set-tag.outputs.tag }}-amd64"
+
+  build-arm64:
+    needs: [set-tag]
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, mac-mini]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Login to Docker Hub
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+
+      - name: Build and push all images (arm64)
+        env:
+          TAG: ${{ needs.set-tag.outputs.tag }}
+        run: |
+          for entry in \
+            "coder:Dockerfile.coder-worker:amerenda/praetor-coder" \
+            "pipeline:Dockerfile.pipeline-worker:amerenda/praetor-pipeline" \
+            "research:Dockerfile.research-worker:amerenda/praetor-research" \
+            "webhook:Dockerfile.webhook-adapter:amerenda/praetor-webhook" \
+            "qa:Dockerfile.qa-worker:amerenda/praetor-qa" \
+            "reviewer:Dockerfile.reviewer-worker:amerenda/praetor-reviewer"; do
+            COMPONENT=$(echo "$entry" | cut -d: -f1)
+            DOCKERFILE=$(echo "$entry" | cut -d: -f2)
+            IMAGE=$(echo "$entry" | cut -d: -f3)
+            echo "Building $COMPONENT arm64..."
+            docker build --no-cache -t "${IMAGE}:${TAG}-arm64" -f "${DOCKERFILE}" .
+            docker push "${IMAGE}:${TAG}-arm64"
+          done
+
+  manifest:
+    needs: [set-tag, build-amd64, build-arm64]
+    runs-on: arc-runner-set
+    steps:
+      - name: Login to Docker Hub
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+
+      - name: Create multi-arch manifests
+        env:
+          TAG: ${{ needs.set-tag.outputs.tag }}
+        run: |
+          for IMAGE in praetor-coder praetor-pipeline praetor-research praetor-webhook praetor-qa praetor-reviewer; do
+            docker buildx imagetools create -t "amerenda/${IMAGE}:${TAG}" \
+              "amerenda/${IMAGE}:${TAG}-amd64" \
+              "amerenda/${IMAGE}:${TAG}-arm64"
+            docker buildx imagetools create -t "amerenda/${IMAGE}:latest" \
+              "amerenda/${IMAGE}:${TAG}-amd64" \
+              "amerenda/${IMAGE}:${TAG}-arm64"
+          done
+
+  notify-failure:
+    if: failure()
+    needs: [build-amd64, build-arm64, manifest]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub Issue for build failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "CI failed: ${{ github.workflow }}" \
+            --body "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "ci-failure" || echo "Could not create issue"
