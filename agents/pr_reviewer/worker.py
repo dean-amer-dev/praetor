@@ -47,7 +47,7 @@ def main() -> None:
         execution_timeout=timedelta(minutes=10),
         retries=1,
         concurrency=ConcurrencyExpression(
-            expression="input.repo + str(input.pr_number)",
+            expression="input.repo + string(input.pr_number)",
             max_runs=1,
             limit_strategy=ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
         ),
