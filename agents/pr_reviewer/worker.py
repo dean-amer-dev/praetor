@@ -19,7 +19,7 @@ def _get_agent():
 
 class PROpenedInput(BaseModel):
     repo: str
-    pr_number: int
+    pr_number: str
     pr_url: str = ""
     diff_url: str = ""
     author: str = ""
@@ -47,7 +47,7 @@ def main() -> None:
         execution_timeout=timedelta(minutes=10),
         retries=1,
         concurrency=ConcurrencyExpression(
-            expression="input.repo + string(input.pr_number)",
+            expression="input.repo + input.pr_number",
             max_runs=1,
             limit_strategy=ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
         ),

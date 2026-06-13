@@ -49,7 +49,7 @@ async def github_webhook(request: Request) -> dict:
 
     pr = payload.get("pull_request", {})
     repo = payload.get("repository", {}).get("full_name", "")
-    pr_number = pr.get("number")
+    pr_number = str(pr.get("number", ""))
     pr_url = pr.get("html_url", "")
     diff_url = pr.get("diff_url", "")
     author = pr.get("user", {}).get("login", "")
