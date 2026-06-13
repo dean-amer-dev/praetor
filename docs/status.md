@@ -6,15 +6,16 @@
 | 1 | Inference | ✅ Complete | LiteLLM at litellm.amer.dev |
 | 2 | Storage | ✅ Complete | Qdrant on Mac Mini via Komodo |
 | 3 | Dispatch | ✅ Complete | Hatchet Lite on k3s, stub worker |
-| 4 | Memory | ✅ Complete | Mem0 at mem0.amer.dev |
+| 4 | Memory | 🔴 Broken | mem0 CrashLoop: amd64 image on arm64 node — see Phase 13 |
 | 5 | Research Agent | ✅ Complete | Vikunja ai-research label → research worker |
 | 6 | Coder Agent | ✅ Complete | Vikunja ai-go label → coder worker, PRs via dean-coder[bot] |
-| 7 | PR Reviewer + QA | 🟡 Partial | Code deployed; GitHub org webhook requires manual registration (see below) |
+| 7 | PR Reviewer + QA | 🔴 Broken | qa+reviewer images never built (ImagePullBackOff) — see Phase 13 |
 | 8 | Multi-Agent Pipeline | ✅ Complete | Dual-label tasks → pipeline:research_code DAG; pipeline-worker deployed |
-| 9 | Observability + Prompts | ⬜ Not started | |
+| 9 | Observability + Prompts | ⬜ Not started | prometheus also broken (arch) — fix in Phase 13 first |
 | 10 | MCP Gateway | ⬜ Not started | |
 | 11 | Scaffold Worker | ⬜ Not started | |
 | 12 | Control Plane UI | ⏭ Skipped | Marked manual — do not implement |
+| 13 | Infra Stabilization | 🟡 In Progress | arch fixes, multi-arch builds, runner cleanup — see phase-13.md |
 
 ## OpenWebUI (claw.amer.dev)
 
