@@ -1,11 +1,13 @@
 """FastAPI router: receives Vikunja task.updated webhooks, dispatches Hatchet events."""
 import hashlib
 import hmac
+import json as _json
 import logging
 import os
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from hatchet_sdk import Hatchet
 
 logger = logging.getLogger(__name__)
@@ -42,7 +44,10 @@ async def vikunja_webhook(request: Request) -> dict:
     body = await request.body()
     _verify_signature(body, request.headers.get("X-Vikunja-Signature"))
 
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except _json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
     event_type = payload.get("event_type", "")
 
     if event_type not in ("task.updated", "task.created"):
@@ -66,17 +71,17 @@ async def vikunja_webhook(request: Request) -> dict:
 
     if LABEL_RESEARCH in label_ids and LABEL_GO in label_ids:
         # Both labels → run research then code as a single DAG pipeline
-        _get_hatchet().client.event.push("pipeline:research_code", payload, additional_metadata=meta)
+        _get_hatchet().event.push("pipeline:research_code", payload, additional_metadata=meta)
         dispatched.append("pipeline:research_code")
         logger.info("dispatched pipeline:research_code for task %s", task_id)
     else:
         if LABEL_RESEARCH in label_ids:
-            _get_hatchet().client.event.push("agent:research", payload, additional_metadata=meta)
+            _get_hatchet().event.push("agent:research", payload, additional_metadata=meta)
             dispatched.append("agent:research")
             logger.info("dispatched agent:research for task %s", task_id)
 
         if LABEL_GO in label_ids:
-            _get_hatchet().client.event.push("agent:code", payload, additional_metadata=meta)
+            _get_hatchet().event.push("agent:code", payload, additional_metadata=meta)
             dispatched.append("agent:code")
             logger.info("dispatched agent:code for task %s", task_id)
 

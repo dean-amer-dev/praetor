@@ -54,7 +54,7 @@ async def github_webhook(request: Request) -> dict:
     diff_url = pr.get("diff_url", "")
     author = pr.get("user", {}).get("login", "")
 
-    _get_hatchet().client.event.push(
+    _get_hatchet().event.push(
         "github:pr_opened",
         {
             "repo": repo,
