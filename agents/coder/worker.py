@@ -62,7 +62,7 @@ def main() -> None:
         execution_timeout=timedelta(minutes=20),
         retries=1,
         concurrency=ConcurrencyExpression(
-            expression="input.task_id",
+            expression="string(input.task_id)",
             max_runs=1,
             limit_strategy=ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
         ),

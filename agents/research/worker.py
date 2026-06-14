@@ -56,7 +56,7 @@ def main() -> None:
         retries=1,
         # One active run per task_id — deduplicates duplicate webhook deliveries
         concurrency=ConcurrencyExpression(
-            expression="input.task_id",
+            expression="string(input.task_id)",
             max_runs=1,
             limit_strategy=ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
         ),
