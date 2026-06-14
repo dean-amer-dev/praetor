@@ -71,6 +71,9 @@ jobs:
       - name: Login to Docker Hub
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
+      - name: Free disk space
+        run: docker system prune -af --volumes
+
       - name: Build and push all images (arm64)
         env:
           TAG: ${{ needs.set-tag.outputs.tag }}
