@@ -22,7 +22,7 @@
 
 Admin credentials reset on 2026-06-13. Login with:
 - **URL:** https://claw.amer.dev
-- **Email:** `amerenda@proton.me`
+- **Email:** `alex@amer.dev`
 - **Password:** stored in BWS as `openwebui-dean-admin-password`
 
 ---
