@@ -1,259 +1,288 @@
-# Phase 14 — Conversational Dispatch: claw.amer.dev → Praetor
+# Phase 14 — Unified Dispatch: Any Interface → Praetor
 
-**Goal:** A user at `claw.amer.dev` (OpenWebUI) can describe a task in natural language → the LLM calls a tool → a real Vikunja task is created + labeled → the existing webhook pipeline dispatches the right agent automatically. No manual Vikunja navigation required.
-
-This phase is a pre-condition for Phase 11 (Scaffold Worker), which requires "a way to trigger Hatchet events from OpenWebUI."
+**Goal:** Every interface (claw, opencode, Claude Code, OpenHands, Vikunja) dispatches agents through the same shared function. The Vikunja label path is ONE trigger, not the canonical one. Dispatching an agent from a chat message or an MCP tool call is a first-class operation that does not require creating a to-do item first.
 
 ## Pre-conditions
 
-- Phases 5–9 complete and stable (research + coder agents healthy, Langfuse tracing live)
-- claw.amer.dev running and connected to LiteLLM (Phase 1 + OpenWebUI deploy)
-- Vikunja webhook registered on the target project (Phase 5 — already done)
+- Phases 5–9 complete and stable
+- claw.amer.dev connected to LiteLLM (already done)
+- `dean-mcp` repo exists with infra-mcp and bws-mcp deployed
+
+## The Problem Being Solved
+
+Today the dispatch logic lives inline in `webhooks/vikunja.py:72–87`. Every other interface that wants to dispatch an agent has to either (a) go through Vikunja, which means creating a task first, or (b) duplicate the `hatchet.event.push()` call. Neither is right.
+
+The fix is a two-part refactor:
+
+1. Extract the dispatch logic to `common/dispatch.py` — a shared function that all callers use, including the Vikunja webhook handler.
+2. Expose that function as a first-class HTTP endpoint on the existing webhook adapter.
+
+"Calls the same code as my todo" is not a metaphor — it is the literal requirement.
 
 ## Architecture
 
 ```
-User message at claw.amer.dev
-        │
-        ▼
-   OpenWebUI (LLM turn)
-   qwen3-35b via LiteLLM
-        │  decides to call a tool
-        ▼
-  praetor_dispatch Tool
-  (Python function, registered in OpenWebUI)
-        │  POST /chat/dispatch
-        ▼
-  praetor webhook adapter
-  (existing service, new endpoint)
-        │  creates Vikunja task + applies label
-        ▼
-  Vikunja API
-        │  Vikunja fires task.updated webhook
-        ▼
-  praetor adapter /webhooks/vikunja  ← existing flow from Phase 5
-        │
-        ▼
-  Hatchet → agent:research / agent:code / pipeline:research_code
+Vikunja webhook (label added)    ─┐
+                                   │
+POST /api/v1/dispatch (HTTP)      ─┤
+                                   ├──► common/dispatch.py:dispatch_agent()
+praetor-mcp tool (MCP)            ─┤        │
+  └─ used by: opencode,            │        └──► hatchet.event.push()
+              Claude Code,         │                    │
+              OpenHands            │                    ▼
+                                   │             agent:research
+OpenWebUI Tool (claw.amer.dev)   ─┘             agent:code
+                                                 pipeline:research_code
 ```
-
-The chat tool does **not** push Hatchet events directly. It creates a real Vikunja task with the appropriate label. The existing Phase 5 webhook pipeline fires automatically and dispatches the agent — no duplicate dispatch logic.
 
 ## What Gets Built
 
-### 1. Two New Endpoints on the Praetor Webhook Adapter
+### 1. `common/dispatch.py` — Shared Dispatch Function
 
-#### `POST /chat/dispatch`
-
-Creates a Vikunja task + applies labels → webhook fires → agent dispatched.
+Extract the routing logic from `webhooks/vikunja.py` into a single shared function:
 
 ```python
-class ChatDispatchRequest(BaseModel):
-    title: str
-    description: str = ""
-    task_type: Literal["research", "code", "pipeline"] = "research"
-    project_id: int = 21  # Mycroft project — default home for AI tasks
+from typing import Literal
+from hatchet_sdk import Hatchet
 
-class ChatDispatchResponse(BaseModel):
-    task_id: int
-    task_url: str
-    dispatched: list[str]  # e.g. ["agent:research"] or ["pipeline:research_code"]
+AgentType = Literal["research", "code", "pipeline"]
+
+EVENT_MAP: dict[AgentType, str] = {
+    "research": "agent:research",
+    "code":     "agent:code",
+    "pipeline": "pipeline:research_code",
+}
+
+
+def dispatch_agent(
+    hatchet: Hatchet,
+    task_id: int,
+    task_title: str,
+    task_description: str,
+    agent_type: AgentType,
+) -> list[str]:
+    """Push the appropriate Hatchet event(s). Returns list of event names pushed."""
+    event = EVENT_MAP[agent_type]
+    payload = {
+        "task_id": task_id,
+        "task_title": task_title,
+        "task_description": task_description,
+    }
+    hatchet.event.push(event, payload, additional_metadata={"source_task_id": str(task_id)})
+    return [event]
+```
+
+**`webhooks/vikunja.py` is updated** to call `dispatch_agent()` instead of inlining the `hatchet.event.push()` calls. No behaviour change — just deduplication. The label→event mapping stays in `common/dispatch.py`.
+
+### 2. `POST /api/v1/dispatch` — Direct Dispatch Endpoint
+
+New router at `webhooks/dispatch_api.py`, mounted on the existing FastAPI app.
+
+```
+POST /api/v1/dispatch
+Authorization: Bearer <PRAETOR_API_KEY>
+
+{
+  "title":       "Research Tailscale subnet routing",
+  "description": "Focus on exit nodes and ACL interaction.",
+  "type":        "research"   # research | code | pipeline
+}
+```
+
+Response:
+```json
+{
+  "task_id":   1718400000,
+  "event":     "agent:research",
+  "hatchet_url": "https://hatchet.amer.dev"
+}
 ```
 
 Implementation:
-1. Validate `X-Praetor-Chat-Key` header against `PRAETOR_CHAT_API_KEY` env var
-2. Create Vikunja task via `PUT /api/v1/projects/{project_id}/tasks`
-3. Apply label(s) via `PUT /api/v1/tasks/{task_id}/labels`
-   - `research` → label 14 (`ai-research`)
-   - `code` → label 11 (`ai-go`)
-   - `pipeline` → labels 14 + 11
-4. Return `{task_id, task_url: "https://todo.amer.dev/.../{task_id}", dispatched}`
+1. Validate `Authorization: Bearer` header against `PRAETOR_API_KEY` env var (stored in BWS, generate=true)
+2. Generate `task_id` as `int(time.time())` — no Vikunja dependency
+3. Call `common/dispatch.py:dispatch_agent()` — same code as the webhook path
+4. Return `{task_id, event, hatchet_url}`
 
-The Vikunja webhook fires within seconds of the label being applied (existing Phase 5 infra).
+No Vikunja task created. The agent is running. If the agent writes to Mem0 under `agent_id=task-{task_id}`, status can be retrieved later.
 
-#### `GET /chat/status/{task_id}`
+**Secret:** `PRAETOR_API_KEY` (generate=true) added to `praetor.toml` for the webhook-adapter component.
 
-Returns current status of a dispatched task.
+### 3. `GET /api/v1/status/{task_id}` — Status Endpoint
 
-```python
-class ChatStatusResponse(BaseModel):
-    task_id: int
-    task_url: str
-    vikunja_done: bool
-    vikunja_comment: str | None  # agent's output comment on the task
-    mem0_summary: str | None     # first Mem0 result from task namespace
+Polls the two places agents write output to:
+
+```json
+{
+  "task_id": 1718400000,
+  "done": true,
+  "mem0_summary": "Tailscale subnet routing works by ...",
+  "vikunja_task_id": null,
+  "vikunja_task_url": null
+}
 ```
 
-Implementation:
-1. Validate `X-Praetor-Chat-Key`
-2. `GET /api/v1/tasks/{task_id}` from Vikunja → `done`, `description`
-3. `GET /api/v1/tasks/{task_id}/comments` from Vikunja → latest agent comment
-4. `GET https://mem0.amer.dev/memories?agent_id=task-{task_id}` → first result
-5. Return combined status
+- `mem0_summary`: calls `GET https://mem0.amer.dev/memories?agent_id=task-{task_id}` — returns first result, or null if not yet written
+- `done`: true if mem0 has results (research/pipeline) or if a Vikunja comment exists (coder)
+- If the task was also created in Vikunja (optional path, see below), `vikunja_task_id` is set
 
-#### Secret: `PRAETOR_CHAT_API_KEY`
+### 4. Optional: Vikunja Task Side-Effect
 
-New secret in `praetor.toml` (generate=true). Added to webhook-adapter ExternalSecret and Deployment env. This is the only credential the OpenWebUI tool holds.
+Callers that want a tracked work item can pass `create_vikunja_task: true`:
 
-```toml
-[[secrets]]
-name        = "PRAETOR_CHAT_API_KEY"
-bws_key     = "praetor-chat-api-key"
-generate    = true
-components  = ["webhook-adapter"]
+```json
+{
+  "title": "Research Tailscale subnet routing",
+  "type":  "research",
+  "create_vikunja_task": true
+}
 ```
 
-### 2. OpenWebUI Tool: `praetor_dispatch`
+When set:
+1. Dispatch API creates a Vikunja task (POST to Vikunja API with `VIKUNJA_TOKEN`)
+2. The task ID from Vikunja becomes the `task_id` for Mem0 scoping
+3. The agent writes output as a Vikunja comment on that task (existing agent behaviour)
+4. Response includes `vikunja_task_url`
 
-A Python tool registered in OpenWebUI that exposes two functions to the LLM.
+When not set (default):
+- `task_id` is a synthetic timestamp — no Vikunja record
+- Output lives only in Mem0 and Langfuse
+
+This is the correct relationship: Vikunja is an optional output channel, not the trigger.
+
+### 5. `praetor-mcp` — MCP Server in `dean-mcp`
+
+New server alongside `infra-mcp/` and `bws-mcp/` in the `dean-mcp` repo. Wraps the dispatch API as MCP tools so any MCP-aware client can dispatch agents.
 
 ```python
-"""
-Tools for dispatching tasks to the Praetor AI agent platform.
-"""
-import httpx
-from pydantic import BaseModel
+# dean-mcp/praetor-mcp/server.py
+
+@mcp.tool()
+def dispatch_praetor_task(title: str, description: str, type: str) -> str:
+    """
+    Dispatch a Praetor agent task.
+    type: research | code | pipeline
+    For code/pipeline tasks, include 'repo: owner/name' in description.
+    Returns task_id and confirmation.
+    """
+    resp = httpx.post(
+        f"{PRAETOR_BASE}/api/v1/dispatch",
+        json={"title": title, "description": description, "type": type},
+        headers={"Authorization": f"Bearer {PRAETOR_API_KEY}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return f"Dispatched {data['event']} — task_id={data['task_id']}"
 
 
-class Valves(BaseModel):
-    PRAETOR_BASE_URL: str = "https://praetor.amer.dev"
-    PRAETOR_CHAT_KEY: str = ""  # set by admin — not shown to users
+@mcp.tool()
+def get_praetor_status(task_id: int) -> str:
+    """Check the status of a dispatched Praetor task."""
+    resp = httpx.get(
+        f"{PRAETOR_BASE}/api/v1/status/{task_id}",
+        headers={"Authorization": f"Bearer {PRAETOR_API_KEY}"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data["done"]:
+        return f"Done. Summary: {data['mem0_summary']}"
+    return f"Still running. Check back shortly or view at https://hatchet.amer.dev"
+```
 
+Deployed as a k3s service via app-factory, exposed at `https://praetor-mcp.amer.dev/mcp`.
 
+**Registration — same pattern as infra-mcp:**
+
+| Client | Config location | How registered |
+|--------|----------------|----------------|
+| Claude Code | `~/.claude.json` | stdio or HTTP transport |
+| opencode | `~/.config/opencode/opencode.json` | HTTP transport |
+| OpenHands | Agent profile config | HTTP transport |
+
+One MCP server registration. Every client that has it can dispatch agents.
+
+### 6. OpenWebUI Tool for claw.amer.dev
+
+A Python tool registered in OpenWebUI's tool library — the same dispatch API, no new protocol.
+
+```python
 class Tools:
-    def __init__(self):
-        self.valves = Valves()
+    class Valves(BaseModel):
+        PRAETOR_BASE_URL: str = "https://praetor.amer.dev"
+        PRAETOR_API_KEY: str  # set by admin; not visible to users
 
-    def dispatch_task(
-        self,
-        title: str,
-        description: str,
-        task_type: str,
-    ) -> str:
+    def dispatch_task(self, title: str, description: str, task_type: str) -> str:
         """
-        Dispatch a task to the Praetor agent platform.
-
-        Use this when the user asks to:
-        - Research a topic → task_type="research"
-        - Implement code or open a PR → task_type="code" (description MUST include "repo: owner/name")
-        - Both research then implement → task_type="pipeline"
-
-        :param title: Short task title (what to do)
-        :param description: Full task description. For code tasks, include "repo: owner/name".
-        :param task_type: One of: research, code, pipeline
-        :return: Confirmation with task ID and link
+        Dispatch a Praetor agent task.
+        Use for: research (task_type=research), coding (task_type=code, add 'repo: owner/name' to description), or both (task_type=pipeline).
         """
         resp = httpx.post(
-            f"{self.valves.PRAETOR_BASE_URL}/chat/dispatch",
-            json={"title": title, "description": description, "task_type": task_type},
-            headers={"X-Praetor-Chat-Key": self.valves.PRAETOR_CHAT_KEY},
+            f"{self.valves.PRAETOR_BASE_URL}/api/v1/dispatch",
+            json={"title": title, "description": description, "type": task_type},
+            headers={"Authorization": f"Bearer {self.valves.PRAETOR_API_KEY}"},
             timeout=15,
         )
         resp.raise_for_status()
         data = resp.json()
-        return (
-            f"Task #{data['task_id']} created and dispatched ({', '.join(data['dispatched'])}).\n"
-            f"Track progress: {data['task_url']}"
-        )
+        return f"Task {data['task_id']} dispatched ({data['event']}). Ask me to check status in a few minutes."
 
     def get_task_status(self, task_id: int) -> str:
-        """
-        Check the status of a previously dispatched Praetor task.
-
-        :param task_id: The numeric task ID returned by dispatch_task
-        :return: Current status including agent output if available
-        """
+        """Check the status of a previously dispatched task."""
         resp = httpx.get(
-            f"{self.valves.PRAETOR_BASE_URL}/chat/status/{task_id}",
-            headers={"X-Praetor-Chat-Key": self.valves.PRAETOR_CHAT_KEY},
+            f"{self.valves.PRAETOR_BASE_URL}/api/v1/status/{task_id}",
+            headers={"Authorization": f"Bearer {self.valves.PRAETOR_API_KEY}"},
             timeout=10,
         )
         resp.raise_for_status()
         data = resp.json()
-        if data["vikunja_done"]:
-            summary = data.get("vikunja_comment") or data.get("mem0_summary") or "Task completed."
-            return f"Task #{task_id} is done.\n\nOutput: {summary}\n\nFull task: {data['task_url']}"
-        else:
-            return f"Task #{task_id} is still running. Full task: {data['task_url']}"
+        if data["done"]:
+            return f"Done. {data['mem0_summary']}"
+        return "Still running."
 ```
 
-Tool is registered in OpenWebUI via the admin API:
-```bash
-curl -sf -X POST https://claw.amer.dev/api/v1/tools/ \
-  -H "Authorization: Bearer $OPENWEBUI_ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"id\": \"praetor_dispatch\", \"name\": \"Praetor Dispatch\", \"content\": $(cat tool.py | jq -Rs .), ...}"
-```
+Tool is registered once via `scripts/register_owui_tool.py` (calls OpenWebUI admin API). The `PRAETOR_API_KEY` valve is set in the OpenWebUI admin panel — it is the same key as the MCP tool uses, stored in BWS under `praetor-api-key`.
 
-A one-time registration script lives at `scripts/register_owui_tool.py`. After registration, the tool is available to all users (or can be restricted by model/workspace in OpenWebUI).
+## Interface Matrix
 
-The `PRAETOR_CHAT_KEY` valve is set once via OpenWebUI admin UI (Settings → Tools → praetor_dispatch → Set Valve). It never leaves the OpenWebUI pod.
+| Interface | Mechanism | Requires Vikunja? | Side-effect Vikunja task? |
+|-----------|-----------|------------------|--------------------------|
+| Vikunja label | Webhook → dispatch_agent() | Yes (it IS Vikunja) | Yes (already exists) |
+| claw.amer.dev | OpenWebUI Tool → /api/v1/dispatch | No | Optional |
+| opencode | praetor-mcp → /api/v1/dispatch | No | Optional |
+| Claude Code | praetor-mcp → /api/v1/dispatch | No | Optional |
+| OpenHands | praetor-mcp → /api/v1/dispatch | No | Optional |
+| Direct HTTP | curl /api/v1/dispatch | No | Optional |
 
-### 3. System Prompt Addition in Langfuse
+## Deployment Changes
 
-The `claw-system` prompt (new Langfuse prompt, or added to `coder-system` / `research-system`) should include guidance for when to use the dispatch tool:
+**`praetor` repo:**
+- `common/dispatch.py` — new shared dispatch function
+- `webhooks/vikunja.py` — refactored to use `common/dispatch.py` (no behaviour change)
+- `webhooks/dispatch_api.py` — new router (`/api/v1/dispatch`, `/api/v1/status/{task_id}`)
+- `webhooks/app.py` — mount new router
+- `praetor.toml` — add `PRAETOR_API_KEY` secret for webhook-adapter
+- `scripts/register_owui_tool.py` — one-time tool registration
 
-```
-You have access to the Praetor agent platform via the dispatch_task tool.
-Use it when the user asks you to:
-- Research a topic in depth (task_type="research")
-- Write code, open a PR, or implement something (task_type="code", include "repo: owner/name" in description)
-- Both research AND implement (task_type="pipeline")
+**`dean-mcp` repo:**
+- `praetor-mcp/` — new FastMCP server
 
-Do NOT use dispatch_task for:
-- Quick questions you can answer directly
-- Topics that don't require agent-level work
-- Follow-up questions about an already-dispatched task (use get_task_status instead)
-```
+**`k3s-dean-gitops`:**
+- New app entry for `praetor-mcp` (via `provision_app`)
+- ExternalSecret for webhook-adapter updated with `PRAETOR_API_KEY`
 
-This prompt is registered in Langfuse as `openwebui-system` and assigned to the `claw.amer.dev` connection in OpenWebUI (System Prompt field under the model settings). Changing when the LLM dispatches is a Langfuse edit, not a code change.
-
-### 4. Deployment Changes
-
-**praetor webhook-adapter** — two new endpoints only. No new Deployment or Service; the existing webhook adapter pod handles them. `provision_app("praetor")` adds the new secret and redeploys.
-
-**k3s-dean-gitops** — ExternalSecret for webhook-adapter updated to include `PRAETOR_CHAT_API_KEY`. Deployment env updated.
-
-**No new services, no new ingresses, no new DNS entries.** The existing `praetor.amer.dev` ingress covers `/chat/*`.
-
-## Conversation Examples
-
-**Research:**
-```
-User: Can you research the current best practices for k3s HA setups?
-LLM: [calls dispatch_task(title="Research k3s HA best practices", task_type="research")]
-LLM: Task #147 created. The research agent is running — check back in a few minutes or ask me to get the status.
-```
-
-**Code:**
-```
-User: Add a /readyz endpoint to the praetor webhook adapter
-LLM: [calls dispatch_task(title="Add /readyz endpoint to webhook adapter", description="repo: amerenda/praetor", task_type="code")]
-LLM: Task #148 dispatched to the coder agent on amerenda/praetor. You'll get a PR link when it's done: https://todo.amer.dev/.../148
-```
-
-**Status check:**
-```
-User: What happened with task 147?
-LLM: [calls get_task_status(task_id=147)]
-LLM: Task #147 is done. Here's the summary: [agent output from Vikunja comment]
-```
-
-**Passthrough (no dispatch):**
-```
-User: What's the difference between Qdrant and pgvector?
-LLM: [does not call dispatch_task — answers directly]
-```
+**`~/.claude.json` / `~/.config/opencode/opencode.json`:**
+- Register `praetor-mcp` HTTP transport
 
 ## Ready Conditions for Phase 14
 
-1. `POST /chat/dispatch` with valid key + `task_type=research` → Vikunja task created, labeled `ai-research`, visible at `todo.amer.dev`
-2. Within 60s of dispatch: praetor adapter `/webhooks/vikunja` fires for the new task, Hatchet UI shows `agent:research` run
-3. `GET /chat/status/{task_id}` after research completes → `vikunja_done: true`, `mem0_summary` populated
-4. `POST /chat/dispatch` with invalid key → 401
-5. Chat session at `claw.amer.dev`: ask "research Tailscale subnet routing" → LLM calls `dispatch_task` → Vikunja task appears → agent runs
-6. Chat session: "what's the status of task 150?" → LLM calls `get_task_status(150)` → returns agent output
-7. General question ("explain BGP") → LLM answers directly, no `dispatch_task` call
-8. Code dispatch: task description auto-includes `repo: amerenda/praetor` → `agent:code` dispatched, PR opened by `dean-coder[bot]`
-9. `scripts/register_owui_tool.py` runs idempotently — re-running it updates the tool definition without creating duplicates
-10. `PRAETOR_CHAT_KEY` valve set in OpenWebUI admin — non-admin users cannot read it
+1. `curl -sf -H "Authorization: Bearer $PRAETOR_API_KEY" -X POST https://praetor.amer.dev/api/v1/dispatch -d '{"title":"E2E test","type":"research"}' | jq .` → returns `{task_id, event: "agent:research"}`
+2. Research agent completes → `GET /api/v1/status/{task_id}` returns `{done: true, mem0_summary: "..."}`
+3. `POST /api/v1/dispatch` with bad key → 401
+4. Vikunja webhook path unchanged: labeling a task still dispatches correctly (refactor is non-breaking)
+5. `dispatch_praetor_task` MCP tool callable from Claude Code session — dispatches agent, run visible in Hatchet UI
+6. `dispatch_praetor_task` callable from an opencode session — same result
+7. Chat session at claw.amer.dev: "research subnet routing in Tailscale" → LLM calls `dispatch_task` → Hatchet run appears, no Vikunja task created unless requested
+8. `create_vikunja_task: true` path: task appears in Vikunja with ai-research label, agent writes output as comment
+9. All existing E2E and smoke tests still pass (webhook path untouched behaviourally)
