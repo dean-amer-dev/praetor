@@ -13,9 +13,10 @@
 | 8 | Multi-Agent Pipeline | ✅ Complete | Dual-label tasks → pipeline:research_code DAG; pipeline-worker deployed |
 | 9 | Observability + Prompts | 🔄 In progress | Langfuse deployed (k3s-dean-gitops #761); agent SDK wired; awaiting first login to create prompts + API keys in BWS |
 | 10 | MCP Gateway | ⬜ Not started | |
-| 11 | Scaffold Worker | ⬜ Not started | |
+| 11 | Scaffold Worker | ⬜ Not started | Requires Phase 14 (chat dispatch) as pre-condition |
 | 12 | Control Plane UI | ⏭ Skipped | Marked manual — do not implement |
 | 13 | Infra Stabilization | ✅ Complete | 13a: mem0 → RPi; 13b: qa+reviewer images built; 13c: prometheus on murderbot; 13d: PR #747 merged |
+| 14 | Conversational Dispatch | ⬜ Not started | claw.amer.dev → Praetor; /chat/dispatch endpoint + OpenWebUI Tool; pre-condition for Phase 11 |
 
 ## OpenWebUI (claw.amer.dev)
 
