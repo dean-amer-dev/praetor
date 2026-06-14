@@ -11,6 +11,18 @@ env:
   GITOPS_REPO: amerenda/k3s-dean-gitops
 
 jobs:
+  test:
+    runs-on: arc-runner-praetor
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio
+      - name: Run unit and integration tests
+        run: pytest tests/unit tests/integration -v
+
   set-tag:
     if: github.event_name != 'pull_request'
     runs-on: arc-runner-praetor
@@ -22,7 +34,7 @@ jobs:
         run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
   build-amd64:
-    needs: [set-tag]
+    needs: [set-tag, test]
     if: github.event_name != 'pull_request'
     runs-on: arc-runner-praetor
     strategy:
@@ -62,7 +74,7 @@ jobs:
           docker push "${{ matrix.image }}:${{ needs.set-tag.outputs.tag }}-amd64"
 
   build-arm64:
-    needs: [set-tag]
+    needs: [set-tag, test]
     if: github.event_name != 'pull_request'
     runs-on: [self-hosted, mac-mini]
     steps:

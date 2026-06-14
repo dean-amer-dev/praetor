@@ -289,6 +289,16 @@ class TestPhase5PraetorAdapter:
 # Phase 9: Langfuse (may not be deployed yet)
 # ---------------------------------------------------------------------------
 
+LANGFUSE_PUBLIC_KEY = (
+    os.environ.get("LANGFUSE_PUBLIC_KEY")
+    or _k8s_secret("praetor", "praetor-research-secrets", "langfuse-public-key")
+)
+LANGFUSE_SECRET_KEY = (
+    os.environ.get("LANGFUSE_SECRET_KEY")
+    or _k8s_secret("praetor", "praetor-research-secrets", "langfuse-secret-key")
+)
+
+
 class TestPhase9Langfuse:
     def test_langfuse_ui_accessible(self):
         try:
@@ -296,3 +306,87 @@ class TestPhase9Langfuse:
             assert resp.status_code == 200
         except httpx.ConnectError:
             pytest.skip("langfuse.amer.dev DNS not resolving — Langfuse not yet deployed")
+
+    def test_langfuse_api_reachable(self):
+        if not LANGFUSE_PUBLIC_KEY or not LANGFUSE_SECRET_KEY:
+            pytest.skip("Langfuse keys not in praetor-research-secrets")
+        resp = httpx.get(
+            "https://langfuse.amer.dev/api/public/projects",
+            auth=(LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY),
+            timeout=10,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data.get("data", [])) > 0, "no Langfuse projects found — first-login setup not completed"
+
+    def test_coder_system_prompt_exists(self):
+        if not LANGFUSE_PUBLIC_KEY or not LANGFUSE_SECRET_KEY:
+            pytest.skip("Langfuse keys not in praetor-research-secrets")
+        resp = httpx.get(
+            "https://langfuse.amer.dev/api/public/prompts",
+            params={"name": "coder-system", "label": "production"},
+            auth=(LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY),
+            timeout=10,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data.get("data", [])) > 0, \
+            "coder-system prompt not found in Langfuse — create it in the UI and label it 'production'"
+
+    def test_research_system_prompt_exists(self):
+        if not LANGFUSE_PUBLIC_KEY or not LANGFUSE_SECRET_KEY:
+            pytest.skip("Langfuse keys not in praetor-research-secrets")
+        resp = httpx.get(
+            "https://langfuse.amer.dev/api/public/prompts",
+            params={"name": "research-system", "label": "production"},
+            auth=(LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY),
+            timeout=10,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data.get("data", [])) > 0, \
+            "research-system prompt not found in Langfuse — create it in the UI and label it 'production'"
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: LiteLLM MCP Gateway (not started yet — tests skip until deployed)
+# ---------------------------------------------------------------------------
+
+LITELLM_API_KEY = (
+    os.environ.get("LITELLM_API_KEY")
+    or _k8s_secret("litellm", "litellm-secrets", "master-key")
+)
+
+
+class TestPhase10MCPGateway:
+    def test_mcp_tools_endpoint_exists(self):
+        if not LITELLM_API_KEY:
+            pytest.skip("LITELLM_API_KEY not available")
+        try:
+            resp = httpx.get(
+                "https://litellm.amer.dev/mcp/tools",
+                headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
+                timeout=10,
+            )
+        except httpx.ConnectError:
+            pytest.skip("MCP gateway endpoint not reachable — Phase 10 not yet deployed")
+        assert resp.status_code == 200, f"MCP tools endpoint returned {resp.status_code}"
+        data = resp.json()
+        assert isinstance(data, list) and len(data) > 0, f"expected non-empty tool list, got: {data}"
+
+    def test_mcp_tools_include_web_search(self):
+        if not LITELLM_API_KEY:
+            pytest.skip("LITELLM_API_KEY not available")
+        try:
+            resp = httpx.get(
+                "https://litellm.amer.dev/mcp/tools",
+                headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
+                timeout=10,
+            )
+        except httpx.ConnectError:
+            pytest.skip("MCP gateway not reachable — Phase 10 not yet deployed")
+        if resp.status_code != 200:
+            pytest.skip("MCP gateway not yet deployed")
+        tools = [t.get("name") for t in resp.json()]
+        assert any("search" in t.lower() for t in tools), \
+            f"searxng web_search tool not in gateway tool list: {tools}"
