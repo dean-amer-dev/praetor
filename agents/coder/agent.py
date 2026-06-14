@@ -9,10 +9,11 @@ from pydantic_ai.models.openai import OpenAIModel
 
 from common.memory_tools import add_memory, search_memory
 from common.github_app import get_installation_token
+from common.langfuse_tools import get_system_prompt
 
 SCRATCH_DIR = os.environ.get("SCRATCH_DIR", "/tmp/scratch")
 
-SYSTEM_PROMPT = """You are a coder agent. Given a task title, description, and repo reference, you:
+_CODER_SYSTEM_PROMPT_FALLBACK = """You are a coder agent. Given a task title, description, and repo reference, you:
 1. Retrieve a GitHub installation token via get_github_token
 2. Clone the repo to SCRATCH_DIR using: git clone https://x-access-token:{TOKEN}@github.com/{repo}.git
 3. Create a branch named amerenda-coder/task-{task_id}
@@ -107,7 +108,7 @@ def build_agent() -> Agent:
     )
     return Agent(
         model=model,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=get_system_prompt("coder-system", fallback=_CODER_SYSTEM_PROMPT_FALLBACK),
         tools=[
             read_file,
             write_file,

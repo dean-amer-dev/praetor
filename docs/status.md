@@ -11,7 +11,7 @@
 | 6 | Coder Agent | ✅ Complete | Vikunja ai-go label → coder worker, PRs via dean-coder[bot] |
 | 7 | PR Reviewer + QA | 🟡 Verify | Images built, webhook live at pubhooks.amer.dev — confirm end-to-end with test PR |
 | 8 | Multi-Agent Pipeline | ✅ Complete | Dual-label tasks → pipeline:research_code DAG; pipeline-worker deployed |
-| 9 | Observability + Prompts | ⬜ Not started | |
+| 9 | Observability + Prompts | 🔄 In progress | Langfuse deployed (k3s-dean-gitops #761); agent SDK wired; awaiting first login to create prompts + API keys in BWS |
 | 10 | MCP Gateway | ⬜ Not started | |
 | 11 | Scaffold Worker | ⬜ Not started | |
 | 12 | Control Plane UI | ⏭ Skipped | Marked manual — do not implement |

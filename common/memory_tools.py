@@ -1,30 +1,55 @@
-"""Shared Mem0 tools registered on every PydanticAI agent."""
+"""Shared Mem0 tools registered on every PydanticAI agent.
+
+Uses direct HTTP calls with x-api-key auth against the self-hosted Mem0 server.
+The MemoryClient SDK sends Authorization: Token which the self-hosted server rejects.
+"""
 import os
-from mem0 import MemoryClient
+import httpx
 
-_client: MemoryClient | None = None
+_client: httpx.Client | None = None
 
 
-def _get_client() -> MemoryClient:
+def _get_client() -> httpx.Client:
     global _client
     if _client is None:
-        _client = MemoryClient(
-            host=os.environ["MEM0_BASE_URL"],
-            api_key=os.environ["MEM0_API_KEY"],
+        api_key = os.environ["MEM0_API_KEY"]
+        base_url = os.environ["MEM0_BASE_URL"].rstrip("/")
+        _client = httpx.Client(
+            base_url=base_url,
+            headers={"x-api-key": api_key},
+            timeout=30,
         )
     return _client
 
 
 def add_memory(content: str, agent_id: str) -> str:
-    _get_client().add(content, agent_id=agent_id)
+    client = _get_client()
+    resp = client.post(
+        "/memories",
+        json={
+            "messages": [{"role": "user", "content": content}],
+            "agent_id": agent_id,
+            "infer": False,
+        },
+    )
+    resp.raise_for_status()
     return "stored"
 
 
 def search_memory(query: str, agent_id: str) -> list[str]:
-    results = _get_client().search(query, agent_id=agent_id)
+    client = _get_client()
+    resp = client.post(
+        "/search",
+        json={"query": query, "agent_id": agent_id},
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
     return [r["memory"] for r in results]
 
 
 def get_all_memories(agent_id: str) -> list[str]:
-    results = _get_client().get_all(agent_id=agent_id)
+    client = _get_client()
+    resp = client.get("/memories", params={"agent_id": agent_id})
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
     return [r["memory"] for r in results]

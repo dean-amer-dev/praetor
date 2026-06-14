@@ -7,6 +7,7 @@ from hatchet_sdk.types.concurrency import ConcurrencyExpression, ConcurrencyLimi
 from pydantic import BaseModel
 
 from .agent import build_agent, update_vikunja_task
+from common.langfuse_tools import langfuse_context, observe
 
 _agent = None
 
@@ -24,7 +25,13 @@ class CoderInput(BaseModel):
     task_description: str = ""
 
 
+@observe()
 async def _run_coder(input: CoderInput, context: Context) -> dict:
+    langfuse_context.update_current_trace(
+        name=f"coder-task-{input.task_id}",
+        input=input.model_dump(),
+        tags=["coder", f"task-{input.task_id}"],
+    )
     repo_match = re.search(r"repo:\s*(\S+)", input.task_description)
     if not repo_match:
         err = "no repo reference found in task description — add 'repo: owner/name' to the description"
@@ -41,6 +48,7 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
     )
     agent = _get_agent()
     result = await agent.run(prompt)
+    langfuse_context.update_current_trace(output=result.data)
     return {"result": result.data, "task_id": input.task_id}
 
 

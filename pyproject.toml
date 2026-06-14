@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires FastAPI TestClient (no live cluster)",
+    "smoke: requires live cluster services",
+    "e2e: slow, mutates live state",
+]

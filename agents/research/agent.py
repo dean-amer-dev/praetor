@@ -5,8 +5,9 @@ from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
 
 from common.memory_tools import add_memory, search_memory
+from common.langfuse_tools import get_system_prompt
 
-SYSTEM_PROMPT = """You are a research agent. Given a task title and description, you:
+_RESEARCH_SYSTEM_PROMPT_FALLBACK = """You are a research agent. Given a task title and description, you:
 1. Search the web for relevant, current information on the topic
 2. Synthesize findings into a concise, actionable summary
 3. Store key insights in memory under the task namespace
@@ -69,9 +70,8 @@ async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> 
 
 def build_agent() -> Agent:
     model = _build_model()
-    agent = Agent(
+    return Agent(
         model=model,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=get_system_prompt("research-system", fallback=_RESEARCH_SYSTEM_PROMPT_FALLBACK),
         tools=[web_search, add_memory, search_memory, update_vikunja_task],
     )
-    return agent

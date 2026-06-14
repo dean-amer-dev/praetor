@@ -6,6 +6,7 @@ from hatchet_sdk.types.concurrency import ConcurrencyExpression, ConcurrencyLimi
 from pydantic import BaseModel
 
 from .agent import build_agent
+from common.langfuse_tools import langfuse_context, observe
 
 _agent = None
 
@@ -23,7 +24,13 @@ class ResearchInput(BaseModel):
     task_description: str = ""
 
 
+@observe()
 async def _run_research(input: ResearchInput, context: Context) -> dict:
+    langfuse_context.update_current_trace(
+        name=f"research-task-{input.task_id}",
+        input=input.model_dump(),
+        tags=["research", f"task-{input.task_id}"],
+    )
     prompt = f"Task #{input.task_id}: {input.task_title}"
     if input.task_description:
         prompt += f"\n\nDescription: {input.task_description}"
@@ -34,6 +41,7 @@ async def _run_research(input: ResearchInput, context: Context) -> dict:
     )
     agent = _get_agent()
     result = await agent.run(prompt)
+    langfuse_context.update_current_trace(output=result.data)
     return {"summary": result.data, "task_id": input.task_id}
 
 
