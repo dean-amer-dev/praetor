@@ -5,6 +5,7 @@ from pathlib import Path
 
 import httpx
 from pydantic_ai import Agent
+from pydantic_ai.mcp import MCPServerHTTP
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -106,6 +107,18 @@ async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> 
     return "task updated"
 
 
+def _build_mcp_server() -> MCPServerHTTP:
+    mcp_url = os.environ.get(
+        "LITELLM_MCP_URL",
+        os.environ["LITELLM_BASE_URL"].replace("/v1", "/mcp"),
+    )
+    return MCPServerHTTP(
+        url=mcp_url,
+        headers={"Authorization": f"Bearer {os.environ['LITELLM_API_KEY']}"},
+        read_timeout=60,
+    )
+
+
 def build_agent() -> Agent:
     model = OpenAIModel(
         model_name=os.environ.get("LLM_MODEL", "coder"),
@@ -117,6 +130,7 @@ def build_agent() -> Agent:
     return Agent(
         model=model,
         system_prompt=get_system_prompt("coder-system", fallback=_CODER_SYSTEM_PROMPT_FALLBACK),
+        mcp_servers=[_build_mcp_server()],
         tools=[
             read_file,
             write_file,
