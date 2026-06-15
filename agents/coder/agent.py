@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
 from common.memory_tools import add_memory, search_memory
 from common.github_app import get_installation_token
@@ -103,8 +104,10 @@ async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> 
 def build_agent() -> Agent:
     model = OpenAIModel(
         model_name=os.environ.get("LLM_MODEL", "coder"),
-        base_url=os.environ["LITELLM_BASE_URL"],
-        api_key=os.environ["LITELLM_API_KEY"],
+        provider=OpenAIProvider(
+            base_url=os.environ["LITELLM_BASE_URL"],
+            api_key=os.environ["LITELLM_API_KEY"],
+        ),
     )
     return Agent(
         model=model,

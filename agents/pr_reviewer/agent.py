@@ -4,6 +4,7 @@ import os
 import httpx
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
 from common.github_app import get_reviewer_installation_token
 
@@ -74,8 +75,10 @@ def post_review_comment(repo: str, pr_number: str, body: str, token: str) -> str
 def build_agent() -> Agent:
     model = OpenAIModel(
         model_name=os.environ.get("LLM_MODEL", "qwen3-35b"),
-        base_url=os.environ["LITELLM_BASE_URL"],
-        api_key=os.environ["LITELLM_API_KEY"],
+        provider=OpenAIProvider(
+            base_url=os.environ["LITELLM_BASE_URL"],
+            api_key=os.environ["LITELLM_API_KEY"],
+        ),
     )
     return Agent(
         model=model,
