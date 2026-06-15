@@ -3,6 +3,7 @@ import os
 import httpx
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
 from common.memory_tools import add_memory, search_memory
 from common.langfuse_tools import get_system_prompt
@@ -20,8 +21,10 @@ After completing research, call update_vikunja_task to mark the task done with y
 def _build_model() -> OpenAIModel:
     return OpenAIModel(
         model_name=os.environ.get("LLM_MODEL", "qwen3-35b"),
-        base_url=os.environ["LITELLM_BASE_URL"],
-        api_key=os.environ["LITELLM_API_KEY"],
+        provider=OpenAIProvider(
+            base_url=os.environ["LITELLM_BASE_URL"],
+            api_key=os.environ["LITELLM_API_KEY"],
+        ),
     )
 
 

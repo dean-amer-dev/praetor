@@ -4,6 +4,7 @@ import os
 import httpx
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
 SYSTEM_PROMPT = """You are a QA agent. Given a staging deployment URL, you:
 1. Call http_check(url) to verify the URL returns 2xx
@@ -53,8 +54,10 @@ def post_qa_result(repo: str, pr_number: int | None, summary: str, passed: bool)
 def build_agent() -> Agent:
     model = OpenAIModel(
         model_name=os.environ.get("LLM_MODEL", "qwen3-35b"),
-        base_url=os.environ["LITELLM_BASE_URL"],
-        api_key=os.environ["LITELLM_API_KEY"],
+        provider=OpenAIProvider(
+            base_url=os.environ["LITELLM_BASE_URL"],
+            api_key=os.environ["LITELLM_API_KEY"],
+        ),
     )
     return Agent(
         model=model,
