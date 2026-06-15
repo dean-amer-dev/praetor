@@ -11,18 +11,14 @@ _ENABLED = all(
 )
 
 if _ENABLED:
-    from langfuse import Langfuse, observe
+    from langfuse import Langfuse
+    from langfuse.decorators import langfuse_context, observe  # type: ignore[assignment]
 
     _client = Langfuse(
         host=os.environ["LANGFUSE_HOST"],
         public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
         secret_key=os.environ["LANGFUSE_SECRET_KEY"],
     )
-
-    class _LangfuseContext:
-        def update_current_trace(self, **kwargs): ...
-
-    langfuse_context = _LangfuseContext()  # type: ignore[assignment]
 
 else:
     import functools
