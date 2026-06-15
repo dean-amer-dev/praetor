@@ -10,7 +10,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from common.memory_tools import add_memory, search_memory
 from common.github_app import get_installation_token
-from common.langfuse_tools import get_system_prompt
+from common.langfuse_tools import get_system_prompt, observe
 
 SCRATCH_DIR = os.environ.get("SCRATCH_DIR", "/tmp/scratch")
 
@@ -40,12 +40,14 @@ def _scratch(path: str) -> str:
     return str(resolved)
 
 
+@observe()
 def read_file(path: str) -> str:
     """Read a file relative to SCRATCH_DIR."""
     full = _scratch(path)
     return Path(full).read_text(errors="replace")
 
 
+@observe()
 def write_file(path: str, content: str) -> str:
     """Write a file relative to SCRATCH_DIR, creating parent dirs as needed."""
     full = _scratch(path)
@@ -54,6 +56,7 @@ def write_file(path: str, content: str) -> str:
     return f"wrote {path}"
 
 
+@observe()
 def run_shell(cmd: str) -> str:
     """Run a shell command with cwd=SCRATCH_DIR. Returns stdout+stderr."""
     if ".." in cmd and ("/" in cmd or "\\" in cmd):
@@ -72,11 +75,13 @@ def run_shell(cmd: str) -> str:
     return output if output else f"(exit {result.returncode})"
 
 
+@observe()
 def get_github_token() -> str:
     """Retrieve a short-lived GitHub App installation token for API calls."""
     return get_installation_token()
 
 
+@observe()
 async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> str:
     """Update a Vikunja task: post a comment and optionally mark it done."""
     base = os.environ.get("VIKUNJA_BASE_URL", "https://todo.amer.dev")
