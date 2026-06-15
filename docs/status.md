@@ -11,8 +11,8 @@
 | 6 | Coder Agent | ✅ Complete | Vikunja ai-go label → coder worker, PRs via dean-coder[bot] |
 | 7 | PR Reviewer + QA | 🟡 Verify | Images built, webhook live at pubhooks.amer.dev — confirm end-to-end with test PR |
 | 8 | Multi-Agent Pipeline | ✅ Complete | Dual-label tasks → pipeline:research_code DAG; pipeline-worker deployed |
-| 9 | Observability + Prompts | 🔄 In progress | Langfuse deployed (k3s-dean-gitops #761); agent SDK wired; awaiting first login to create prompts + API keys in BWS |
-| 10 | MCP Gateway | ⬜ Not started | |
+| 9 | Observability + Prompts | ✅ Complete | Langfuse deployed; @observe() on all tools; eval scores wired; coder-system v4 prompt live; real Hatchet run traced with tool call spans (trace 7c8cb711) |
+| 10 | MCP Gateway | 🔄 In progress | mcp-searxng deployed; LiteLLM mcp_servers configured; agents wired to gateway |
 | 11 | Scaffold Worker | ⬜ Not started | Requires Phase 14 (chat dispatch) as pre-condition |
 | 12 | Control Plane UI | ⏭ Skipped | Marked manual — do not implement |
 | 13 | Infra Stabilization | ✅ Complete | 13a: mem0 → RPi; 13b: qa+reviewer images built; 13c: prometheus on murderbot; 13d: PR #747 merged |

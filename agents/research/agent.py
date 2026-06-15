@@ -1,7 +1,8 @@
-"""PydanticAI research agent with web search, memory, and Vikunja integration."""
+"""PydanticAI research agent with web search via MCP gateway, memory, and Vikunja integration."""
 import os
 import httpx
 from pydantic_ai import Agent
+from pydantic_ai.mcp import MCPServerHTTP
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -28,23 +29,16 @@ def _build_model() -> OpenAIModel:
     )
 
 
-async def web_search(query: str) -> str:
-    """Search the web using SearXNG. Returns JSON with results."""
-    url = os.environ.get("SEARXNG_URL", "https://searxng.amer.dev")
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(
-            f"{url}/search",
-            params={"q": query, "format": "json", "engines": "google,bing,duckduckgo"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    results = data.get("results", [])[:5]
-    if not results:
-        return "No results found."
-    lines = []
-    for r in results:
-        lines.append(f"- [{r.get('title','')}]({r.get('url','')}) — {r.get('content','')[:200]}")
-    return "\n".join(lines)
+def _build_mcp_server() -> MCPServerHTTP:
+    mcp_url = os.environ.get(
+        "LITELLM_MCP_URL",
+        os.environ["LITELLM_BASE_URL"].replace("/v1", "/mcp"),
+    )
+    return MCPServerHTTP(
+        url=mcp_url,
+        headers={"Authorization": f"Bearer {os.environ['LITELLM_API_KEY']}"},
+        read_timeout=60,
+    )
 
 
 async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> str:
@@ -76,5 +70,6 @@ def build_agent() -> Agent:
     return Agent(
         model=model,
         system_prompt=get_system_prompt("research-system", fallback=_RESEARCH_SYSTEM_PROMPT_FALLBACK),
-        tools=[web_search, add_memory, search_memory, update_vikunja_task],
+        mcp_servers=[_build_mcp_server()],
+        tools=[add_memory, search_memory, update_vikunja_task],
     )
