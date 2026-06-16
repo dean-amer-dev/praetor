@@ -62,7 +62,7 @@ def main() -> None:
         ),
     )(_run_research)
 
-    worker = hatchet.worker("research-worker", workflows=[run_research])
+    worker = hatchet.worker("research-worker", workflows=[run_research], slots=1)
     worker.start()
 
 
