@@ -83,7 +83,7 @@ def main() -> None:
         retries=0,
     )(_run_benchmark)
 
-    worker = hatchet.worker("benchmark-worker", workflows=[run_benchmark])
+    worker = hatchet.worker("benchmark-worker", workflows=[run_benchmark], slots=1)
     worker.start()
 
 
