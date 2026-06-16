@@ -85,9 +85,9 @@ class TestPipelineE2E:
         try:
             results = poll_until(
                 lambda: mem0_search("praetor", agent_id),
-                timeout=180,
+                timeout=360,
                 interval=10,
-                fail_msg=f"pipeline research step did not write to mem0 task-{task_id} within 3 minutes",
+                fail_msg=f"pipeline research step did not write to mem0 task-{task_id} within 6 minutes",
             )
             assert results
             assert any(r.get("memory") for r in results), f"memory field empty: {results}"

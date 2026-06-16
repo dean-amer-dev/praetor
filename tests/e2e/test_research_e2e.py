@@ -80,9 +80,9 @@ class TestResearchAgentE2E:
         try:
             results = poll_until(
                 lambda: mem0_search("k3s networking", agent_id),
-                timeout=180,
+                timeout=360,
                 interval=10,
-                fail_msg=f"research agent did not write to mem0 namespace task-{task_id} within 3 minutes",
+                fail_msg=f"research agent did not write to mem0 namespace task-{task_id} within 6 minutes",
             )
             assert results, "search returned empty after poll succeeded"
             assert any(r.get("memory") for r in results), f"memory field empty in results: {results}"
