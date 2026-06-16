@@ -59,6 +59,9 @@ jobs:
           - component: reviewer
             image: amerenda/praetor-reviewer
             dockerfile: Dockerfile.reviewer-worker
+          - component: benchmark
+            image: amerenda/praetor-benchmark
+            dockerfile: Dockerfile.benchmark-worker
     steps:
       - uses: actions/checkout@v6
 
@@ -96,7 +99,8 @@ jobs:
             "research:Dockerfile.research-worker:amerenda/praetor-research" \
             "webhook:Dockerfile.webhook-adapter:amerenda/praetor-webhook" \
             "qa:Dockerfile.qa-worker:amerenda/praetor-qa" \
-            "reviewer:Dockerfile.reviewer-worker:amerenda/praetor-reviewer"; do
+            "reviewer:Dockerfile.reviewer-worker:amerenda/praetor-reviewer" \
+            "benchmark:Dockerfile.benchmark-worker:amerenda/praetor-benchmark"; do
             COMPONENT=$(echo "$entry" | cut -d: -f1)
             DOCKERFILE=$(echo "$entry" | cut -d: -f2)
             IMAGE=$(echo "$entry" | cut -d: -f3)
@@ -117,7 +121,7 @@ jobs:
         env:
           TAG: ${{ needs.set-tag.outputs.tag }}
         run: |
-          for IMAGE in praetor-coder praetor-pipeline praetor-research praetor-webhook praetor-qa praetor-reviewer; do
+          for IMAGE in praetor-coder praetor-pipeline praetor-research praetor-webhook praetor-qa praetor-reviewer praetor-benchmark; do
             docker buildx imagetools create -t "amerenda/${IMAGE}:${TAG}" \
               "amerenda/${IMAGE}:${TAG}-amd64" \
               "amerenda/${IMAGE}:${TAG}-arm64"
