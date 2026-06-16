@@ -405,3 +405,85 @@ class TestPhase10MCPGateway:
         tool_names = [t.get("name", "") for t in tools]
         assert any("search" in n.lower() for n in tool_names), \
             f"searxng web_search tool not in gateway tool list: {tool_names}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 13: OpenWebUI Integration
+# ---------------------------------------------------------------------------
+
+OPENWEBUI_ADMIN_EMAIL = os.environ.get("OPENWEBUI_ADMIN_EMAIL", "alex@amer.dev")
+OPENWEBUI_ADMIN_PASSWORD = (
+    os.environ.get("OPENWEBUI_ADMIN_PASSWORD")
+    or _k8s_secret("openwebui", "openwebui-secrets", "admin-password")
+)
+
+
+def _owu_token() -> str:
+    resp = httpx.post(
+        "https://bot.amer.dev/api/v1/auths/signin",
+        json={"email": OPENWEBUI_ADMIN_EMAIL, "password": OPENWEBUI_ADMIN_PASSWORD},
+        timeout=10,
+    )
+    assert resp.status_code == 200, f"OpenWebUI signin failed {resp.status_code}: {resp.text[:200]}"
+    return resp.json()["token"]
+
+
+class TestPhase13OpenWebUI:
+    def test_openwebui_accessible(self):
+        resp = httpx.get("https://bot.amer.dev/", timeout=10)
+        assert resp.status_code == 200, f"bot.amer.dev not accessible: {resp.status_code}"
+
+    def test_mcp_bridge_exposes_praetor_tools(self):
+        resp = httpx.get("https://mcp-bridge.amer.dev/mcp/openapi.json", timeout=15)
+        assert resp.status_code == 200, f"mcp-bridge openapi not accessible: {resp.status_code}"
+        paths = list(resp.json().get("paths", {}).keys())
+        praetor_tools = [p for p in paths if "praetor_mcp" in p]
+        assert any("dispatch" in t for t in praetor_tools), \
+            f"praetor_mcp-dispatch_praetor_task not in mcp-bridge paths: {paths}"
+
+    def test_mcp_bridge_exposes_infra_tools(self):
+        resp = httpx.get("https://mcp-bridge.amer.dev/mcp/openapi.json", timeout=15)
+        assert resp.status_code == 200, f"mcp-bridge openapi not accessible: {resp.status_code}"
+        paths = list(resp.json().get("paths", {}).keys())
+        infra_tools = [p for p in paths if "infra_mcp" in p]
+        assert any("scaffold" in t for t in infra_tools), \
+            f"infra_mcp-scaffold_app not in mcp-bridge paths: {paths}"
+
+    def test_qwen3_think_system_prompt_set(self):
+        if not OPENWEBUI_ADMIN_PASSWORD:
+            pytest.skip("OPENWEBUI_ADMIN_PASSWORD not available")
+        token = _owu_token()
+        # Create endpoint returns 200 if model already exists; we check via model list
+        # The custom model entry (with system prompt) is stored in the `model` table and
+        # returned alongside base models in /api/v1/models when a user_id filter is active.
+        # Simplest reliable check: /api/v1/models/create returns the stored entry.
+        resp = httpx.get(
+            "https://bot.amer.dev/api/v1/models",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        assert resp.status_code == 200
+        models = resp.json().get("data", [])
+        ids = [m.get("id") for m in models]
+        assert "qwen3-35b-think" in ids, f"qwen3-35b-think not in model list: {ids}"
+        # Verify the custom model entry with system prompt exists in the DB
+        result = subprocess.run(
+            ["ssh", "mini",
+             "/Users/alex/.orbstack/bin/docker exec postgres psql -U postgres -d openwebui "
+             "-c \"SELECT id FROM model WHERE id = 'qwen3-35b-think';\""],
+            capture_output=True, text=True, timeout=15,
+        )
+        assert "qwen3-35b-think" in result.stdout, \
+            "Custom model entry for qwen3-35b-think not found in DB — system prompt not set"
+
+    def test_openwebui_memory_enabled(self):
+        if not OPENWEBUI_ADMIN_PASSWORD:
+            pytest.skip("OPENWEBUI_ADMIN_PASSWORD not available")
+        token = _owu_token()
+        resp = httpx.get(
+            "https://bot.amer.dev/api/v1/memories/",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        assert resp.status_code == 200, \
+            f"memories endpoint returned {resp.status_code} — ENABLE_MEMORIES may be off"
