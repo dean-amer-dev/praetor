@@ -1,183 +1,95 @@
-# Phase 15 — Control Plane UI
+# Phase 15 — Self-Service MCP Factory
 
-**Goal:** A purpose-built React dashboard at `praetor.amer.dev` for platform operations — trigger agents, monitor runs, edit prompts, run benchmarks, and scaffold new components. Replaces tab-switching between Hatchet, Langfuse, and claw.amer.dev for routine platform tasks.
+**Goal:** Automate the two-step manual process for adding a new MCP to praetor: deploy the MCP server as a k3s service and register it in the LiteLLM gateway. After this phase, adding an MCP is a single API call, not a PR + configmap edit + restart cycle.
 
 ## Pre-conditions
 
-- Phase 14 complete (voice dispatch working — all dispatch paths confirmed stable)
-- `POST /api/v1/dispatch` and `GET /api/v1/status/{task_id}` live
-- Benchmark runner from Phase 13 working (UI wraps existing backend)
-- Scaffold worker from Phase 11 working (UI wraps existing `agent:scaffold` event)
-- Phase 12 health check passing (platform must be fully verified before adding UI complexity)
+- Phase 14 complete (platform stable, benchmarks established)
+- infra-mcp `scaffold_app` + `open_deploy_pr` working (Phase 0)
+- LiteLLM configmap pattern established (Phase 10)
+- github-mcp available for automated PR creation
 
-## Design Principles
+## The Gap Today
 
-This is a **control plane**, not a chat interface. OpenWebUI (`claw.amer.dev`) stays for conversation. Praetor UI (`praetor.amer.dev`) is for platform operations only.
+Adding an MCP today requires:
+1. Manually write a k3s Deployment + Service + ArgoCD Application
+2. Open a k3s-dean-gitops PR, wait for merge, wait for ArgoCD sync
+3. Edit `apps/litellm/server/configmap.yaml` `mcp_servers:` section
+4. Open another PR, merge, LiteLLM reloads
 
-Do not re-implement what Hatchet or Langfuse already do well. Link out to them for deep drill-downs.
+Two PRs, two ArgoCD syncs, fully manual. This phase collapses it to one command.
 
-## Stack
-
-| Layer | Choice | Why |
-|-------|--------|-----|
-| Frontend | React + Vite | Already in stack (ecdysis uses React) |
-| Backend | FastAPI | Already in `praetor/webhooks/app.py` — extend with new router |
-| Auth | Existing amer.dev SSO | No new auth infra |
-
-New code lives in:
-- `praetor/ui/` — React app (built by CI → nginx serves static assets)
-- `praetor/webhooks/ui_api.py` — new FastAPI router for UI-specific endpoints, mounted on existing app
-
-## Feature Areas
-
-### Panel 1: Run Dashboard
-
-Unified view of recent agent runs across Hatchet + Langfuse.
+## Architecture
 
 ```
-Last 20 runs
-┌──────────┬──────────┬──────────┬──────────┬──────────┐
-│ Agent    │ Task     │ Status   │ Duration │ Trace    │
-├──────────┼──────────┼──────────┼──────────┼──────────┤
-│ research │ #1234    │ ✓ Done   │ 3m 12s   │ [View]   │
-│ coder    │ #1233    │ ✓ Done   │ 8m 45s   │ [View]   │
-│ reviewer │ PR #88   │ ✗ Failed │ 1m 02s   │ [View]   │
-└──────────┴──────────┴──────────┴──────────┴──────────┘
+POST /api/v1/mcp/register
+  { name, image, port, transport, env_secrets }
+          │
+          ├─► infra-mcp scaffold_app → k3s Deployment + Service
+          │   infra-mcp open_deploy_pr → merge → ArgoCD deploys pod
+          │
+          └─► patch litellm configmap mcp_servers:
+              open PR on k3s-dean-gitops → merge → LiteLLM reloads
 ```
 
-Backend: `GET /api/ui/runs` — pulls from Hatchet API, merges with Langfuse trace IDs. No re-implementation of Hatchet's full UI. "View" links go to `hatchet.amer.dev` or `langfuse.amer.dev`.
+## What Gets Built
 
-Auto-refreshes every 10s.
+### 14a — MCP Spec Schema
 
----
+A pydantic model for an MCP registration request:
 
-### Panel 2: Trigger Panel
-
-Dispatch any agent without opening Vikunja or crafting a curl command.
-
-```
-Agent type: [ research ▾ ]
-Title:      [ Research Tailscale exit node ACL interaction ]
-[ Trigger → ]
-```
-
-Posts to `POST /api/v1/dispatch`. Response shows task_id and links to Hatchet run. New run appears in Run Dashboard within 10s.
-
-Useful for: re-running failed tasks, testing prompt changes, dispatching ad-hoc research.
-
----
-
-### Panel 3: Prompt Quick-Edit
-
-Lists current production prompts from Langfuse. Click to open the prompt editor.
-
-```
-Prompts
-┌─────────────────────┬─────────┬────────────────┐
-│ Name                │ Version │ Last modified  │
-├─────────────────────┼─────────┼────────────────┤
-│ coder-system        │ v4      │ 2026-06-15     │
-│ research-system     │ v3      │ 2026-06-10     │
-│ reviewer-system     │ v2      │ 2026-06-01     │
-│ scaffold-system     │ v1      │ 2026-06-18     │
-└─────────────────────┴─────────┴────────────────┘
-[ Open in Langfuse ↗ ]
+```python
+class McpRegistration(BaseModel):
+    name: str                        # e.g. "kubernetes-readonly"
+    image: str                       # Docker Hub image
+    port: int = 8000                 # container port the MCP listens on
+    transport: str = "http"          # "http" or "stdio"
+    env_secrets: dict[str, str] = {} # {ENV_VAR: bws-secret-name}
+    args: list[str] = []             # container args (e.g. ["--read-only"])
 ```
 
-Backend: `GET /api/ui/prompts` proxies `GET /api/public/prompts` from Langfuse API.
+### 14b — Registration Endpoint
 
-No inline editing — clicking "Open in Langfuse" opens `langfuse.amer.dev/prompts/<name>` in a new tab. The point is visibility, not duplication.
-
----
-
-### Panel 4: Benchmark Runner
-
-Run eval datasets from the UI without the CLI script (Phase 13 backend is reused).
+New route in `webhooks/app.py`:
 
 ```
-Dataset:  [ research-eval ▾ ]    (5 items)
-Model:    [ qwen3-35b ▾ ]
-Prompt:   [ research-system:v3 ▾ ]
-[ Run Benchmark → ]
-
-Running... [3/5] ██████░░░░ 60%
-
-Results:
-  Mean score: 0.87
-  Min score:  0.72
-  [ View in Langfuse ↗ ]
+POST /api/v1/mcp/register   → register + deploy a new MCP
+GET  /api/v1/mcp            → list registered MCPs and their status
+DELETE /api/v1/mcp/{name}   → remove an MCP (undeploy + deregister)
 ```
 
-Backend: `POST /api/ui/benchmark` — dispatches N `agent:benchmark` Hatchet events, streams progress via SSE. Frontend polls or uses SSE to update the progress bar.
+Handler calls the scaffold + LiteLLM patch logic in sequence. Returns a `task_id` that tracks the GitOps PR chain.
 
----
+### 14c — k3s Deployment via infra-mcp
 
-### Panel 5: Scaffold Form
+Reuse the existing scaffold pattern. The factory generates:
+- `apps/mcp/<name>/deployment.yaml`
+- `apps/mcp/<name>/service.yaml`
+- ArgoCD Application wired into root-app.yaml at sync-wave 4
 
-Form-based version of the OpenWebUI scaffold conversation.
+All MCPs live under `apps/mcp/` namespace in k3s-dean-gitops with their own namespace `mcp-<name>`.
 
-```
-Type:  [ Agent ▾ ]
-Name:  [ grafana-monitor ]
-Description:
-  ┌─────────────────────────────────────────┐
-  │ Monitors Grafana alerts and creates     │
-  │ Vikunja tasks when alerts fire.         │
-  └─────────────────────────────────────────┘
-[ Scaffold → ]
+### 14d — LiteLLM Configmap Patch
 
-Dispatched: agent:scaffold (task_id=1718400000)
-Draft PR will appear on amerenda/praetor in ~2 minutes.
-[ View Hatchet run ↗ ]
-```
+After the k3s service is deployed, patch the LiteLLM configmap to add:
 
-Backend: `POST /api/ui/scaffold` — calls `POST /api/v1/dispatch` with `type=scaffold`, formats the description into the structured spec the scaffold agent expects.
-
----
-
-## Deployment
-
-New component in `praetor` repo: `praetor-ui`.
-
-**`ui/` directory:** React app, built by CI → static assets baked into an nginx image.
-
-CI adds a build step:
 ```yaml
-- name: Build UI
-  run: |
-    cd ui
-    npm ci
-    npm run build
-- name: Build + push praetor-ui image
-  uses: docker/build-push-action@v5
-  with:
-    context: ui
-    file: ui/Dockerfile
-    tags: amerenda/praetor-ui:${{ github.sha }}
-    platforms: linux/amd64,linux/arm64
+mcp_servers:
+  <name>:
+    url: "http://<name>-server.mcp-<name>.svc.cluster.local:<port>/mcp"
+    transport: "<transport>"
 ```
 
-`ui/Dockerfile`:
-```dockerfile
-FROM nginx:alpine
-COPY dist/ /usr/share/nginx/html/
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-```
+Done via a commit to k3s-dean-gitops (same PR as the service manifests, or a follow-up PR). LiteLLM picks it up on next pod restart or config reload.
 
-**k3s manifests:** Add `praetor-ui` Deployment + Service via app-factory. Existing `praetor.amer.dev` ingress routes:
-- `/` → praetor-ui (nginx)
-- `/api/` → webhook-adapter (FastAPI)
-- `/webhooks/` → webhook-adapter (FastAPI, existing)
+### 14e — MCP Registry State
 
-The `/webhooks/vikunja` and `/webhooks/github` paths are unchanged.
+Track registered MCPs in a ConfigMap in the `praetor` namespace so `GET /api/v1/mcp` can return live state without hitting the git repo on every request.
 
 ## Phase 15 Ready Conditions
 
-1. `https://praetor.amer.dev` loads the control plane UI (requires auth)
-2. Run Dashboard shows last 20 runs auto-refreshing every 10s
-3. Trigger Panel: dispatch `type=research` → run appears in dashboard within 10s
-4. Prompt Quick-Edit: lists all Langfuse prompts with correct versions
-5. Benchmark Runner: 5-item eval suite completes and shows mean score inline
-6. Scaffold Form: submit agent scaffold → draft PR opens on `amerenda/praetor` within 3 minutes
-7. All existing webhook paths (`/webhooks/vikunja`, `/webhooks/github`, `/api/v1/dispatch`) still work
-8. `praetor-ui` pod Running, multi-arch image built by CI
+1. `POST /api/v1/mcp/register` with a test MCP image → k3s pod Running within 5 minutes
+2. LiteLLM `/mcp/` endpoint exposes the new MCP's tools within 5 minutes of registration
+3. `GET /api/v1/mcp` returns the registered MCPs with correct status
+4. Re-registering an existing MCP name returns a clear error (no duplicate deployments)
+5. An agent calling `POST /api/v1/dispatch` with a task that uses the new MCP tool executes successfully

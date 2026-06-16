@@ -16,8 +16,10 @@
 | 11 | Scaffold Worker | ✅ Complete | agent:scaffold event; Jinja templates; draft PRs on praetor + dean-mcp from OpenWebUI |
 | 12 | Platform Verification | ✅ Complete | All smoke tests pass (18/18); health check green; Phase 4+7 verified; OOM fix + MCP URL fix merged (k3s-dean-gitops #802) |
 | 13 | Agent Benchmarking & Eval | 🔵 In Progress | benchmark-worker + eval datasets + runner script built; pending: run datasets, record baselines, deploy |
-| 14 | Voice Dispatch | ⬜ Not started | Requires Phase 13 |
-| 15 | Control Plane UI | ⬜ Not started | Requires Phase 14 |
+| 14 | Self-Service MCP Factory | ⬜ Not started | Requires Phase 13 |
+| 15 | Kubernetes MCP | ⬜ Not started | Requires Phase 14 (deployed via factory) |
+| 16 | Voice Dispatch | ⬜ Not started | Requires Phase 15 |
+| 17 | Control Plane UI | ⬜ Not started | Requires Phase 16; includes MCP Registry panel (Phase 14) |
 
 ## OpenWebUI (claw.amer.dev)
 

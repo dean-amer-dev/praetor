@@ -1,148 +1,122 @@
-# Phase 13 — Agent Benchmarking & Eval
+# Phase 13 — OpenWebUI Integration
 
-**Goal:** Build a systematic quality baseline for all agents. Create eval datasets in Langfuse, automate benchmark runs via Hatchet, and establish pass/fail thresholds that block bad prompt changes before they reach production.
+**Goal:** Wire praetor-mcp, infra-mcp, and Mem0 into bot.amer.dev (OpenWebUI) so the model can dispatch Praetor agents, scaffold apps, and retain memory across conversations. Configure a full system prompt that describes the infrastructure, deployment patterns, and available tools.
 
 ## Pre-conditions
 
-- Phase 12 complete (all agents verified healthy, smoke tests green)
-- Langfuse deployed and all agents already instrumented with `@observe()` (Phase 9)
-- `POST /api/v1/dispatch` live (Phase 14 dispatch)
+- Phase 12 complete (platform verified, mem0 confirmed healthy and functional at `https://mem0.amer.dev`)
+- praetor-mcp deployed and healthy in k3s (`praetor-mcp` namespace)
+- infra-mcp deployed and healthy in k3s (`infra-mcp` namespace)
+- LiteLLM MCP gateway live with github-mcp and mcp-searxng already registered (Phase 10)
+
+## Architecture
+
+Two connection paths — do not conflate them:
+
+```
+praetor-mcp ─┐
+             ├─► LiteLLM configmap (mcp_servers:) ─► mcp-bridge ─► OpenWebUI tool server
+infra-mcp ───┘
+
+Mem0 ──────────────────────────────────────────────► OpenWebUI MEMORY_PROVIDER (native)
+```
+
+- **praetor-mcp + infra-mcp** → LiteLLM MCP gateway via k3s-dean-gitops configmap → mcp-bridge auto-discovers and exposes as OpenAPI → OpenWebUI tool_server already pointed at mcp-bridge. Same pattern as github-mcp and mcp-searxng. No new infrastructure.
+- **Mem0** → OpenWebUI native memory backend via `MEMORY_PROVIDER=mem0` env vars. This is NOT via the mcp-bridge. OpenWebUI has built-in Mem0 support — memories written in one conversation are retrieved in subsequent ones.
 
 ## What Gets Built
 
-### 13a — Eval Datasets in Langfuse
+### 13a — Register praetor-mcp in LiteLLM configmap
 
-Create one dataset per agent type in the Langfuse UI (or via API). Each dataset contains 5–10 representative tasks with known-good expected outputs.
+Add to `apps/litellm/server/configmap.yaml` in k3s-dean-gitops, under `mcp_servers:`:
 
-**Research agent dataset (`research-eval`):**
-```
-item 1: input="Research Tailscale exit node ACL interaction"
-        expected_output_contains=["exit node", "ACL", "subnet"]
-item 2: input="Explain Hatchet durable execution model"
-        expected_output_contains=["durable", "retry", "workflow"]
-...
-```
-
-**Coder agent dataset (`coder-eval`):**
-```
-item 1: input="Add /healthz endpoint to a FastAPI app"
-        expected: PR opened, diff contains '/healthz', test file present
-item 2: input="Add pagination to GET /api/v1/tasks"
-        expected: PR opened, diff contains 'limit' and 'offset'
-...
+```yaml
+mcp_servers:
+  praetor:
+    url: "http://praetor-mcp-server.praetor-mcp.svc.cluster.local:8000/mcp"
+    transport: "http"
+  infra:
+    url: "http://infra-mcp-server.infra-mcp.svc.cluster.local:8000/mcp"
+    transport: "http"
 ```
 
-**Reviewer agent dataset (`reviewer-eval`):**
-```
-item 1: PR diff with an obvious SQL injection vulnerability
-        expected_review_mentions=["injection", "parameterized", "unsafe"]
-item 2: PR diff that is clean and well-structured
-        expected: review is positive, no blocking comments
-...
-```
+Open a k3s-dean-gitops PR. After merge and LiteLLM pod restart, the mcp-bridge picks up the new tools automatically (it re-fetches from LiteLLM on every `/mcp/openapi.json` request).
 
-Datasets are created once and live in Langfuse permanently. Runs append new trace results without modifying the dataset.
+**Verify:** `curl https://mcp-bridge.amer.dev/mcp/openapi.json | jq '.paths | keys'` should show `praetor_mcp-dispatch_praetor_task`, `praetor_mcp-get_praetor_status`, `infra_mcp-scaffold_app`, `infra_mcp-provision_app`, `infra_mcp-open_deploy_pr`.
 
 ---
 
-### 13b — Benchmark Hatchet Event
+### 13b — Wire Mem0 to OpenWebUI
 
-New Hatchet event: `agent:benchmark`. The benchmark worker picks up the event, runs the target agent against a single dataset item, scores the output, and writes the score back to Langfuse.
-
-**Input:**
-```python
-class BenchmarkInput(BaseModel):
-    dataset_name: str      # "research-eval"
-    dataset_item_id: str   # Langfuse dataset item ID
-    agent_type: str        # "research" | "code" | "review"
-    model: str             # "qwen3-35b" (or any LiteLLM model alias)
-    prompt_version: str    # Langfuse prompt name + version, e.g. "coder-system:v4"
-```
-
-**Worker behavior (`agents/benchmark/worker.py`):**
-1. Fetch dataset item from Langfuse API
-2. Dispatch agent via `common/dispatch.py:dispatch_agent()` with item's input
-3. Wait for agent completion (poll Hatchet run status, timeout 10 min)
-4. Fetch agent's Langfuse trace
-5. Score the trace output against the expected criteria using a lightweight LLM judge call
-6. Write score back to Langfuse via `POST /api/public/scores`
-
-**Scoring — LLM judge (no custom eval framework):**
-```python
-judge_prompt = f"""
-Score the following agent output from 0.0 to 1.0.
-Expected criteria: {item.expected_criteria}
-Agent output: {agent_output}
-Return only a JSON object: {{"score": <float>, "reason": "<one sentence>"}}
-"""
-# Use qwen3-35b via LiteLLM — same model, cheap judge call
-score_resp = litellm.completion(model="qwen3-35b", messages=[{"role":"user","content":judge_prompt}])
-```
-
----
-
-### 13c — Benchmark Runner Script
-
-A CLI script (not a UI — that's Phase 15) that dispatches a full benchmark suite and prints results:
+Add to the OpenWebUI pre_deploy in `resource-sync/stacks.toml` (komodo-dean-gitops):
 
 ```bash
-# Run full research-eval suite against production prompt version
-python scripts/run_benchmark.py \
-  --dataset research-eval \
-  --agent-type research \
-  --model qwen3-35b \
-  --prompt-version coder-system:v4
+printf 'MEM0_API_KEY=%s\n' "$(echo "$_BWSL" | jq -r '.[] | select(.key == "mem0-admin-api-key") | .value')" >> mac-mini-m4/openwebui/.env
+printf 'MEM0_BASE_URL=https://mem0.amer.dev\n' >> mac-mini-m4/openwebui/.env
 ```
 
-Output:
-```
-Running benchmark: research-eval (10 items) × qwen3-35b × coder-system:v4
-[1/10] Research Tailscale ACLs ........... 0.92 ✓
-[2/10] Explain Hatchet durable execution .. 0.88 ✓
-...
-Suite complete. Mean score: 0.87. Langfuse experiment: research-eval-2026-06-20
+Add to `mac-mini-m4/openwebui/compose.yaml` environment block:
+
+```yaml
+ENABLE_MEMORY_TOOL: "true"
+MEM0_BASE_URL: "https://mem0.amer.dev"
 ```
 
-Results are saved as a Langfuse "experiment" — viewable at `langfuse.amer.dev`.
+Then configure Mem0 as the memory provider in OpenWebUI admin: **Settings → Memory → Provider: Mem0**.
+
+**Verify:** In an OpenWebUI conversation, tell the model "remember that murderbot has a RTX 4000 Blackwell GPU." Start a new conversation and ask "what GPU does murderbot have?" — it should recall from Mem0.
 
 ---
 
-### 13d — Baseline Establishment
+### 13c — Full system prompt for qwen3-35b-think
 
-Run the benchmark suite once against current production prompts. Record the baseline scores in `docs/eval-baselines.md`:
+Set via **OpenWebUI admin → Models → qwen3-35b-think → System Prompt**:
 
-```markdown
-| Dataset | Model | Prompt | Date | Mean Score | Min Score |
-|---------|-------|--------|------|-----------|-----------|
-| research-eval | qwen3-35b | coder-system:v4 | 2026-06-XX | 0.87 | 0.72 |
-| coder-eval    | qwen3-35b | coder-system:v4 | 2026-06-XX | 0.81 | 0.65 |
 ```
+You are Alex's personal AI assistant at bot.amer.dev.
 
-Any future prompt change must be run through the benchmark suite before promoting to production. If mean score drops more than 0.05 below baseline, the change is rejected.
+## Hardware
+- murderbot (local): RTX 4000 Blackwell 24 GB, K3s node, llama.cpp inference
+- mac-mini-m4 (10.100.20.18): M4 16 GB, Komodo primary, Ollama, core services
+  (DNS, PostgreSQL, MongoDB, Home Assistant, monitoring, Docker/OrbStack)
+- archlinux (10.100.20.25): RX 9070 XT 16 GB, K3s node, Sunshine/Moonlight
+- rpi5-0 (10.100.20.10), rpi5-1 (10.100.20.11), rpi4-0 (10.100.20.12): K3s nodes
+
+## App Deployment
+Two paths — all ingresses and TLS live in K3s regardless of path. Secrets always from Bitwarden (BWS), never hardcoded.
+- Stateless → K3s (k3s-dean-gitops, ArgoCD): APIs, web services, workers.
+  Flow: scaffold_app → provision_app → open_deploy_pr [→ open_ingress_pr if public URL needed]
+- Stateful → Komodo (komodo-dean-gitops, mac-mini-m4): GPU workloads, persistent storage, Docker compose stacks.
+  Flow: scaffold_app → provision_app → open_ingress_pr
+
+## Praetor (AI Agent Platform — amerenda/praetor)
+Praetor runs AI agent workflows on Hatchet. Three task types:
+- research — web search + summarise; output written to Mem0
+- code — reads a repo, implements changes, opens a PR (include `repo: owner/name` in description)
+- pipeline — research then code
+
+Dispatch: praetor_mcp-dispatch_praetor_task. Check: praetor_mcp-get_praetor_status.
+Praetor also builds new MCPs via the MCP factory (Phase 15).
+Docs and phase status: amerenda/praetor/docs/ (use github_mcp-get_repo_tree to explore)
+
+## Tools
+- github_mcp-*: bare name for amerenda repos ("praetor"), "owner/name" for others. On 404, search via mcp_searxng-web_search then retry.
+- mcp_searxng-web_search / url_read: web search and page fetch
+- praetor_mcp-dispatch_praetor_task / get_praetor_status: dispatch and monitor Praetor agent tasks
+- infra_mcp-scaffold_app / provision_app / open_deploy_pr / open_ingress_pr: provision new apps
+
+## Memory
+Before answering questions about Alex's preferences, past decisions, ongoing projects,
+or anything not described above — search memory first. Memory is updated by Praetor
+research tasks and by Alex directly in conversation.
+```
 
 ---
-
-### 13e — Benchmark Worker Deployment
-
-Same pattern as other workers. Add to `praetor` CI image matrix.
-
-```dockerfile
-# Dockerfile.benchmark-worker — shares base with coder-worker
-FROM python:3.12-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-CMD ["python", "-m", "agents.benchmark.worker"]
-```
-
-k3s deployment: same env vars as other workers (Hatchet, LiteLLM, Langfuse, Mem0).
 
 ## Phase 13 Ready Conditions
 
-1. `research-eval`, `coder-eval`, and `reviewer-eval` datasets exist in Langfuse with ≥5 items each
-2. `agent:benchmark` Hatchet event dispatches benchmark worker successfully
-3. `python scripts/run_benchmark.py --dataset research-eval` completes and writes scores to Langfuse
-4. Baseline scores recorded in `docs/eval-baselines.md`
-5. `benchmark-worker` pod Running in k3s praetor namespace
-6. Langfuse experiment view shows scored run history for each dataset
+1. `curl https://mcp-bridge.amer.dev/mcp/openapi.json | jq '.paths | keys'` shows `praetor_mcp-dispatch_praetor_task` and `infra_mcp-scaffold_app`
+2. OpenWebUI model successfully dispatches a test research task via `praetor_mcp-dispatch_praetor_task`
+3. OpenWebUI model successfully calls `infra_mcp-scaffold_app` with a test app description
+4. Memory written in one OpenWebUI conversation is recalled in a new conversation (Mem0 round-trip)
+5. System prompt visible and correct at bot.amer.dev admin → Models → qwen3-35b-think
