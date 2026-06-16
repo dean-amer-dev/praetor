@@ -54,11 +54,11 @@ def scratch_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def mock_hatchet():
-    """Patch both webhook routers' _get_hatchet so no real Hatchet SDK is needed."""
+    """Patch shared dispatch singleton and github router so no real Hatchet SDK is needed."""
     mock = MagicMock()
     mock.event.push = MagicMock()
     with (
-        patch("webhooks.vikunja._get_hatchet", return_value=mock),
+        patch("common.dispatch._get_hatchet", return_value=mock),
         patch("webhooks.github._get_hatchet", return_value=mock),
     ):
         yield mock

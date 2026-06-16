@@ -7,25 +7,17 @@ import os
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
-from hatchet_sdk import Hatchet
+
+from common.dispatch import dispatch_agent
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-_hatchet: Hatchet | None = None
 
 # Label IDs from Vikunja (CLAUDE.md reference)
 LABEL_RESEARCH = 14
 LABEL_GO = 11
 LABEL_PLAN_ONLY = 13
-
-
-def _get_hatchet() -> Hatchet:
-    global _hatchet
-    if _hatchet is None:
-        _hatchet = Hatchet()
-    return _hatchet
 
 
 def _verify_signature(body: bytes, header: str | None) -> None:
@@ -61,28 +53,21 @@ async def vikunja_webhook(request: Request) -> dict:
     labels = task.get("labels") or []
     label_ids = {lbl["id"] for lbl in labels if isinstance(lbl, dict)}
 
-    dispatched = []
-    payload = {
-        "task_id": task_id,
-        "task_title": task.get("title", ""),
-        "task_description": task.get("description", ""),
-    }
+    dispatched: list[str] = []
+    title = task.get("title", "")
+    description = task.get("description", "")
     meta = {"vikunja_task_id": str(task_id)}
 
     if LABEL_RESEARCH in label_ids and LABEL_GO in label_ids:
-        # Both labels → run research then code as a single DAG pipeline
-        _get_hatchet().event.push("pipeline:research_code", payload, additional_metadata=meta)
-        dispatched.append("pipeline:research_code")
+        dispatched = dispatch_agent(task_id, title, description, "pipeline", meta)
         logger.info("dispatched pipeline:research_code for task %s", task_id)
     else:
         if LABEL_RESEARCH in label_ids:
-            _get_hatchet().event.push("agent:research", payload, additional_metadata=meta)
-            dispatched.append("agent:research")
+            dispatched += dispatch_agent(task_id, title, description, "research", meta)
             logger.info("dispatched agent:research for task %s", task_id)
 
         if LABEL_GO in label_ids:
-            _get_hatchet().event.push("agent:code", payload, additional_metadata=meta)
-            dispatched.append("agent:code")
+            dispatched += dispatch_agent(task_id, title, description, "code", meta)
             logger.info("dispatched agent:code for task %s", task_id)
 
     return {"status": "ok", "dispatched": dispatched}
