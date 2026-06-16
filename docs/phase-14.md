@@ -1,195 +1,95 @@
-# Phase 14 — Voice Dispatch
+# Phase 14 — Self-Service MCP Factory
 
-**Goal:** Speak a command to Home Assistant → Praetor agent runs → HA announces the result via TTS. Voice is a first-class dispatch interface, identical in capability to claw.amer.dev or opencode.
+**Goal:** Automate the two-step manual process for adding a new MCP to praetor: deploy the MCP server as a k3s service and register it in the LiteLLM gateway. After this phase, adding an MCP is a single API call, not a PR + configmap edit + restart cycle.
 
 ## Pre-conditions
 
-- Phase 13 complete (quality baselines established — voice must hit known-good agents)
-- `POST /api/v1/dispatch` live (conversational dispatch, Phase 14 predecessor)
-- `GET /api/v1/status/{task_id}` live (status polling endpoint)
-- Piper TTS running (already in `llm-agents` stack on mac-mini-m4)
-- Home Assistant at `https://ha.amer.dev` with `$HA_TOKEN` available
+- Phase 13 complete (platform stable, benchmarks established)
+- infra-mcp `scaffold_app` + `open_deploy_pr` working (Phase 0)
+- LiteLLM configmap pattern established (Phase 10)
+- github-mcp available for automated PR creation
+
+## The Gap Today
+
+Adding an MCP today requires:
+1. Manually write a k3s Deployment + Service + ArgoCD Application
+2. Open a k3s-dean-gitops PR, wait for merge, wait for ArgoCD sync
+3. Edit `apps/litellm/server/configmap.yaml` `mcp_servers:` section
+4. Open another PR, merge, LiteLLM reloads
+
+Two PRs, two ArgoCD syncs, fully manual. This phase collapses it to one command.
 
 ## Architecture
 
 ```
-"Hey, research Tailscale exit nodes"
+POST /api/v1/mcp/register
+  { name, image, port, transport, env_secrets }
           │
-          ▼
-  Home Assistant
-  (voice command intent: praetor_dispatch)
+          ├─► infra-mcp scaffold_app → k3s Deployment + Service
+          │   infra-mcp open_deploy_pr → merge → ArgoCD deploys pod
           │
-          ▼
-  HA → REST API → POST /api/v1/dispatch
-          │
-          ▼
-  Hatchet dispatches agent
-          │
-          ▼
-  HA polls GET /api/v1/status/{task_id} (every 30s, up to 20 min)
-          │
-          ▼
-  done=true → HA calls piper TTS with mem0_summary
-          │
-          ▼
-  HA announces result via media player
+          └─► patch litellm configmap mcp_servers:
+              open PR on k3s-dean-gitops → merge → LiteLLM reloads
 ```
-
-No new infrastructure. Voice uses the same dispatch API as every other interface.
 
 ## What Gets Built
 
-### 14a — HA Intent Script (`praetor_dispatch`)
+### 14a — MCP Spec Schema
 
-A Home Assistant script that calls the Praetor dispatch API and polls for results.
-
-Add to `ha.amer.dev` config (via `docker exec homeassistant` → `/config/scripts.yaml` or UI):
-
-```yaml
-praetor_dispatch:
-  alias: "Dispatch Praetor Agent"
-  description: "Send a task to the Praetor platform and announce the result."
-  fields:
-    task_title:
-      description: "The task to run"
-      example: "Research Tailscale exit nodes"
-    task_type:
-      description: "research | code | pipeline"
-      default: "research"
-  sequence:
-    - service: rest_command.praetor_dispatch
-      data:
-        title: "{{ task_title }}"
-        type: "{{ task_type }}"
-      response_variable: dispatch_response
-
-    - variables:
-        task_id: "{{ dispatch_response.content | from_json | attr('task_id') }}"
-
-    - service: tts.speak
-      data:
-        message: "Got it. Running {{ task_type }} task. I'll let you know when it's done."
-        media_player_entity_id: media_player.living_room
-
-    - repeat:
-        count: 40  # max 20 minutes (30s × 40)
-        sequence:
-          - delay: "00:00:30"
-          - service: rest_command.praetor_status
-            data:
-              task_id: "{{ task_id }}"
-            response_variable: status_response
-          - if:
-              - condition: template
-                value_template: >
-                  {{ (status_response.content | from_json).done == true }}
-            then:
-              - service: tts.speak
-                data:
-                  message: >
-                    Praetor result: {{ (status_response.content | from_json).mem0_summary }}
-                  media_player_entity_id: media_player.living_room
-              - stop: "Task complete"
-```
-
-### 14b — HA REST Commands
-
-Add to `/config/configuration.yaml`:
-
-```yaml
-rest_command:
-  praetor_dispatch:
-    url: "https://praetor.amer.dev/api/v1/dispatch"
-    method: POST
-    headers:
-      Authorization: "Bearer {{ states('input_text.praetor_api_key') }}"
-      Content-Type: application/json
-    payload: '{"title": "{{ title }}", "type": "{{ type }}"}'
-
-  praetor_status:
-    url: "https://praetor.amer.dev/api/v1/status/{{ task_id }}"
-    method: GET
-    headers:
-      Authorization: "Bearer {{ states('input_text.praetor_api_key') }}"
-```
-
-`input_text.praetor_api_key` — a helper that stores the `PRAETOR_API_KEY` value. Set it once in the HA UI; never hardcode in YAML.
-
-### 14c — Voice Intent Registration
-
-Register a custom intent in HA's conversation integration so the local voice assistant parses "research X" and "code X in repo Y" into structured calls.
-
-```yaml
-# /config/custom_sentences/en/praetor.yaml
-language: "en"
-intents:
-  PraetorResearch:
-    data:
-      - sentences:
-          - "research {topic}"
-          - "look up {topic}"
-          - "find information about {topic}"
-  PraetorCode:
-    data:
-      - sentences:
-          - "code {task} in {repo}"
-          - "implement {task} in repo {repo}"
-          - "write code for {task}"
-```
-
-Intent handlers in `/config/intent_script.yaml`:
-
-```yaml
-PraetorResearch:
-  action:
-    service: script.praetor_dispatch
-    data:
-      task_title: "Research: {{ topic }}"
-      task_type: research
-  speech:
-    text: "Starting research on {{ topic }}."
-
-PraetorCode:
-  action:
-    service: script.praetor_dispatch
-    data:
-      task_title: "{{ task }}"
-      task_type: code
-  speech:
-    text: "Got it. I'll start coding {{ task }}."
-```
-
-### 14d — TTS Response Length Handling
-
-Agent research results can be long. The TTS output must be trimmed to something speakable.
-
-Add `tts_summary` field to the `/api/v1/status` response:
+A pydantic model for an MCP registration request:
 
 ```python
-# In webhooks/dispatch_api.py status endpoint
-mem0_summary = memories[0]["memory"] if memories else None
-tts_summary = None
-if mem0_summary:
-    # First 2 sentences only for TTS — full summary still in mem0_summary
-    sentences = mem0_summary.split(". ")
-    tts_summary = ". ".join(sentences[:2]) + "."
-
-return {
-    "task_id": task_id,
-    "done": bool(mem0_summary),
-    "mem0_summary": mem0_summary,
-    "tts_summary": tts_summary,
-}
+class McpRegistration(BaseModel):
+    name: str                        # e.g. "kubernetes-readonly"
+    image: str                       # Docker Hub image
+    port: int = 8000                 # container port the MCP listens on
+    transport: str = "http"          # "http" or "stdio"
+    env_secrets: dict[str, str] = {} # {ENV_VAR: bws-secret-name}
+    args: list[str] = []             # container args (e.g. ["--read-only"])
 ```
 
-HA reads `tts_summary` instead of `mem0_summary` for the spoken result.
+### 14b — Registration Endpoint
+
+New route in `webhooks/app.py`:
+
+```
+POST /api/v1/mcp/register   → register + deploy a new MCP
+GET  /api/v1/mcp            → list registered MCPs and their status
+DELETE /api/v1/mcp/{name}   → remove an MCP (undeploy + deregister)
+```
+
+Handler calls the scaffold + LiteLLM patch logic in sequence. Returns a `task_id` that tracks the GitOps PR chain.
+
+### 14c — k3s Deployment via infra-mcp
+
+Reuse the existing scaffold pattern. The factory generates:
+- `apps/mcp/<name>/deployment.yaml`
+- `apps/mcp/<name>/service.yaml`
+- ArgoCD Application wired into root-app.yaml at sync-wave 4
+
+All MCPs live under `apps/mcp/` namespace in k3s-dean-gitops with their own namespace `mcp-<name>`.
+
+### 14d — LiteLLM Configmap Patch
+
+After the k3s service is deployed, patch the LiteLLM configmap to add:
+
+```yaml
+mcp_servers:
+  <name>:
+    url: "http://<name>-server.mcp-<name>.svc.cluster.local:<port>/mcp"
+    transport: "<transport>"
+```
+
+Done via a commit to k3s-dean-gitops (same PR as the service manifests, or a follow-up PR). LiteLLM picks it up on next pod restart or config reload.
+
+### 14e — MCP Registry State
+
+Track registered MCPs in a ConfigMap in the `praetor` namespace so `GET /api/v1/mcp` can return live state without hitting the git repo on every request.
 
 ## Phase 14 Ready Conditions
 
-1. "Hey assistant, research Tailscale exit nodes" → `agent:research` Hatchet run starts within 15s
-2. HA announces "Got it. Running research task." immediately after dispatch
-3. HA polls status and announces the TTS summary when `done=true` (within 20 minutes)
-4. `PraetorCode` intent: "code add /healthz to ecdysis" → coder agent starts, HA confirms
-5. `input_text.praetor_api_key` helper holds the key — no hardcoded secrets in HA YAML
-6. TTS summary is ≤3 sentences (not raw dump of full research output)
-7. Works from both living room and bedroom media players
+1. `POST /api/v1/mcp/register` with a test MCP image → k3s pod Running within 5 minutes
+2. LiteLLM `/mcp/` endpoint exposes the new MCP's tools within 5 minutes of registration
+3. `GET /api/v1/mcp` returns the registered MCPs with correct status
+4. Re-registering an existing MCP name returns a clear error (no duplicate deployments)
+5. An agent calling `POST /api/v1/dispatch` with a task that uses the new MCP tool executes successfully
