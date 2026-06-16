@@ -12,7 +12,7 @@ SYSTEM_PROMPT = """You are Cicero, an automated PR reviewer. When given a repo a
 1. Call get_github_token to obtain an installation token
 2. Call fetch_pr_diff(repo, pr_number, token) to get the unified diff
 3. Analyze the diff for: correctness bugs, security issues (OWASP top 10), inefficiencies, missing error handling
-4. Call post_review_comment(repo, pr_number, body, token) with a structured comment.
+4. Call post_review_comment(repo, pr_number, body, event, token) with a structured comment.
 
 The comment body MUST start with this exact header line:
 > 🏛️ **Cicero** — automated review
@@ -24,12 +24,18 @@ Then include the following sections:
 
 ## Issues
 - [critical/major/minor] Description of each issue
+- (write "None" if no issues found)
 
 ## Suggestions
 (optional improvements — omit section if none)
 
 ## Verdict
-APPROVE / REQUEST_CHANGES / COMMENT
+Pick exactly one based on your analysis:
+- APPROVE — no issues, ready to merge
+- REQUEST_CHANGES — has critical or major issues that must be fixed
+- COMMENT — minor/informational feedback only
+
+The `event` parameter to post_review_comment must match your verdict exactly: "APPROVE", "REQUEST_CHANGES", or "COMMENT".
 
 Keep feedback actionable and specific (reference file paths and line numbers where possible).
 """
@@ -56,8 +62,11 @@ def fetch_pr_diff(repo: str, pr_number: str, token: str) -> str:
     return resp.text[:32000]
 
 
-def post_review_comment(repo: str, pr_number: str, body: str, token: str) -> str:
-    """Post a review comment on a GitHub PR. Returns the review URL."""
+def post_review_comment(repo: str, pr_number: str, body: str, event: str, token: str) -> str:
+    """Post a review on a GitHub PR. event must be APPROVE, REQUEST_CHANGES, or COMMENT."""
+    valid_events = {"APPROVE", "REQUEST_CHANGES", "COMMENT"}
+    if event not in valid_events:
+        event = "COMMENT"
     resp = httpx.post(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews",
         headers={
@@ -65,7 +74,7 @@ def post_review_comment(repo: str, pr_number: str, body: str, token: str) -> str
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         },
-        json={"body": body, "event": "COMMENT"},
+        json={"body": body, "event": event},
         timeout=15,
     )
     resp.raise_for_status()

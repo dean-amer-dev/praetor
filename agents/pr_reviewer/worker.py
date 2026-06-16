@@ -45,7 +45,7 @@ def main() -> None:
         on_events=["github:pr_opened"],
         input_validator=PROpenedInput,
         execution_timeout=timedelta(minutes=10),
-        retries=1,
+        retries=0,
         concurrency=ConcurrencyExpression(
             expression="input.repo + input.pr_number",
             max_runs=1,
