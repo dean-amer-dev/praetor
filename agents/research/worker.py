@@ -41,8 +41,8 @@ async def _run_research(input: ResearchInput, context: Context) -> dict:
     )
     agent = _get_agent()
     result = await agent.run(prompt)
-    langfuse_context.update_current_trace(output=result.data)
-    return {"summary": result.data, "task_id": input.task_id}
+    langfuse_context.update_current_trace(output=result.output)
+    return {"summary": result.output, "task_id": input.task_id}
 
 
 def main() -> None:

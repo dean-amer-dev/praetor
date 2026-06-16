@@ -48,8 +48,8 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
     )
     agent = _get_agent()
     result = await agent.run(prompt)
-    langfuse_context.update_current_trace(output=result.data)
-    return {"result": result.data, "task_id": input.task_id}
+    langfuse_context.update_current_trace(output=result.output)
+    return {"result": result.output, "task_id": input.task_id}
 
 
 def main() -> None:

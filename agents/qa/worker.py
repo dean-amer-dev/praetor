@@ -34,7 +34,7 @@ async def _run_qa(input: StagingDeployInput, context: Context) -> dict:
     )
     agent = _get_agent()
     result = await agent.run(prompt)
-    return {"result": result.data, "deploy_url": input.deploy_url}
+    return {"result": result.output, "deploy_url": input.deploy_url}
 
 
 def main() -> None:

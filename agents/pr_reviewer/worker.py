@@ -34,7 +34,7 @@ async def _run_reviewer(input: PROpenedInput, context: Context) -> dict:
     )
     agent = _get_agent()
     result = await agent.run(prompt)
-    return {"result": result.data, "pr_url": input.pr_url}
+    return {"result": result.output, "pr_url": input.pr_url}
 
 
 def main() -> None:

@@ -50,7 +50,7 @@ class ResearchNode:
         result = await agent.run(prompt)
         return {
             "task_id": state.task_id,
-            "summary": str(result.data),
+            "summary": str(result.output),
             "skipped": False,
         }
 
@@ -80,4 +80,4 @@ class CoderNode:
 
         agent = build_coder_agent()
         result = await agent.run(prompt)
-        return {"result": str(result.data), "task_id": state.task_id}
+        return {"result": str(result.output), "task_id": state.task_id}
