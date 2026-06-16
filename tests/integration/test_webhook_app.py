@@ -23,7 +23,7 @@ def app_client():
     mock_hatchet.event.push = MagicMock()
 
     with (
-        patch("webhooks.vikunja._get_hatchet", return_value=mock_hatchet),
+        patch("common.dispatch._get_hatchet", return_value=mock_hatchet),
         patch("webhooks.github._get_hatchet", return_value=mock_hatchet),
         patch("webhooks.vikunja.register_webhook_on_startup", new=AsyncMock()),
     ):
