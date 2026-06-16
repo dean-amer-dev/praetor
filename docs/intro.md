@@ -115,23 +115,34 @@ New Deployments:
 - **Mem0 server** — memory API (points at Mac Mini PG via pgvector)
 - **Agent workers** — one Deployment per agent type, pull tasks from Hatchet
 
+## Phase Sequencing Rule
+
+**Phases are strictly sequential. Phase N cannot begin until Phase N-1 is fully complete.**
+
+Every phase file lists its pre-conditions. If a pre-condition is not met, stop and complete it before proceeding. Do not work on multiple phases in parallel. Do not skip a phase and return to it later — if a phase is blocked, resolve the blocker first.
+
+The current phase is always the lowest-numbered phase that is not yet ✅ Complete in `status.md`.
+
 ## Phases Overview
 
-| Phase | Name | Description | File |
-|-------|------|-------------|------|
-| 0 | Deployment Foundation | App-factory, infra-mcp, bws-mcp, GitHub apps, agent.md templates | [phase-0.md](./phase-0.md) |
-| 1 | Inference | LiteLLM on k3s, model routing, runner config | [phase-1.md](./phase-1.md) |
-| 2 | Storage | Qdrant on Mac Mini core stack via Komodo | [phase-2.md](./phase-2.md) |
-| 3 | Dispatch | Hatchet Lite on k3s, stub worker, cron | [phase-3.md](./phase-3.md) |
-| 4 | Memory | Mem0 server on k3s, memory tools for agents | [phase-4.md](./phase-4.md) |
-| 5 | Research Agent | PydanticAI research agent via Vikunja webhooks | [phase-5.md](./phase-5.md) |
-| 6 | Coder Agent | PydanticAI coder agent, sandbox, PR creation | [phase-6.md](./phase-6.md) |
-| 7 | PR Reviewer + QA | GitHub events drive agents automatically | [phase-7.md](./phase-7.md) |
-| 8 | Multi-Agent Pipeline | Pydantic Graph DAG combining research + code | [phase-8.md](./phase-8.md) |
-| 9 | Observability + Prompts | Langfuse: prompt versioning UI, run tracing, eval benchmarks | [phase-9.md](./phase-9.md) |
-| 10 | MCP Gateway | Centralize all MCP servers in LiteLLM; per-agent key scoping | [phase-10.md](./phase-10.md) |
-| 11 | Scaffold Worker | Create agents + MCP servers from OpenWebUI chat | [phase-11.md](./phase-11.md) |
-| 12 | Control Plane UI | Custom dashboard: trigger, monitor, benchmark, scaffold | [phase-12.md](./phase-12.md) |
+| Phase | Name | Status | File |
+|-------|------|--------|------|
+| 0 | Deployment Foundation | ✅ Complete | [phase-00.md](./phase-00.md) |
+| 1 | Inference | ✅ Complete | [phase-01.md](./phase-01.md) |
+| 2 | Storage | ✅ Complete | [phase-02.md](./phase-02.md) |
+| 3 | Dispatch | ✅ Complete | [phase-03.md](./phase-03.md) |
+| 4 | Memory | ✅ Complete (verify in Phase 12) | [phase-04.md](./phase-04.md) |
+| 5 | Research Agent | ✅ Complete | [phase-05.md](./phase-05.md) |
+| 6 | Coder Agent | ✅ Complete | [phase-06.md](./phase-06.md) |
+| 7 | PR Reviewer + QA | ✅ Complete (verify in Phase 12) | [phase-07.md](./phase-07.md) |
+| 8 | Multi-Agent Pipeline | ✅ Complete | [phase-08.md](./phase-08.md) |
+| 9 | Observability + Prompts | ✅ Complete | [phase-09.md](./phase-09.md) |
+| 10 | MCP Gateway | ✅ Complete | [phase-10.md](./phase-10.md) |
+| 11 | Scaffold Worker | ✅ Complete | [phase-11.md](./phase-11.md) |
+| 12 | Platform Verification | ⬜ Next | [phase-12.md](./phase-12.md) |
+| 13 | Agent Benchmarking & Eval | ⬜ Blocked on 12 | [phase-13.md](./phase-13.md) |
+| 14 | Voice Dispatch | ⬜ Blocked on 13 | [phase-14.md](./phase-14.md) |
+| 15 | Control Plane UI | ⬜ Blocked on 14 | [phase-15.md](./phase-15.md) |
 
 ## Non-Goals
 

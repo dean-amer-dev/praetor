@@ -1,133 +1,148 @@
-# Phase 13 — Infrastructure Stabilization
+# Phase 13 — Agent Benchmarking & Eval
 
-**Goal:** Fix three overlapping infrastructure failures that are blocking agents from running correctly: arch mismatches taking down mem0 and prometheus, missing CI for qa/reviewer worker images, and runner consolidation cleanup.
+**Goal:** Build a systematic quality baseline for all agents. Create eval datasets in Langfuse, automate benchmark runs via Hatchet, and establish pass/fail thresholds that block bad prompt changes before they reach production.
 
-This phase unblocks Phase 4 (Memory), Phase 7 (PR Reviewer + QA), and Phase 9 (Observability).
+## Pre-conditions
+
+- Phase 12 complete (all agents verified healthy, smoke tests green)
+- Langfuse deployed and all agents already instrumented with `@observe()` (Phase 9)
+- `POST /api/v1/dispatch` live (Phase 14 dispatch)
+
+## What Gets Built
+
+### 13a — Eval Datasets in Langfuse
+
+Create one dataset per agent type in the Langfuse UI (or via API). Each dataset contains 5–10 representative tasks with known-good expected outputs.
+
+**Research agent dataset (`research-eval`):**
+```
+item 1: input="Research Tailscale exit node ACL interaction"
+        expected_output_contains=["exit node", "ACL", "subnet"]
+item 2: input="Explain Hatchet durable execution model"
+        expected_output_contains=["durable", "retry", "workflow"]
+...
+```
+
+**Coder agent dataset (`coder-eval`):**
+```
+item 1: input="Add /healthz endpoint to a FastAPI app"
+        expected: PR opened, diff contains '/healthz', test file present
+item 2: input="Add pagination to GET /api/v1/tasks"
+        expected: PR opened, diff contains 'limit' and 'offset'
+...
+```
+
+**Reviewer agent dataset (`reviewer-eval`):**
+```
+item 1: PR diff with an obvious SQL injection vulnerability
+        expected_review_mentions=["injection", "parameterized", "unsafe"]
+item 2: PR diff that is clean and well-structured
+        expected: review is positive, no blocking comments
+...
+```
+
+Datasets are created once and live in Langfuse permanently. Runs append new trace results without modifying the dataset.
 
 ---
 
-## 13a — mem0 Arch Fix
+### 13b — Benchmark Hatchet Event
 
-**Root cause:** `amerenda/mem0-server:latest` is amd64-only. Pod scheduled on `rpi5-0` (arm64) because no nodeAffinity is set. Crash: `exec /usr/bin/sh: exec format error`.
+New Hatchet event: `agent:benchmark`. The benchmark worker picks up the event, runs the target agent against a single dataset item, scores the output, and writes the score back to Langfuse.
 
-**Quick fix (immediate):**
-Add nodeAffinity to `k3s-dean-gitops/apps/mem0/server/deployment.yaml` to pin pod to amd64 nodes:
-
-```yaml
-affinity:
-  nodeAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - murderbot
-                - archlinux
+**Input:**
+```python
+class BenchmarkInput(BaseModel):
+    dataset_name: str      # "research-eval"
+    dataset_item_id: str   # Langfuse dataset item ID
+    agent_type: str        # "research" | "code" | "review"
+    model: str             # "qwen3-35b" (or any LiteLLM model alias)
+    prompt_version: str    # Langfuse prompt name + version, e.g. "coder-system:v4"
 ```
 
-**Proper fix (follow-up):**
-Build multi-arch image in mem0 CI:
-```yaml
-- uses: docker/build-push-action@v5
-  with:
-    platforms: linux/amd64,linux/arm64
-    push: true
-    tags: amerenda/mem0-server:latest
-```
+**Worker behavior (`agents/benchmark/worker.py`):**
+1. Fetch dataset item from Langfuse API
+2. Dispatch agent via `common/dispatch.py:dispatch_agent()` with item's input
+3. Wait for agent completion (poll Hatchet run status, timeout 10 min)
+4. Fetch agent's Langfuse trace
+5. Score the trace output against the expected criteria using a lightweight LLM judge call
+6. Write score back to Langfuse via `POST /api/public/scores`
 
-**Done conditions:**
-- [ ] mem0 pod Running on amd64 node
-- [ ] `curl https://mem0.amer.dev/healthz` returns 200
-- [ ] Phase 4 status → ✅ Complete
+**Scoring — LLM judge (no custom eval framework):**
+```python
+judge_prompt = f"""
+Score the following agent output from 0.0 to 1.0.
+Expected criteria: {item.expected_criteria}
+Agent output: {agent_output}
+Return only a JSON object: {{"score": <float>, "reason": "<one sentence>"}}
+"""
+# Use qwen3-35b via LiteLLM — same model, cheap judge call
+score_resp = litellm.completion(model="qwen3-35b", messages=[{"role":"user","content":judge_prompt}])
+```
 
 ---
 
-## 13b — Praetor qa-worker and reviewer-worker Images
+### 13c — Benchmark Runner Script
 
-**Root cause:** `amerenda/praetor-qa:latest` and `amerenda/praetor-reviewer:latest` have never been built or pushed to DockerHub. Dockerfiles exist in the praetor repo but were never wired into CI.
+A CLI script (not a UI — that's Phase 15) that dispatches a full benchmark suite and prints results:
 
-**Working CI reference:** Look at how `praetor-coder-worker`, `praetor-research-worker`, etc. are built — those pods are Running, so their CI is working. Extend the same workflow to cover qa and reviewer.
-
-**Dockerfiles to build:**
-- `Dockerfile.qa-worker` → `amerenda/praetor-qa:latest`
-- `Dockerfile.reviewer-worker` → `amerenda/praetor-reviewer:latest`
-
-**Build requirements:**
-- Must be multi-arch: `linux/amd64,linux/arm64`
-- Same base image and tooling as other workers
-- Push on merge to main
-
-**Done conditions:**
-- [ ] Both images exist on DockerHub with multi-arch manifest
-- [ ] `praetor-qa-worker` pod Running (was: ImagePullBackOff)
-- [ ] `praetor-reviewer-worker` pod Running (was: ImagePullBackOff)
-- [ ] `app-praetor-qa-worker` ArgoCD app: Synced + Healthy
-- [ ] `app-praetor-reviewer-worker` ArgoCD app: Synced + Healthy
-
-**Additional:** Once workers are running, complete Phase 7 by registering the GitHub org webhook (see Phase 7 Blocker section in status.md).
-
----
-
-## 13c — Prometheus Crash Loop
-
-**Root cause:** `prometheus-infra-monitoring-kube-prom-prometheus-0` scheduled on `rpi5-0` (arm64 RPi, low memory). 182 WAL segments to replay; one segment took 3.99s vs normal ~100µs. OOM during WAL replay causes crash before prometheus binds its port, so config-reloader times out trying to hit `/-/reload`.
-
-**Quick fix:**
-Add nodeAffinity to the kube-prometheus-stack values to pin prometheus to amd64 nodes.
-
-In `k3s-dean-gitops/infra/monitoring/values.yaml` (or equivalent prometheus operator values):
-
-```yaml
-prometheus:
-  prometheusSpec:
-    nodeSelector:
-      kubernetes.io/hostname: murderbot
-    # or use affinity for more flexibility:
-    affinity:
-      nodeAffinity:
-        requiredDuringSchedulingIgnoredDuringExecution:
-          nodeSelectorTerms:
-            - matchExpressions:
-                - key: kubernetes.io/hostname
-                  operator: In
-                  values:
-                    - murderbot
-                    - archlinux
-```
-
-**If WAL is corrupted / too large to replay:**
 ```bash
-# As last resort — deletes ~2h of metrics, prometheus starts clean
-kubectl exec -n monitoring prometheus-infra-monitoring-kube-prom-prometheus-0 \
-  -c prometheus -- rm -rf /prometheus/wal/*
-# Then delete the pod to force restart
-kubectl delete pod -n monitoring prometheus-infra-monitoring-kube-prom-prometheus-0
+# Run full research-eval suite against production prompt version
+python scripts/run_benchmark.py \
+  --dataset research-eval \
+  --agent-type research \
+  --model qwen3-35b \
+  --prompt-version coder-system:v4
 ```
 
-**Done conditions:**
-- [ ] prometheus pod 2/2 Running on amd64 node
-- [ ] `infra-monitoring` ArgoCD app: Synced + Healthy
-- [ ] Prometheus accessible at `https://prometheus.amer.dev` (or internal URL)
-- [ ] No alertmanager alerts for prometheus down
+Output:
+```
+Running benchmark: research-eval (10 items) × qwen3-35b × coder-system:v4
+[1/10] Research Tailscale ACLs ........... 0.92 ✓
+[2/10] Explain Hatchet durable execution .. 0.88 ✓
+...
+Suite complete. Mean score: 0.87. Langfuse experiment: research-eval-2026-06-20
+```
+
+Results are saved as a Langfuse "experiment" — viewable at `langfuse.amer.dev`.
 
 ---
 
-## 13d — ARC Runner IgnoreExtraneous (Belt and Suspenders)
+### 13d — Baseline Establishment
 
-**Root cause:** Stash merge conflict left `root-app.yaml` with unresolved markers. Conflict resolved 2026-06-13, PR #747 open.
+Run the benchmark suite once against current production prompts. Record the baseline scores in `docs/eval-baselines.md`:
 
-**What was fixed:** All 8 runner ArgoCD apps now have `IgnoreExtraneous=true` in syncOptions. Note: the real fix was `application.resourceTrackingMethod: annotation` (PR #744) — all runners were already Synced+Healthy before #747. This PR is belt-and-suspenders.
+```markdown
+| Dataset | Model | Prompt | Date | Mean Score | Min Score |
+|---------|-------|--------|------|-----------|-----------|
+| research-eval | qwen3-35b | coder-system:v4 | 2026-06-XX | 0.87 | 0.72 |
+| coder-eval    | qwen3-35b | coder-system:v4 | 2026-06-XX | 0.81 | 0.65 |
+```
 
-**Done conditions:**
-- [ ] PR #747 merged: https://github.com/amerenda/k3s-dean-gitops/pull/747
-- [ ] All 8 runner apps Synced + Healthy (already true, merge is formality)
+Any future prompt change must be run through the benchmark suite before promoting to production. If mean score drops more than 0.05 below baseline, the change is rejected.
 
 ---
 
-## Pre-conditions for Phase 14+
+### 13e — Benchmark Worker Deployment
 
-Phase 13 must be fully complete before resuming:
-- Phase 9 (Observability): needs prometheus running (13c) + agents healthy (13a, 13b)
-- Phase 10 (MCP Gateway): needs all agents healthy
-- Phase 11 (Scaffold Worker): needs infra-mcp validated end-to-end (see cleanup plan Phase 6)
+Same pattern as other workers. Add to `praetor` CI image matrix.
+
+```dockerfile
+# Dockerfile.benchmark-worker — shares base with coder-worker
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+CMD ["python", "-m", "agents.benchmark.worker"]
+```
+
+k3s deployment: same env vars as other workers (Hatchet, LiteLLM, Langfuse, Mem0).
+
+## Phase 13 Ready Conditions
+
+1. `research-eval`, `coder-eval`, and `reviewer-eval` datasets exist in Langfuse with ≥5 items each
+2. `agent:benchmark` Hatchet event dispatches benchmark worker successfully
+3. `python scripts/run_benchmark.py --dataset research-eval` completes and writes scores to Langfuse
+4. Baseline scores recorded in `docs/eval-baselines.md`
+5. `benchmark-worker` pod Running in k3s praetor namespace
+6. Langfuse experiment view shows scored run history for each dataset
