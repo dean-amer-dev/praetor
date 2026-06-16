@@ -6,16 +6,16 @@
 | 1 | Inference | ✅ Complete | LiteLLM at litellm.amer.dev |
 | 2 | Storage | ✅ Complete | Qdrant on Mac Mini via Komodo |
 | 3 | Dispatch | ✅ Complete | Hatchet Lite on k3s, stub worker |
-| 4 | Memory | 🟡 Verify | mem0 switched to official arm64 image on RPi nodes (k3s-dean-gitops #757) — confirm health (Phase 12a) |
+| 4 | Memory | ✅ Complete | mem0 arm64 image healthy; smoke + E2E verified (Phase 12a) |
 | 5 | Research Agent | ✅ Complete | Vikunja ai-research label → research worker |
 | 6 | Coder Agent | ✅ Complete | Vikunja ai-go label → coder worker, PRs via dean-coder[bot] |
-| 7 | PR Reviewer + QA | 🟡 Verify | Images built, webhook live at pubhooks.amer.dev — confirm end-to-end with test PR (Phase 12b) |
+| 7 | PR Reviewer + QA | ✅ Complete | End-to-end verified via test PR #36; amerenda-reviewer[bot] posts reviews |
 | 8 | Multi-Agent Pipeline | ✅ Complete | Dual-label tasks → pipeline:research_code DAG; pipeline-worker deployed |
 | 9 | Observability + Prompts | ✅ Complete | Langfuse deployed; @observe() on all tools; eval scores wired; coder-system v4 prompt live; real Hatchet run traced with tool call spans (trace 7c8cb711) |
 | 10 | MCP Gateway | ✅ Complete | mcp-searxng + LiteLLM gateway live; agents wired; 2 tools verified at /mcp endpoint |
 | 11 | Scaffold Worker | ✅ Complete | agent:scaffold event; Jinja templates; draft PRs on praetor + dean-mcp from OpenWebUI |
-| 12 | Platform Verification | ⬜ Not started | Close Phase 4 + 7 verify; full E2E smoke pass; health check script |
-| 13 | Agent Benchmarking & Eval | ⬜ Not started | Requires Phase 12 |
+| 12 | Platform Verification | ✅ Complete | All smoke tests pass (18/18); health check green; Phase 4+7 verified; OOM fix + MCP URL fix merged (k3s-dean-gitops #802) |
+| 13 | Agent Benchmarking & Eval | 🔵 In Progress | benchmark-worker + eval datasets + runner script built; pending: run datasets, record baselines, deploy |
 | 14 | Voice Dispatch | ⬜ Not started | Requires Phase 13 |
 | 15 | Control Plane UI | ⬜ Not started | Requires Phase 14 |
 

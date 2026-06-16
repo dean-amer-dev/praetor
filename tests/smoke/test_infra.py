@@ -322,30 +322,32 @@ class TestPhase9Langfuse:
     def test_coder_system_prompt_exists(self):
         if not LANGFUSE_PUBLIC_KEY or not LANGFUSE_SECRET_KEY:
             pytest.skip("Langfuse keys not in praetor-research-secrets")
+        # GET /prompts?name=X returns a single prompt object (not a paginated list)
         resp = httpx.get(
             "https://langfuse.amer.dev/api/public/prompts",
-            params={"name": "coder-system", "label": "production"},
+            params={"name": "coder-system"},
             auth=(LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY),
             timeout=10,
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, f"coder-system prompt not found: {resp.text[:200]}"
         data = resp.json()
-        assert len(data.get("data", [])) > 0, \
-            "coder-system prompt not found in Langfuse — create it in the UI and label it 'production'"
+        assert "production" in data.get("labels", []), \
+            f"coder-system prompt exists but is not labeled 'production': labels={data.get('labels')}"
 
     def test_research_system_prompt_exists(self):
         if not LANGFUSE_PUBLIC_KEY or not LANGFUSE_SECRET_KEY:
             pytest.skip("Langfuse keys not in praetor-research-secrets")
+        # GET /prompts?name=X returns a single prompt object (not a paginated list)
         resp = httpx.get(
             "https://langfuse.amer.dev/api/public/prompts",
-            params={"name": "research-system", "label": "production"},
+            params={"name": "research-system"},
             auth=(LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY),
             timeout=10,
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, f"research-system prompt not found: {resp.text[:200]}"
         data = resp.json()
-        assert len(data.get("data", [])) > 0, \
-            "research-system prompt not found in Langfuse — create it in the UI and label it 'production'"
+        assert "production" in data.get("labels", []), \
+            f"research-system prompt exists but is not labeled 'production': labels={data.get('labels')}"
 
 
 # ---------------------------------------------------------------------------
@@ -358,35 +360,48 @@ LITELLM_API_KEY = (
 )
 
 
+def _mcp_tools_list(api_key: str) -> list[dict]:
+    """Fetch the MCP tools list via JSON-RPC over Streamable HTTP.
+
+    The /mcp/ endpoint requires Accept: text/event-stream and returns
+    a single SSE 'data:' line with the JSON-RPC response.
+    """
+    import json as _json
+    resp = httpx.post(
+        "https://litellm.amer.dev/mcp/",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
+        timeout=15,
+    )
+    assert resp.status_code == 200, f"MCP tools/list returned {resp.status_code}: {resp.text[:200]}"
+    for line in resp.text.splitlines():
+        if line.startswith("data:"):
+            payload = _json.loads(line[len("data:"):].strip())
+            return payload["result"]["tools"]
+    raise AssertionError(f"No SSE data line in MCP response: {resp.text[:500]}")
+
+
 class TestPhase10MCPGateway:
     def test_mcp_tools_endpoint_exists(self):
         if not LITELLM_API_KEY:
             pytest.skip("LITELLM_API_KEY not available")
         try:
-            resp = httpx.get(
-                "https://litellm.amer.dev/mcp/tools",
-                headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
-                timeout=10,
-            )
+            tools = _mcp_tools_list(LITELLM_API_KEY)
         except httpx.ConnectError:
             pytest.skip("MCP gateway endpoint not reachable — Phase 10 not yet deployed")
-        assert resp.status_code == 200, f"MCP tools endpoint returned {resp.status_code}"
-        data = resp.json()
-        assert isinstance(data, list) and len(data) > 0, f"expected non-empty tool list, got: {data}"
+        assert isinstance(tools, list) and len(tools) > 0, f"expected non-empty tool list, got: {tools}"
 
     def test_mcp_tools_include_web_search(self):
         if not LITELLM_API_KEY:
             pytest.skip("LITELLM_API_KEY not available")
         try:
-            resp = httpx.get(
-                "https://litellm.amer.dev/mcp/tools",
-                headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
-                timeout=10,
-            )
+            tools = _mcp_tools_list(LITELLM_API_KEY)
         except httpx.ConnectError:
             pytest.skip("MCP gateway not reachable — Phase 10 not yet deployed")
-        if resp.status_code != 200:
-            pytest.skip("MCP gateway not yet deployed")
-        tools = [t.get("name") for t in resp.json()]
-        assert any("search" in t.lower() for t in tools), \
-            f"searxng web_search tool not in gateway tool list: {tools}"
+        tool_names = [t.get("name", "") for t in tools]
+        assert any("search" in n.lower() for n in tool_names), \
+            f"searxng web_search tool not in gateway tool list: {tool_names}"

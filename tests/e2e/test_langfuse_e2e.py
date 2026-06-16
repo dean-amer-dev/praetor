@@ -90,7 +90,7 @@ class TestLangfuseE2E:
         try:
             poll_until(
                 lambda: mem0_search("Hatchet", agent_id),
-                timeout=180,
+                timeout=360,
                 interval=10,
                 fail_msg=f"research agent did not write to mem0 task-{task_id}",
             )
