@@ -34,7 +34,7 @@ class TestResearchNode:
 
     async def test_runs_agent_when_no_memories(self, state):
         mock_agent = AsyncMock()
-        mock_agent.run.return_value = MagicMock(data="research summary")
+        mock_agent.run.return_value = MagicMock(output="research summary")
         with patch("pipelines.research_then_code.get_all_memories", return_value=[]):
             with patch("pipelines.research_then_code.build_research_agent", return_value=mock_agent):
                 node = ResearchNode()
@@ -44,7 +44,7 @@ class TestResearchNode:
 
     async def test_returns_summary(self, state):
         mock_agent = AsyncMock()
-        mock_agent.run.return_value = MagicMock(data="my summary text")
+        mock_agent.run.return_value = MagicMock(output="my summary text")
         with patch("pipelines.research_then_code.get_all_memories", return_value=[]):
             with patch("pipelines.research_then_code.build_research_agent", return_value=mock_agent):
                 node = ResearchNode()
@@ -86,7 +86,7 @@ class TestCoderNode:
             task_description="repo: amerenda/ecdysis — add a /healthz endpoint",
         )
         mock_agent = AsyncMock()
-        mock_agent.run.return_value = MagicMock(data="done")
+        mock_agent.run.return_value = MagicMock(output="done")
         with patch("pipelines.research_then_code.build_coder_agent", return_value=mock_agent):
             with patch("pipelines.research_then_code.coder_vikunja", new=AsyncMock()):
                 node = CoderNode()
@@ -97,7 +97,7 @@ class TestCoderNode:
     async def test_research_context_in_prompt(self):
         state = PipelineState(1, "t", "repo: amerenda/x")
         mock_agent = AsyncMock()
-        mock_agent.run.return_value = MagicMock(data="done")
+        mock_agent.run.return_value = MagicMock(output="done")
         with patch("pipelines.research_then_code.build_coder_agent", return_value=mock_agent):
             with patch("pipelines.research_then_code.coder_vikunja", new=AsyncMock()):
                 node = CoderNode()
@@ -108,7 +108,7 @@ class TestCoderNode:
     async def test_branch_name_in_prompt(self):
         state = PipelineState(77, "title", "repo: amerenda/foo")
         mock_agent = AsyncMock()
-        mock_agent.run.return_value = MagicMock(data="done")
+        mock_agent.run.return_value = MagicMock(output="done")
         with patch("pipelines.research_then_code.build_coder_agent", return_value=mock_agent):
             with patch("pipelines.research_then_code.coder_vikunja", new=AsyncMock()):
                 node = CoderNode()
