@@ -6,7 +6,7 @@ This phase has no new code. It is a verification gate. Nothing from Phase 13 onw
 
 ## Pre-conditions
 
-- Phases 0–11 and Phase 14 (Conversational Dispatch) complete
+- Phases 0–11 complete (conversational dispatch live via Phase 11)
 - All workers deployed (research, coder, qa, reviewer, pipeline, scaffold)
 - `POST /api/v1/dispatch` live and tested
 

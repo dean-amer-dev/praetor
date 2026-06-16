@@ -1,196 +1,85 @@
-# Phase 16 — Voice Dispatch
+# Phase 16 — Kubernetes MCP
 
-**Goal:** Speak a command to Home Assistant → Praetor agent runs → HA announces the result via TTS. Voice is a first-class dispatch interface, identical in capability to claw.amer.dev or opencode.
+**Goal:** Deploy `Flux159/mcp-server-kubernetes` via the Phase 15 MCP factory and make it available to praetor agents with two access tiers: read-only (safe for diagnostic agents) and read-write (for operational tasks like scaling the benchmark-worker).
 
 ## Pre-conditions
 
-- Phase 15 complete (Kubernetes MCP live — platform fully instrumented)
-- Phase 13 complete (quality baselines established — voice must hit known-good agents)
-- `POST /api/v1/dispatch` live (conversational dispatch, Phase 14 predecessor)
-- `GET /api/v1/status/{task_id}` live (status polling endpoint)
-- Piper TTS running (already in `llm-agents` stack on mac-mini-m4)
-- Home Assistant at `https://ha.amer.dev` with `$HA_TOKEN` available
+- Phase 15 complete (self-service MCP factory working end-to-end)
+- `POST /api/v1/mcp/register` tested and stable
+- k3s cluster accessible from the MCP pod (in-cluster service account)
 
-## Architecture
+## Implementation
 
-```
-"Hey, research Tailscale exit nodes"
-          │
-          ▼
-  Home Assistant
-  (voice command intent: praetor_dispatch)
-          │
-          ▼
-  HA → REST API → POST /api/v1/dispatch
-          │
-          ▼
-  Hatchet dispatches agent
-          │
-          ▼
-  HA polls GET /api/v1/status/{task_id} (every 30s, up to 20 min)
-          │
-          ▼
-  done=true → HA calls piper TTS with mem0_summary
-          │
-          ▼
-  HA announces result via media player
-```
+### 15a — Deploy Read-Only Instance
 
-No new infrastructure. Voice uses the same dispatch API as every other interface.
+Register via Phase 15 factory:
 
-## What Gets Built
-
-### 16a — HA Intent Script (`praetor_dispatch`)
-
-A Home Assistant script that calls the Praetor dispatch API and polls for results.
-
-Add to `ha.amer.dev` config (via `docker exec homeassistant` → `/config/scripts.yaml` or UI):
-
-```yaml
-praetor_dispatch:
-  alias: "Dispatch Praetor Agent"
-  description: "Send a task to the Praetor platform and announce the result."
-  fields:
-    task_title:
-      description: "The task to run"
-      example: "Research Tailscale exit nodes"
-    task_type:
-      description: "research | code | pipeline"
-      default: "research"
-  sequence:
-    - service: rest_command.praetor_dispatch
-      data:
-        title: "{{ task_title }}"
-        type: "{{ task_type }}"
-      response_variable: dispatch_response
-
-    - variables:
-        task_id: "{{ dispatch_response.content | from_json | attr('task_id') }}"
-
-    - service: tts.speak
-      data:
-        message: "Got it. Running {{ task_type }} task. I'll let you know when it's done."
-        media_player_entity_id: media_player.living_room
-
-    - repeat:
-        count: 40  # max 20 minutes (30s × 40)
-        sequence:
-          - delay: "00:00:30"
-          - service: rest_command.praetor_status
-            data:
-              task_id: "{{ task_id }}"
-            response_variable: status_response
-          - if:
-              - condition: template
-                value_template: >
-                  {{ (status_response.content | from_json).done == true }}
-            then:
-              - service: tts.speak
-                data:
-                  message: >
-                    Praetor result: {{ (status_response.content | from_json).tts_summary }}
-                  media_player_entity_id: media_player.living_room
-              - stop: "Task complete"
-```
-
-### 16b — HA REST Commands
-
-Add to `/config/configuration.yaml`:
-
-```yaml
-rest_command:
-  praetor_dispatch:
-    url: "https://praetor.amer.dev/api/v1/dispatch"
-    method: POST
-    headers:
-      Authorization: "Bearer {{ states('input_text.praetor_api_key') }}"
-      Content-Type: application/json
-    payload: '{"title": "{{ title }}", "type": "{{ type }}"}'
-
-  praetor_status:
-    url: "https://praetor.amer.dev/api/v1/status/{{ task_id }}"
-    method: GET
-    headers:
-      Authorization: "Bearer {{ states('input_text.praetor_api_key') }}"
-```
-
-`input_text.praetor_api_key` — a helper that stores the `PRAETOR_API_KEY` value. Set it once in the HA UI; never hardcode in YAML.
-
-### 16c — Voice Intent Registration
-
-Register a custom intent in HA's conversation integration so the local voice assistant parses "research X" and "code X in repo Y" into structured calls.
-
-```yaml
-# /config/custom_sentences/en/praetor.yaml
-language: "en"
-intents:
-  PraetorResearch:
-    data:
-      - sentences:
-          - "research {topic}"
-          - "look up {topic}"
-          - "find information about {topic}"
-  PraetorCode:
-    data:
-      - sentences:
-          - "code {task} in {repo}"
-          - "implement {task} in repo {repo}"
-          - "write code for {task}"
-```
-
-Intent handlers in `/config/intent_script.yaml`:
-
-```yaml
-PraetorResearch:
-  action:
-    service: script.praetor_dispatch
-    data:
-      task_title: "Research: {{ topic }}"
-      task_type: research
-  speech:
-    text: "Starting research on {{ topic }}."
-
-PraetorCode:
-  action:
-    service: script.praetor_dispatch
-    data:
-      task_title: "{{ task }}"
-      task_type: code
-  speech:
-    text: "Got it. I'll start coding {{ task }}."
-```
-
-### 16d — TTS Response Length Handling
-
-Agent research results can be long. The TTS output must be trimmed to something speakable.
-
-Add `tts_summary` field to the `/api/v1/status` response:
-
-```python
-# In webhooks/dispatch_api.py status endpoint
-mem0_summary = memories[0]["memory"] if memories else None
-tts_summary = None
-if mem0_summary:
-    # First 2 sentences only for TTS — full summary still in mem0_summary
-    sentences = mem0_summary.split(". ")
-    tts_summary = ". ".join(sentences[:2]) + "."
-
-return {
-    "task_id": task_id,
-    "done": bool(mem0_summary),
-    "mem0_summary": mem0_summary,
-    "tts_summary": tts_summary,
+```json
+POST /api/v1/mcp/register
+{
+  "name": "kubernetes-readonly",
+  "image": "ghcr.io/flux159/mcp-server-kubernetes:latest",
+  "port": 3000,
+  "transport": "http",
+  "args": [],
+  "env_secrets": {},
+  "env": {
+    "ALLOW_ONLY_NON_DESTRUCTIVE_TOOLS": "true"
+  }
 }
 ```
 
-HA reads `tts_summary` instead of `mem0_summary` for the spoken result.
+Uses in-cluster service account with `get`/`list`/`watch` RBAC on praetor namespace. Tools available: `kubectl_get`, `kubectl_describe`, `kubectl_logs`, `kubectl_events`, `explain_resource`.
+
+### 15b — Deploy Read-Write Instance
+
+```json
+POST /api/v1/mcp/register
+{
+  "name": "kubernetes-rw",
+  "image": "ghcr.io/flux159/mcp-server-kubernetes:latest",
+  "port": 3000,
+  "transport": "http",
+  "env_secrets": {},
+  "env": {}
+}
+```
+
+Full access: includes `kubectl_scale`, `kubectl_apply`, `kubectl_patch`, `kubectl_rollout`. Scoped to the praetor namespace. Used when Claude needs to scale the benchmark-worker or restart a deployment.
+
+### 15c — Service Accounts
+
+Two k3s service accounts provisioned by the MCP factory:
+- `mcp-kubernetes-readonly-sa` — ClusterRole: `view` (built-in)
+- `mcp-kubernetes-rw-sa` — ClusterRole: custom, allows `get`/`list`/`watch`/`update`/`patch` on `deployments`, `pods`, `services` in the `praetor` namespace only
+
+Note: Full RBAC design deferred — Phase 16 uses the minimal set needed for the benchmark-worker scale use case.
+
+### 15d — Benchmark Worker Scale Flow
+
+Replace the current `kubectl scale` workaround. When running benchmarks:
+
+1. Claude calls `kubernetes-rw` MCP tool `kubectl_scale`:
+   ```
+   deployment/praetor-benchmark-worker --replicas=1 -n praetor
+   ```
+2. Dispatches benchmark events
+3. Polls until benchmarks complete
+4. Scales back down:
+   ```
+   deployment/praetor-benchmark-worker --replicas=0 -n praetor
+   ```
+
+No more manual kubectl commands for benchmark runs.
+
+### 15e — Wire into Agent Context
+
+Add `kubernetes-readonly` to the diagnostic/research agent's MCP server list in LiteLLM. The read-write instance is only invoked explicitly (by Claude Code, not autonomously by praetor agents).
 
 ## Phase 16 Ready Conditions
 
-1. "Hey assistant, research Tailscale exit nodes" → `agent:research` Hatchet run starts within 15s
-2. HA announces "Got it. Running research task." immediately after dispatch
-3. HA polls status and announces the TTS summary when `done=true` (within 20 minutes)
-4. `PraetorCode` intent: "code add /healthz to ecdysis" → coder agent starts, HA confirms
-5. `input_text.praetor_api_key` helper holds the key — no hardcoded secrets in HA YAML
-6. TTS summary is ≤3 sentences (not raw dump of full research output)
-7. Works from both living room and bedroom media players
+1. `kubernetes-readonly` MCP deployed and healthy; `kubectl_get pods -n praetor` returns current pod list
+2. `kubernetes-rw` MCP deployed and healthy; `kubectl_scale` successfully scales a deployment
+3. Benchmark-worker scale-up/down works end-to-end via `kubernetes-rw` MCP (replicas 0→1→0)
+4. Research agent can call `kubectl_logs` and `kubectl_describe` via `kubernetes-readonly` during a task
+5. Neither MCP instance can affect namespaces outside `praetor` (RBAC verified)
