@@ -62,13 +62,13 @@ def main() -> None:
         execution_timeout=timedelta(minutes=20),
         retries=1,
         concurrency=ConcurrencyExpression(
-            expression="string(input.task_id)",
+            expression='"coder"',
             max_runs=1,
-            limit_strategy=ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
+            limit_strategy=ConcurrencyLimitStrategy.CANCEL_NEWEST,
         ),
     )(_run_coder)
 
-    worker = hatchet.worker("coder-worker", workflows=[run_coder])
+    worker = hatchet.worker("coder-worker", workflows=[run_coder], slots=1)
     worker.start()
 
 
