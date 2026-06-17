@@ -1,150 +1,141 @@
-# Phase 19 — Full App Pipeline
+# Phase 19 — Intelligent MCP Agent
 
-**Goal:** From an OpenWebUI conversation, go from "here's what I want to build" to a running UAT deployment with CI/CD fully wired — without touching the terminal. This phase adds the two missing pieces the coder agent currently can't do on its own: (1) create a new GitHub repo from the app-template, and (2) provision CI runners for it. After this phase, the path from idea to UAT is fully automated.
+**Goal:** When an agent or user identifies that a new capability is needed, the platform automatically determines whether an existing MCP covers it, and if not, writes and deploys one. Adding a new tool to the platform is a conversation, not a manual process.
 
 ## Pre-conditions
 
-- Phase 18 complete (control plane UI — full platform confirmed stable before adding app creation)
-- `infra-mcp scaffold_app` and `open_deploy_pr` working (Phase 0)
-- `infra-mcp add_mac_mini_runner` available (Phase 0)
-- Coder agent working end-to-end (Phase 6)
-- PR reviewer working (Phase 7)
-- QA agent working (Phase 7)
-- `app-template` repo exists at `amerenda/app-template` with CI skeleton
+- Phase 18 complete (full app pipeline — repo creation and CI automation working)
+- Phase 15 complete (MCP factory deployment API)
+- Phase 11 complete (scaffold worker — MCP code generation)
+- Research agent working (Phase 5)
+- MCP factory `POST /api/v1/mcp/register` stable
 
 ## The Gap Today
 
-The coder agent writes code and opens PRs on **existing repos** only. To build a brand-new app you currently need to manually:
+Phase 15 gives you a deployment API: hand it a complete spec (image, port, secrets) and it opens a GitOps PR. What it doesn't do is think:
 
-1. Create a GitHub repo (from `app-template`)
-2. Add runners to that repo (via `infra-mcp add_mac_mini_runner`)
-3. Create the repo's k3s manifests (UAT + prod) in `k3s-dean-gitops`
-4. Then give the coder agent a task on the new repo
+- Does an MCP already exist for this?
+- Is an MCP even the right tool, or is a direct API call enough?
+- If building new, what should it do exactly?
 
-This phase collapses steps 1-3 into a single automated flow triggered from OpenWebUI.
+Those decisions currently require a human. This phase makes them automatic.
 
 ## Architecture
 
 ```
-OpenWebUI conversation
+Trigger: user in OpenWebUI or agent during task execution
     │
-    │  User: "Build an app that does X"
-    │  Model: generates AppPlan, asks for approval
-    │  User: approves
-    │  Model: calls praetor_mcp.create_app(plan)
+    │  "I need to be able to query Grafana alerts"
+    │  or: agent hits a tool gap mid-task
     │
     ▼
-POST /api/v1/app/create
+POST /api/v1/mcp/request   ← new endpoint (or OpenWebUI tool call)
+    { capability: "query Grafana alerts from Grafana API" }
     │
-    ├─► Create GitHub repo from app-template (GitHub API)
-    │   (amerenda-coder app, org-level repo creation)
+    ├─► Research agent: search for existing MCP servers
+    │     - GitHub search: "mcp server grafana"
+    │     - Smithery / mcp.so registries
+    │     - ModelContextProtocol GitHub org
+    │     Returns: { found: bool, image: str | None, confidence: float, notes: str }
     │
-    ├─► infra-mcp scaffold_app → k3s manifests for UAT + prod
-    │   infra-mcp open_deploy_pr → ArgoCD ready for UAT
+    ├─► Decision:
+    │     found + confidence > 0.8 → use existing image
+    │     found + confidence < 0.8 → verify + test, then decide
+    │     not found → scaffold new MCP
     │
-    ├─► infra-mcp add_mac_mini_runner → CI runners on new repo
+    ├─► Path A: existing image found
+    │     POST /api/v1/mcp/register { name, image, port, transport, env_secrets }
+    │     Returns PR URL
     │
-    └─► Dispatch coder agent:
-        POST /api/v1/dispatch { type: "code", title: plan.title,
-                                description: plan.full_description,
-                                repo: plan.repo_name }
-            │
-            ▼
-        Coder agent writes initial code, opens PR
-            │
-            ▼
-        GitHub PR event → reviewer agent fires automatically
-            │
-            ▼
-        PR merged → CI builds image → UAT manifest updated → ArgoCD syncs
-            │
-            ▼
-        QA agent runs against UAT endpoint
-            │
-            ▼
-        Prod deploy PR created → human approves → prod rolls
+    └─► Path B: no existing image
+          Dispatch scaffold worker: agent:scaffold
+            { type: "mcp", name: <name>, description: <capability> }
+          Scaffold worker:
+            - Creates MCP server code in dean-mcp/<name>/
+            - Opens PR on amerenda/dean-mcp
+            - CI builds + pushes image (amerenda/<name>:latest)
+          After PR merged + image built:
+            POST /api/v1/mcp/register { name, image, ... }
+          Returns: scaffold PR URL + (later) registry PR URL
 ```
 
 ## What Gets Built
 
-### 19a — AppPlan Schema
-
-```python
-class AppPlan(BaseModel):
-    name: str                          # kebab-case, becomes repo name
-    description: str                   # what the app does (for coder prompt)
-    domain: str | None = None          # e.g. "myapp.amer.dev" (optional)
-    port: int = 8000
-    has_database: bool = False         # postgres via app-factory pattern
-    env_secrets: dict[str, str] = {}   # {ENV_VAR: bws-secret-name}
-    stateless: bool = True             # False = Komodo stateful (not yet automated)
-```
-
-### 19b — Repo Creation
-
-Use the GitHub API with the amerenda-coder GitHub App installation token to create a new repo from `app-template`:
+### 20a — MCP Request Endpoint
 
 ```
-POST /repos/amerenda/app-template/generate
+POST /api/v1/mcp/request
 {
-  "owner": "amerenda",
-  "name": "<name>",
-  "private": false,
-  "description": "<description>"
+  "capability": "natural language description of the tool capability needed",
+  "preferred_name": "optional-name"    // optional
 }
 ```
 
-The `amerenda-coder` GitHub App needs `administration:write` permission at org level for this. Check and grant if not already set.
-
-### 19c — Runner Provisioning
-
-Call `infra-mcp add_mac_mini_runner` for the new repo immediately after creation. This registers an ARC runner scale set on the mac-mini so the new repo's CI has a runner.
-
-### 19d — k3s Manifests via infra-mcp
-
-Reuse the existing `scaffold_app` + `open_deploy_pr` pattern from infra-mcp. The factory calls these with the `AppPlan` fields. ArgoCD will have the UAT namespace ready before the coder agent's first PR merges.
-
-### 19e — Coder Dispatch with Full Plan Context
-
-The coder agent currently receives `task_title` and `task_description`. For a new-app task, `task_description` includes the full `AppPlan` as structured context:
-
-```
-App: <name>
-Repo: https://github.com/amerenda/<name>
-Branch: amerenda-coder/initial-implementation
-Purpose: <description>
-Port: <port>
-Secrets needed: <env_secrets>
-UAT URL: https://<name>-uat.amer.dev
+Returns:
+```json
+{
+  "decision": "use_existing | scaffold_new",
+  "image": "ghcr.io/org/mcp-name:latest",  // if use_existing
+  "pr_url": "...",                          // registration or scaffold PR
+  "research_summary": "...",               // what the research agent found
+  "task_id": 12345                         // Hatchet run tracking the pipeline
+}
 ```
 
-The coder agent clones the new repo (app-template skeleton), implements the app, opens a PR. From that point, the existing reviewer → CI → UAT → QA → prod chain handles everything automatically.
+### 20b — Research Agent MCP Search
 
-### 19f — praetor_mcp Tool
+Extend the research agent with an MCP discovery tool. Given a capability description, it searches:
 
-Expose `create_app(plan: AppPlan)` as a tool in the `praetor-mcp` MCP server so OpenWebUI/qwen3-35b-think can call it directly from chat. The model creates the plan conversationally, asks for approval, then calls `create_app` with the approved spec.
+1. **Smithery** (`smithery.ai`) — largest MCP index
+2. **mcp.so** — community registry
+3. **GitHub** — search `"mcp-server" <keyword>` for repos with Dockerfiles
+4. **ModelContextProtocol org** — reference implementations
+5. **Existing praetor MCPs** — check the registry via `GET /api/v1/mcp` first
 
-### 19g — Plan Approval Step
+Returns a confidence-ranked list of candidates with image names where available.
 
-The model should always present a plan and wait for explicit approval before calling `create_app`. This is enforced via the system prompt on qwen3-35b-think in OpenWebUI:
+### 20c — Decision Logic
+
+After research:
+
+- `confidence >= 0.85` and image available on a public registry: use existing, call factory
+- `confidence >= 0.85` but no prebuilt image: scaffold from source + build
+- `confidence < 0.85`: ask user for confirmation before proceeding (via OpenWebUI or a Vikunja task comment)
+- No results: proceed with scaffold_new
+
+### 20d — Scaffold → Build → Register Pipeline
+
+When scaffolding is needed, the flow is:
+
+1. `agent:scaffold` event → scaffold worker creates `dean-mcp/<name>/server.py` + Dockerfile
+2. Scaffold PR merged → CI builds `amerenda/<name>:latest`
+3. Hatchet monitors for the CI completion (polls GitHub API for the build job)
+4. On success: calls `POST /api/v1/mcp/register` automatically
+5. Returns the final registry PR URL
+
+This is a multi-step Hatchet workflow with a wait step between scaffold-merge and register.
+
+### 20e — praetor_mcp Tool
+
+Add `request_mcp(capability: str)` as a tool in the praetor-mcp MCP server. This is callable from OpenWebUI mid-conversation:
 
 ```
-When a user asks you to build an app:
-1. Gather requirements through conversation (2-3 exchanges max)
-2. Present a structured AppPlan summary for approval
-3. Wait for explicit "yes" / "looks good" / "go ahead" before calling create_app
-4. Never call create_app without explicit approval
+User: "Can you query my Grafana alerts?"
+Model: "I don't have that tool yet. Let me find or build an MCP for it."
+[model calls request_mcp("query Grafana alerts from Grafana HTTP API")]
+Model: "Found mcp-grafana on Smithery. I'm registering it now — PR #... opened.
+        Once merged, I'll have access to grafana_list_alerts, grafana_get_datasources, etc."
 ```
+
+### 20f — Duplicate Prevention
+
+Before any research, check `GET /api/v1/mcp` — if a registered MCP already covers the capability (by name or description match), return it immediately without opening a PR.
 
 ## Phase 19 Ready Conditions
 
-1. User describes an app in OpenWebUI → model creates a plan and waits for approval (does not auto-fire)
-2. User approves → `create_app` called → GitHub repo created within 30s
-3. Runner provisioned on new repo → CI can execute within 5 minutes of repo creation
-4. k3s UAT manifests created via infra-mcp → ArgoCD has the namespace before first CI run
-5. Coder agent opens a PR on the new repo with working initial code
-6. PR reviewer fires automatically on the PR
-7. PR merged → CI builds → UAT pod running (check with `get_app_status`)
-8. QA agent runs against the UAT endpoint and posts results
-9. Prod deploy PR created → after human merge, prod pod running
-10. Entire flow from "user approves plan" to "UAT running" completes in under 15 minutes
+1. `POST /api/v1/mcp/request { "capability": "search the web" }` → research agent finds mcp-searxng already registered, returns immediately with no new PR
+2. `POST /api/v1/mcp/request { "capability": "query Grafana alerts" }` → research finds existing image, factory PR opened within 2 minutes
+3. `POST /api/v1/mcp/request { "capability": "send a push notification to ntfy" }` → no existing MCP found → scaffold worker opens a PR on dean-mcp within 5 minutes
+4. After scaffold PR merged + image built → register PR opened automatically (no human trigger)
+5. `request_mcp` callable from OpenWebUI conversation mid-task
+6. Confidence < 0.85 case: Hatchet run pauses and posts a clarification request before proceeding

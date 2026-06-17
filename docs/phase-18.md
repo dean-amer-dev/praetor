@@ -1,173 +1,150 @@
-# Phase 18 — Control Plane UI
+# Phase 18 — Full App Pipeline
 
-**Goal:** A purpose-built React dashboard at `praetor.amer.dev` for platform operations — trigger agents, monitor runs, edit prompts, run benchmarks, manage MCPs, and scaffold new components. Replaces tab-switching between Hatchet, Langfuse, and claw.amer.dev for routine platform tasks.
+**Goal:** From an OpenWebUI conversation, go from "here's what I want to build" to a running UAT deployment with CI/CD fully wired — without touching the terminal. This phase adds the two missing pieces the coder agent currently can't do on its own: (1) create a new GitHub repo from the app-template, and (2) provision CI runners for it. After this phase, the path from idea to UAT is fully automated.
 
 ## Pre-conditions
 
-- Phase 17 complete (voice dispatch working — all dispatch paths confirmed stable)
-- `POST /api/v1/dispatch` and `GET /api/v1/status/{task_id}` live
-- Benchmark runner from Phase 14 working (UI wraps existing backend)
-- Scaffold worker from Phase 11 working (UI wraps existing `agent:scaffold` event)
-- MCP factory from Phase 15 working (UI wraps `POST /api/v1/mcp/register`)
-- Phase 12 health check passing (platform must be fully verified before adding UI complexity)
+- Phase 17 complete (control plane UI — full platform confirmed stable before adding app creation)
+- `infra-mcp scaffold_app` and `open_deploy_pr` working (Phase 0)
+- `infra-mcp add_mac_mini_runner` available (Phase 0)
+- Coder agent working end-to-end (Phase 6)
+- PR reviewer working (Phase 7)
+- QA agent working (Phase 7)
+- `app-template` repo exists at `amerenda/app-template` with CI skeleton
 
-## Design Principles
+## The Gap Today
 
-This is a **control plane**, not a chat interface. OpenWebUI (`claw.amer.dev`) stays for conversation. Praetor UI (`praetor.amer.dev`) is for platform operations only.
+The coder agent writes code and opens PRs on **existing repos** only. To build a brand-new app you currently need to manually:
 
-Do not re-implement what Hatchet or Langfuse already do well. Link out to them for deep drill-downs.
+1. Create a GitHub repo (from `app-template`)
+2. Add runners to that repo (via `infra-mcp add_mac_mini_runner`)
+3. Create the repo's k3s manifests (UAT + prod) in `k3s-dean-gitops`
+4. Then give the coder agent a task on the new repo
 
-## Stack
+This phase collapses steps 1-3 into a single automated flow triggered from OpenWebUI.
 
-| Layer | Choice | Why |
-|-------|--------|-----|
-| Frontend | React + Vite | Already in stack (ecdysis uses React) |
-| Backend | FastAPI | Already in `praetor/webhooks/app.py` — extend with new router |
-| Auth | Existing amer.dev SSO | No new auth infra |
-
-New code lives in:
-- `praetor/ui/` — React app (built by CI → nginx serves static assets)
-- `praetor/webhooks/ui_api.py` — new FastAPI router for UI-specific endpoints, mounted on existing app
-
-## Feature Areas
-
-### Panel 1: Run Dashboard
-
-Unified view of recent agent runs across Hatchet + Langfuse.
+## Architecture
 
 ```
-Last 20 runs
-┌──────────┬──────────┬──────────┬──────────┬──────────┐
-│ Agent    │ Task     │ Status   │ Duration │ Trace    │
-├──────────┼──────────┼──────────┼──────────┼──────────┤
-│ research │ #1234    │ ✓ Done   │ 3m 12s   │ [View]   │
-│ coder    │ #1233    │ ✓ Done   │ 8m 45s   │ [View]   │
-│ reviewer │ PR #88   │ ✗ Failed │ 1m 02s   │ [View]   │
-└──────────┴──────────┴──────────┴──────────┴──────────┘
+OpenWebUI conversation
+    │
+    │  User: "Build an app that does X"
+    │  Model: generates AppPlan, asks for approval
+    │  User: approves
+    │  Model: calls praetor_mcp.create_app(plan)
+    │
+    ▼
+POST /api/v1/app/create
+    │
+    ├─► Create GitHub repo from app-template (GitHub API)
+    │   (amerenda-coder app, org-level repo creation)
+    │
+    ├─► infra-mcp scaffold_app → k3s manifests for UAT + prod
+    │   infra-mcp open_deploy_pr → ArgoCD ready for UAT
+    │
+    ├─► infra-mcp add_mac_mini_runner → CI runners on new repo
+    │
+    └─► Dispatch coder agent:
+        POST /api/v1/dispatch { type: "code", title: plan.title,
+                                description: plan.full_description,
+                                repo: plan.repo_name }
+            │
+            ▼
+        Coder agent writes initial code, opens PR
+            │
+            ▼
+        GitHub PR event → reviewer agent fires automatically
+            │
+            ▼
+        PR merged → CI builds image → UAT manifest updated → ArgoCD syncs
+            │
+            ▼
+        QA agent runs against UAT endpoint
+            │
+            ▼
+        Prod deploy PR created → human approves → prod rolls
 ```
 
-Backend: `GET /api/ui/runs` — pulls from Hatchet API, merges with Langfuse trace IDs. No re-implementation of Hatchet's full UI. "View" links go to `hatchet.amer.dev` or `langfuse.amer.dev`.
+## What Gets Built
 
-Auto-refreshes every 10s.
+### 19a — AppPlan Schema
 
----
-
-### Panel 2: Trigger Panel
-
-Dispatch any agent without opening Vikunja or crafting a curl command.
-
-```
-Agent type: [ research ▾ ]
-Title:      [ Research Tailscale exit node ACL interaction ]
-[ Trigger → ]
-```
-
-Posts to `POST /api/v1/dispatch`. Response shows task_id and links to Hatchet run. New run appears in Run Dashboard within 10s.
-
----
-
-### Panel 3: Prompt Quick-Edit
-
-Lists current production prompts from Langfuse. Click to open the prompt editor.
-
-```
-Prompts
-┌─────────────────────┬─────────┬────────────────┐
-│ Name                │ Version │ Last modified  │
-├─────────────────────┼─────────┼────────────────┤
-│ coder-system        │ v4      │ 2026-06-15     │
-│ research-system     │ v3      │ 2026-06-10     │
-│ reviewer-system     │ v2      │ 2026-06-01     │
-│ scaffold-system     │ v1      │ 2026-06-18     │
-└─────────────────────┴─────────┴────────────────┘
-[ Open in Langfuse ↗ ]
+```python
+class AppPlan(BaseModel):
+    name: str                          # kebab-case, becomes repo name
+    description: str                   # what the app does (for coder prompt)
+    domain: str | None = None          # e.g. "myapp.amer.dev" (optional)
+    port: int = 8000
+    has_database: bool = False         # postgres via app-factory pattern
+    env_secrets: dict[str, str] = {}   # {ENV_VAR: bws-secret-name}
+    stateless: bool = True             # False = Komodo stateful (not yet automated)
 ```
 
-Backend: `GET /api/ui/prompts` proxies `GET /api/public/prompts` from Langfuse API.
+### 19b — Repo Creation
 
----
-
-### Panel 4: Benchmark Runner
-
-Run eval datasets from the UI without the CLI script (Phase 14 backend is reused).
+Use the GitHub API with the amerenda-coder GitHub App installation token to create a new repo from `app-template`:
 
 ```
-Dataset:  [ research-eval ▾ ]    (5 items)
-Model:    [ qwen3-35b ▾ ]
-Prompt:   [ research-system:v3 ▾ ]
-[ Run Benchmark → ]
-
-Running... [3/5] ██████░░░░ 60%
-
-Results:
-  Mean score: 0.87
-  Min score:  0.72
-  [ View in Langfuse ↗ ]
+POST /repos/amerenda/app-template/generate
+{
+  "owner": "amerenda",
+  "name": "<name>",
+  "private": false,
+  "description": "<description>"
+}
 ```
 
-Backend: `POST /api/ui/benchmark` — dispatches N `agent:benchmark` Hatchet events, streams progress via SSE.
+The `amerenda-coder` GitHub App needs `administration:write` permission at org level for this. Check and grant if not already set.
 
----
+### 19c — Runner Provisioning
 
-### Panel 5: Scaffold Form
+Call `infra-mcp add_mac_mini_runner` for the new repo immediately after creation. This registers an ARC runner scale set on the mac-mini so the new repo's CI has a runner.
 
-Form-based version of the OpenWebUI scaffold conversation.
+### 19d — k3s Manifests via infra-mcp
 
-```
-Type:  [ Agent ▾ ]
-Name:  [ grafana-monitor ]
-Description:
-  ┌─────────────────────────────────────────┐
-  │ Monitors Grafana alerts and creates     │
-  │ Vikunja tasks when alerts fire.         │
-  └─────────────────────────────────────────┘
-[ Scaffold → ]
-```
+Reuse the existing `scaffold_app` + `open_deploy_pr` pattern from infra-mcp. The factory calls these with the `AppPlan` fields. ArgoCD will have the UAT namespace ready before the coder agent's first PR merges.
 
-Backend: `POST /api/ui/scaffold` — calls `POST /api/v1/dispatch` with `type=scaffold`.
+### 19e — Coder Dispatch with Full Plan Context
 
----
-
-### Panel 6: MCP Registry
-
-View and manage registered MCPs (Phase 15 backend).
+The coder agent currently receives `task_title` and `task_description`. For a new-app task, `task_description` includes the full `AppPlan` as structured context:
 
 ```
-Registered MCPs
-┌──────────────────────┬──────────┬──────────┬───────────┐
-│ Name                 │ Status   │ Tools    │ Actions   │
-├──────────────────────┼──────────┼──────────┼───────────┤
-│ mcp-searxng          │ ✓ Healthy│ 3        │ [Remove]  │
-│ github-mcp           │ ✓ Healthy│ 12       │ [Remove]  │
-│ kubernetes-readonly  │ ✓ Healthy│ 8        │ [Remove]  │
-│ kubernetes-rw        │ ✓ Healthy│ 12       │ [Remove]  │
-└──────────────────────┴──────────┴──────────┴───────────┘
-[ + Register MCP ]
+App: <name>
+Repo: https://github.com/amerenda/<name>
+Branch: amerenda-coder/initial-implementation
+Purpose: <description>
+Port: <port>
+Secrets needed: <env_secrets>
+UAT URL: https://<name>-uat.amer.dev
 ```
 
-Backend: `GET /api/v1/mcp` (Phase 15 endpoint). Register form posts to `POST /api/v1/mcp/register`.
+The coder agent clones the new repo (app-template skeleton), implements the app, opens a PR. From that point, the existing reviewer → CI → UAT → QA → prod chain handles everything automatically.
 
----
+### 19f — praetor_mcp Tool
 
-## Deployment
+Expose `create_app(plan: AppPlan)` as a tool in the `praetor-mcp` MCP server so OpenWebUI/qwen3-35b-think can call it directly from chat. The model creates the plan conversationally, asks for approval, then calls `create_app` with the approved spec.
 
-New component in `praetor` repo: `praetor-ui`.
+### 19g — Plan Approval Step
 
-CI adds a build step for the `praetor-ui` image (nginx serving React static assets).
+The model should always present a plan and wait for explicit approval before calling `create_app`. This is enforced via the system prompt on qwen3-35b-think in OpenWebUI:
 
-**k3s manifests:** Add `praetor-ui` Deployment + Service via app-factory. Existing `praetor.amer.dev` ingress routes:
-- `/` → praetor-ui (nginx)
-- `/api/` → webhook-adapter (FastAPI)
-- `/webhooks/` → webhook-adapter (FastAPI, existing)
+```
+When a user asks you to build an app:
+1. Gather requirements through conversation (2-3 exchanges max)
+2. Present a structured AppPlan summary for approval
+3. Wait for explicit "yes" / "looks good" / "go ahead" before calling create_app
+4. Never call create_app without explicit approval
+```
 
-## Phase 18 Ready Conditions
+## Phase 19 Ready Conditions
 
-1. `https://praetor.amer.dev` loads the control plane UI (requires auth)
-2. Run Dashboard shows last 20 runs auto-refreshing every 10s
-3. Trigger Panel: dispatch `type=research` → run appears in dashboard within 10s
-4. Prompt Quick-Edit: lists all Langfuse prompts with correct versions
-5. Benchmark Runner: 5-item eval suite completes and shows mean score inline
-6. Scaffold Form: submit agent scaffold → draft PR opens on `amerenda/praetor` within 3 minutes
-7. MCP Registry: lists all registered MCPs with tool counts and health status
-8. All existing webhook paths (`/webhooks/vikunja`, `/webhooks/github`, `/api/v1/dispatch`) still work
-9. `praetor-ui` pod Running, multi-arch image built by CI
+1. User describes an app in OpenWebUI → model creates a plan and waits for approval (does not auto-fire)
+2. User approves → `create_app` called → GitHub repo created within 30s
+3. Runner provisioned on new repo → CI can execute within 5 minutes of repo creation
+4. k3s UAT manifests created via infra-mcp → ArgoCD has the namespace before first CI run
+5. Coder agent opens a PR on the new repo with working initial code
+6. PR reviewer fires automatically on the PR
+7. PR merged → CI builds → UAT pod running (check with `get_app_status`)
+8. QA agent runs against the UAT endpoint and posts results
+9. Prod deploy PR created → after human merge, prod pod running
+10. Entire flow from "user approves plan" to "UAT running" completes in under 15 minutes
