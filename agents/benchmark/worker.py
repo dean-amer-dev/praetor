@@ -61,7 +61,7 @@ async def _run_benchmark(input: BenchmarkInput, context: Context) -> dict:
         value=score_value,
         comment=reason,
     )
-    item.link(trace_id=trace_id, run_name=run_name)
+    item.link(None, run_name=run_name, trace_id=trace_id)
 
     langfuse_context.update_current_trace(output={"score": score_value, "reason": reason})
     return {

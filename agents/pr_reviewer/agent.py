@@ -120,4 +120,5 @@ def build_agent() -> Agent:
         model=model,
         system_prompt=SYSTEM_PROMPT,
         tools=[get_github_token, fetch_pr_diff, fetch_file_content, post_review_comment],
+        model_settings={"temperature": 0},
     )
