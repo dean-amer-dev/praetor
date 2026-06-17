@@ -1,173 +1,82 @@
-# Phase 18 — Control Plane UI
+# Phase 18 — Kubernetes MCP
 
-**Goal:** A purpose-built React dashboard at `praetor.amer.dev` for platform operations — trigger agents, monitor runs, edit prompts, run benchmarks, manage MCPs, and scaffold new components. Replaces tab-switching between Hatchet, Langfuse, and claw.amer.dev for routine platform tasks.
+**Goal:** Use the Phase 19 Intelligent MCP Agent to discover and deploy `mcp-server-kubernetes`, making it available to praetor agents with two access tiers: read-only (safe for diagnostic agents) and read-write (for operational tasks like scaling the benchmark-worker). This phase is the first real-world test of the intelligent MCP pipeline.
 
 ## Pre-conditions
 
-- Phase 17 complete (voice dispatch working — all dispatch paths confirmed stable)
-- `POST /api/v1/dispatch` and `GET /api/v1/status/{task_id}` live
-- Benchmark runner from Phase 14 working (UI wraps existing backend)
-- Scaffold worker from Phase 11 working (UI wraps existing `agent:scaffold` event)
-- MCP factory from Phase 15 working (UI wraps `POST /api/v1/mcp/register`)
-- Phase 12 health check passing (platform must be fully verified before adding UI complexity)
+- Phase 17 complete (Intelligent MCP Agent — `POST /api/v1/mcp/request` working)
+- Phase 15 complete (MCP factory deployment API)
+- k3s cluster accessible from MCP pods (in-cluster service accounts)
 
-## Design Principles
+## How This Phase Is Executed
 
-This is a **control plane**, not a chat interface. OpenWebUI (`claw.amer.dev`) stays for conversation. Praetor UI (`praetor.amer.dev`) is for platform operations only.
-
-Do not re-implement what Hatchet or Langfuse already do well. Link out to them for deep drill-downs.
-
-## Stack
-
-| Layer | Choice | Why |
-|-------|--------|-----|
-| Frontend | React + Vite | Already in stack (ecdysis uses React) |
-| Backend | FastAPI | Already in `praetor/webhooks/app.py` — extend with new router |
-| Auth | Existing amer.dev SSO | No new auth infra |
-
-New code lives in:
-- `praetor/ui/` — React app (built by CI → nginx serves static assets)
-- `praetor/webhooks/ui_api.py` — new FastAPI router for UI-specific endpoints, mounted on existing app
-
-## Feature Areas
-
-### Panel 1: Run Dashboard
-
-Unified view of recent agent runs across Hatchet + Langfuse.
+Rather than manually calling `POST /api/v1/mcp/register` as was done in earlier phases, Phase 20 is triggered via the intelligent agent:
 
 ```
-Last 20 runs
-┌──────────┬──────────┬──────────┬──────────┬──────────┐
-│ Agent    │ Task     │ Status   │ Duration │ Trace    │
-├──────────┼──────────┼──────────┼──────────┼──────────┤
-│ research │ #1234    │ ✓ Done   │ 3m 12s   │ [View]   │
-│ coder    │ #1233    │ ✓ Done   │ 8m 45s   │ [View]   │
-│ reviewer │ PR #88   │ ✗ Failed │ 1m 02s   │ [View]   │
-└──────────┴──────────┴──────────┴──────────┴──────────┘
+POST /api/v1/mcp/request
+{ "capability": "query and manage Kubernetes cluster resources — pods, deployments, logs, scaling" }
 ```
 
-Backend: `GET /api/ui/runs` — pulls from Hatchet API, merges with Langfuse trace IDs. No re-implementation of Hatchet's full UI. "View" links go to `hatchet.amer.dev` or `langfuse.amer.dev`.
+The research agent finds `ghcr.io/flux159/mcp-server-kubernetes` (high confidence), the factory registers it, and the two instances below are deployed. This validates the full Phase 17 pipeline end-to-end.
 
-Auto-refreshes every 10s.
+## Implementation
 
----
+### 20a — Deploy Read-Only Instance
 
-### Panel 2: Trigger Panel
+Via Phase 17 intelligent agent (research → register):
 
-Dispatch any agent without opening Vikunja or crafting a curl command.
-
-```
-Agent type: [ research ▾ ]
-Title:      [ Research Tailscale exit node ACL interaction ]
-[ Trigger → ]
-```
-
-Posts to `POST /api/v1/dispatch`. Response shows task_id and links to Hatchet run. New run appears in Run Dashboard within 10s.
-
----
-
-### Panel 3: Prompt Quick-Edit
-
-Lists current production prompts from Langfuse. Click to open the prompt editor.
-
-```
-Prompts
-┌─────────────────────┬─────────┬────────────────┐
-│ Name                │ Version │ Last modified  │
-├─────────────────────┼─────────┼────────────────┤
-│ coder-system        │ v4      │ 2026-06-15     │
-│ research-system     │ v3      │ 2026-06-10     │
-│ reviewer-system     │ v2      │ 2026-06-01     │
-│ scaffold-system     │ v1      │ 2026-06-18     │
-└─────────────────────┴─────────┴────────────────┘
-[ Open in Langfuse ↗ ]
+```json
+POST /api/v1/mcp/register
+{
+  "name": "kubernetes-readonly",
+  "image": "ghcr.io/flux159/mcp-server-kubernetes:latest",
+  "port": 3000,
+  "transport": "http",
+  "env_secrets": {}
+}
 ```
 
-Backend: `GET /api/ui/prompts` proxies `GET /api/public/prompts` from Langfuse API.
+Uses in-cluster service account with `get`/`list`/`watch` RBAC on the praetor namespace. Tools available: `kubectl_get`, `kubectl_describe`, `kubectl_logs`, `kubectl_events`, `explain_resource`.
 
----
+### 20b — Deploy Read-Write Instance
 
-### Panel 4: Benchmark Runner
-
-Run eval datasets from the UI without the CLI script (Phase 14 backend is reused).
-
-```
-Dataset:  [ research-eval ▾ ]    (5 items)
-Model:    [ qwen3-35b ▾ ]
-Prompt:   [ research-system:v3 ▾ ]
-[ Run Benchmark → ]
-
-Running... [3/5] ██████░░░░ 60%
-
-Results:
-  Mean score: 0.87
-  Min score:  0.72
-  [ View in Langfuse ↗ ]
+```json
+POST /api/v1/mcp/register
+{
+  "name": "kubernetes-rw",
+  "image": "ghcr.io/flux159/mcp-server-kubernetes:latest",
+  "port": 3000,
+  "transport": "http",
+  "env_secrets": {}
+}
 ```
 
-Backend: `POST /api/ui/benchmark` — dispatches N `agent:benchmark` Hatchet events, streams progress via SSE.
+Full access: `kubectl_scale`, `kubectl_apply`, `kubectl_patch`, `kubectl_rollout`. Scoped to the praetor namespace only.
 
----
+### 20c — Service Accounts
 
-### Panel 5: Scaffold Form
+Two k3s service accounts provisioned alongside the MCP deployments:
+- `mcp-kubernetes-readonly-sa` — ClusterRole: `view` (built-in)
+- `mcp-kubernetes-rw-sa` — ClusterRole: custom, `get`/`list`/`watch`/`update`/`patch` on `deployments`, `pods`, `services` in the `praetor` namespace only
 
-Form-based version of the OpenWebUI scaffold conversation.
+### 20d — Benchmark Worker Scale Flow
 
-```
-Type:  [ Agent ▾ ]
-Name:  [ grafana-monitor ]
-Description:
-  ┌─────────────────────────────────────────┐
-  │ Monitors Grafana alerts and creates     │
-  │ Vikunja tasks when alerts fire.         │
-  └─────────────────────────────────────────┘
-[ Scaffold → ]
-```
+Replace the current manual `kubectl scale` workaround. When running benchmarks:
 
-Backend: `POST /api/ui/scaffold` — calls `POST /api/v1/dispatch` with `type=scaffold`.
+1. Claude calls `kubernetes-rw` tool `kubectl_scale deployment/praetor-benchmark-worker --replicas=1 -n praetor`
+2. Dispatches benchmark events
+3. Polls until benchmarks complete
+4. Scales back down to 0
 
----
+### 20e — Wire into Agent Context
 
-### Panel 6: MCP Registry
-
-View and manage registered MCPs (Phase 15 backend).
-
-```
-Registered MCPs
-┌──────────────────────┬──────────┬──────────┬───────────┐
-│ Name                 │ Status   │ Tools    │ Actions   │
-├──────────────────────┼──────────┼──────────┼───────────┤
-│ mcp-searxng          │ ✓ Healthy│ 3        │ [Remove]  │
-│ github-mcp           │ ✓ Healthy│ 12       │ [Remove]  │
-│ kubernetes-readonly  │ ✓ Healthy│ 8        │ [Remove]  │
-│ kubernetes-rw        │ ✓ Healthy│ 12       │ [Remove]  │
-└──────────────────────┴──────────┴──────────┴───────────┘
-[ + Register MCP ]
-```
-
-Backend: `GET /api/v1/mcp` (Phase 15 endpoint). Register form posts to `POST /api/v1/mcp/register`.
-
----
-
-## Deployment
-
-New component in `praetor` repo: `praetor-ui`.
-
-CI adds a build step for the `praetor-ui` image (nginx serving React static assets).
-
-**k3s manifests:** Add `praetor-ui` Deployment + Service via app-factory. Existing `praetor.amer.dev` ingress routes:
-- `/` → praetor-ui (nginx)
-- `/api/` → webhook-adapter (FastAPI)
-- `/webhooks/` → webhook-adapter (FastAPI, existing)
+Add `kubernetes-readonly` to the research agent's MCP server list in LiteLLM. The read-write instance is invoked explicitly only (by Claude Code or a platform operator, not autonomously by praetor agents).
 
 ## Phase 18 Ready Conditions
 
-1. `https://praetor.amer.dev` loads the control plane UI (requires auth)
-2. Run Dashboard shows last 20 runs auto-refreshing every 10s
-3. Trigger Panel: dispatch `type=research` → run appears in dashboard within 10s
-4. Prompt Quick-Edit: lists all Langfuse prompts with correct versions
-5. Benchmark Runner: 5-item eval suite completes and shows mean score inline
-6. Scaffold Form: submit agent scaffold → draft PR opens on `amerenda/praetor` within 3 minutes
-7. MCP Registry: lists all registered MCPs with tool counts and health status
-8. All existing webhook paths (`/webhooks/vikunja`, `/webhooks/github`, `/api/v1/dispatch`) still work
-9. `praetor-ui` pod Running, multi-arch image built by CI
+1. `POST /api/v1/mcp/request` with kubernetes capability → research agent finds the image, factory PR opened (validates Phase 19)
+2. `kubernetes-readonly` deployed and healthy; `kubectl_get pods -n praetor` returns current pod list
+3. `kubernetes-rw` deployed and healthy; `kubectl_scale` successfully scales a deployment
+4. Benchmark-worker scale-up/down works end-to-end via `kubernetes-rw` (replicas 0→1→0)
+5. Research agent can call `kubectl_logs` and `kubectl_describe` via `kubernetes-readonly` during a task
+6. Neither MCP instance can affect namespaces outside `praetor` (RBAC verified)
