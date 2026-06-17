@@ -53,11 +53,13 @@ def get_github_token() -> str:
 def fetch_pr_diff(repo: str, pr_number: str, token: str) -> str:
     """Fetch the unified diff for a PR. Returns HEAD_SHA and HEAD_BRANCH on the first two lines, then the diff (capped at 32KB)."""
     headers = {"Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28"}
-    meta = httpx.get(
+    meta_resp = httpx.get(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
         headers={**headers, "Accept": "application/vnd.github+json"},
         timeout=15,
-    ).json()
+    )
+    meta_resp.raise_for_status()
+    meta = meta_resp.json()
     head_sha = meta["head"]["sha"]
     head_branch = meta["head"]["ref"]
     diff_resp = httpx.get(
