@@ -38,96 +38,81 @@ jobs:
     runs-on: arc-runner-praetor
     outputs:
       rebuild: ${{ steps.detect.outputs.rebuild }}
+      matrix: ${{ steps.detect.outputs.matrix }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 2
       - id: detect
         run: |
+          ALL_COMPONENTS=(coder research pipeline webhook qa reviewer benchmark)
+
           # workflow_dispatch always rebuilds everything
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo 'rebuild=["coder","research","pipeline","webhook","qa","reviewer","benchmark"]' >> "$GITHUB_OUTPUT"
+            REBUILD=("${ALL_COMPONENTS[@]}")
             echo "Manual dispatch — rebuilding all components"
-            exit 0
-          fi
-
-          CHANGED=$(git diff --name-only HEAD~1 HEAD)
-          echo "Changed files:"
-          echo "$CHANGED"
-
-          REBUILD=()
-
-          # Shared files force full rebuild
-          if echo "$CHANGED" | grep -qE '^(requirements\.txt|common/)'; then
-            REBUILD=(coder research pipeline webhook qa reviewer benchmark)
           else
-            echo "$CHANGED" | grep -qE '^(agents/coder/|Dockerfile\.coder-worker)' && REBUILD+=(coder)
-            echo "$CHANGED" | grep -qE '^(agents/research/|Dockerfile\.research-worker)' && REBUILD+=(research)
-            echo "$CHANGED" | grep -qE '^(pipelines/|Dockerfile\.pipeline-worker)' && REBUILD+=(pipeline)
-            echo "$CHANGED" | grep -qE '^(webhooks/|Dockerfile\.webhook-adapter)' && REBUILD+=(webhook)
-            echo "$CHANGED" | grep -qE '^(agents/qa/|Dockerfile\.qa-worker)' && REBUILD+=(qa)
-            echo "$CHANGED" | grep -qE '^(agents/pr_reviewer/|Dockerfile\.reviewer-worker)' && REBUILD+=(reviewer)
-            echo "$CHANGED" | grep -qE '^(agents/benchmark/|Dockerfile\.benchmark-worker)' && REBUILD+=(benchmark)
-          fi
+            CHANGED=$(git diff --name-only HEAD~1 HEAD)
+            echo "Changed files:"
+            echo "$CHANGED"
 
-          # build.yaml change forces full rebuild
-          if echo "$CHANGED" | grep -qE '\.github/workflows/build\.yaml'; then
-            REBUILD=(coder research pipeline webhook qa reviewer benchmark)
+            REBUILD=()
+
+            # Shared files force full rebuild
+            if echo "$CHANGED" | grep -qE '^(requirements\.txt|common/)'; then
+              REBUILD=("${ALL_COMPONENTS[@]}")
+            else
+              echo "$CHANGED" | grep -qE '^(agents/coder/|Dockerfile\.coder-worker)' && REBUILD+=(coder)
+              echo "$CHANGED" | grep -qE '^(agents/research/|Dockerfile\.research-worker)' && REBUILD+=(research)
+              echo "$CHANGED" | grep -qE '^(pipelines/|Dockerfile\.pipeline-worker)' && REBUILD+=(pipeline)
+              echo "$CHANGED" | grep -qE '^(webhooks/|Dockerfile\.webhook-adapter)' && REBUILD+=(webhook)
+              echo "$CHANGED" | grep -qE '^(agents/qa/|Dockerfile\.qa-worker)' && REBUILD+=(qa)
+              echo "$CHANGED" | grep -qE '^(agents/pr_reviewer/|Dockerfile\.reviewer-worker)' && REBUILD+=(reviewer)
+              echo "$CHANGED" | grep -qE '^(agents/benchmark/|Dockerfile\.benchmark-worker)' && REBUILD+=(benchmark)
+            fi
+
+            # build.yaml change forces full rebuild
+            if echo "$CHANGED" | grep -qE '\.github/workflows/build\.yaml'; then
+              REBUILD=("${ALL_COMPONENTS[@]}")
+            fi
           fi
 
           JSON=$(python3 -c "import sys,json; print(json.dumps(sys.argv[1:]))" "${REBUILD[@]}")
           echo "rebuild=$JSON" >> "$GITHUB_OUTPUT"
+
+          # Full matrix JSON for build-amd64 — only include components to rebuild
+          MATRIX=$(python3 -c "
+import sys, json
+components = json.loads(sys.argv[1])
+MAP = {
+  'coder':    {'component': 'coder',     'image': 'amerenda/praetor-coder',     'dockerfile': 'Dockerfile.coder-worker'},
+  'pipeline': {'component': 'pipeline',  'image': 'amerenda/praetor-pipeline',  'dockerfile': 'Dockerfile.pipeline-worker'},
+  'research': {'component': 'research',  'image': 'amerenda/praetor-research',  'dockerfile': 'Dockerfile.research-worker'},
+  'webhook':  {'component': 'webhook',   'image': 'amerenda/praetor-webhook',   'dockerfile': 'Dockerfile.webhook-adapter'},
+  'qa':       {'component': 'qa',        'image': 'amerenda/praetor-qa',        'dockerfile': 'Dockerfile.qa-worker'},
+  'reviewer': {'component': 'reviewer',  'image': 'amerenda/praetor-reviewer',  'dockerfile': 'Dockerfile.reviewer-worker'},
+  'benchmark':{'component': 'benchmark', 'image': 'amerenda/praetor-benchmark', 'dockerfile': 'Dockerfile.benchmark-worker'},
+}
+print(json.dumps([MAP[c] for c in components if c in MAP]))
+" "$JSON")
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "Components to rebuild: $JSON"
 
   build-amd64:
     needs: [detect-changes, set-tag, test]
-    if: github.event_name != 'pull_request'
+    if: "github.event_name != 'pull_request' && needs.detect-changes.outputs.rebuild != '[]'"
     runs-on: arc-runner-praetor
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - component: coder
-            image: amerenda/praetor-coder
-            dockerfile: Dockerfile.coder-worker
-          - component: pipeline
-            image: amerenda/praetor-pipeline
-            dockerfile: Dockerfile.pipeline-worker
-          - component: research
-            image: amerenda/praetor-research
-            dockerfile: Dockerfile.research-worker
-          - component: webhook
-            image: amerenda/praetor-webhook
-            dockerfile: Dockerfile.webhook-adapter
-          - component: qa
-            image: amerenda/praetor-qa
-            dockerfile: Dockerfile.qa-worker
-          - component: reviewer
-            image: amerenda/praetor-reviewer
-            dockerfile: Dockerfile.reviewer-worker
-          - component: benchmark
-            image: amerenda/praetor-benchmark
-            dockerfile: Dockerfile.benchmark-worker
+        include: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v6
 
-      - name: Check if component needs rebuild
-        id: check
-        run: |
-          if python3 -c "import sys,json; c=json.loads(sys.argv[1]); sys.exit(0 if sys.argv[2] in c else 1)" \
-              '${{ needs.detect-changes.outputs.rebuild }}' '${{ matrix.component }}'; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping ${{ matrix.component }} (not changed)"
-          fi
-
       - name: Login to Docker Hub
-        if: steps.check.outputs.build == 'true'
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
       - name: Build and push ${{ matrix.component }} (amd64)
-        if: steps.check.outputs.build == 'true'
         run: |
           docker build \
             -t "${{ matrix.image }}:${{ needs.set-tag.outputs.tag }}-amd64" \
