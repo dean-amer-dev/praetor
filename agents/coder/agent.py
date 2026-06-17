@@ -41,11 +41,22 @@ def _scratch(path: str) -> str:
     return str(resolved)
 
 
+_MAX_TOOL_OUTPUT = 64 * 1024  # 64KB — keeps message history bounded
+
+
+def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT) -> str:
+    if len(text) <= limit:
+        return text
+    kept = text[-limit:]
+    dropped = len(text) - limit
+    return f"[... {dropped} bytes truncated ...]\n{kept}"
+
+
 @observe()
 def read_file(path: str) -> str:
     """Read a file relative to SCRATCH_DIR."""
     full = _scratch(path)
-    return Path(full).read_text(errors="replace")
+    return _truncate(Path(full).read_text(errors="replace"))
 
 
 @observe()
@@ -73,7 +84,7 @@ def run_shell(cmd: str) -> str:
         timeout=300,
     )
     output = result.stdout + result.stderr
-    return output if output else f"(exit {result.returncode})"
+    return _truncate(output) if output else f"(exit {result.returncode})"
 
 
 @observe()
