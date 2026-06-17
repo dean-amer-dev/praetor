@@ -17,4 +17,7 @@ python scripts/run_benchmark.py --dataset reviewer-eval --agent-type review
 
 | Dataset | Model | Prompt | Date | Mean Score | Min Score |
 |---------|-------|--------|------|-----------|-----------|
-| *(to be populated after first benchmark run)* | | | | | |
+| research-eval | qwen3-35b | default | 2026-06-17 | 1.000 | 1.000 |
+| reviewer-eval | qwen3-35b | default | 2026-06-17 | 0.846 | 0.330 |
+
+Run name: `baseline-1781706219` (5 items each dataset, scored by LLM judge)
