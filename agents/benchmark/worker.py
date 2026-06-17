@@ -19,7 +19,7 @@ class BenchmarkInput(BaseModel):
     run_name: str = ""     # Langfuse experiment name; auto-generated if empty
 
 
-@observe()
+@observe(capture_input=False, capture_output=False)
 async def _run_benchmark(input: BenchmarkInput, context: Context) -> dict:
     import time
 
