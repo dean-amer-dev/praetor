@@ -1,196 +1,150 @@
-# Phase 16 — Voice Dispatch
+# Phase 16 — Full App Pipeline
 
-**Goal:** Speak a command to Home Assistant → Praetor agent runs → HA announces the result via TTS. Voice is a first-class dispatch interface, identical in capability to claw.amer.dev or opencode.
+**Goal:** From an OpenWebUI conversation, go from "here's what I want to build" to a running UAT deployment with CI/CD fully wired — without touching the terminal. This phase adds the two missing pieces the coder agent currently can't do on its own: (1) create a new GitHub repo from the app-template, and (2) provision CI runners for it. After this phase, the path from idea to UAT is fully automated.
 
 ## Pre-conditions
 
-- Phase 15 complete (MCP factory stable — platform fully instrumented)
-- Phase 14 complete (quality baselines established — voice must hit known-good agents)
-- `POST /api/v1/dispatch` live (Phase 11)
-- `GET /api/v1/status/{task_id}` live (status polling endpoint)
-- Piper TTS running (already in `llm-agents` stack on mac-mini-m4)
-- Home Assistant at `https://ha.amer.dev` with `$HA_TOKEN` available
+- Phase 15 complete (MCP factory stable — platform confirmed stable before adding app creation)
+- `infra-mcp scaffold_app` and `open_deploy_pr` working (Phase 0)
+- `infra-mcp add_mac_mini_runner` available (Phase 0)
+- Coder agent working end-to-end (Phase 6)
+- PR reviewer working (Phase 7)
+- QA agent working (Phase 7)
+- `app-template` repo exists at `amerenda/app-template` with CI skeleton
+
+## The Gap Today
+
+The coder agent writes code and opens PRs on **existing repos** only. To build a brand-new app you currently need to manually:
+
+1. Create a GitHub repo (from `app-template`)
+2. Add runners to that repo (via `infra-mcp add_mac_mini_runner`)
+3. Create the repo's k3s manifests (UAT + prod) in `k3s-dean-gitops`
+4. Then give the coder agent a task on the new repo
+
+This phase collapses steps 1-3 into a single automated flow triggered from OpenWebUI.
 
 ## Architecture
 
 ```
-"Hey, research Tailscale exit nodes"
-          │
-          ▼
-  Home Assistant
-  (voice command intent: praetor_dispatch)
-          │
-          ▼
-  HA → REST API → POST /api/v1/dispatch
-          │
-          ▼
-  Hatchet dispatches agent
-          │
-          ▼
-  HA polls GET /api/v1/status/{task_id} (every 30s, up to 20 min)
-          │
-          ▼
-  done=true → HA calls piper TTS with mem0_summary
-          │
-          ▼
-  HA announces result via media player
+OpenWebUI conversation
+    │
+    │  User: "Build an app that does X"
+    │  Model: generates AppPlan, asks for approval
+    │  User: approves
+    │  Model: calls praetor_mcp.create_app(plan)
+    │
+    ▼
+POST /api/v1/app/create
+    │
+    ├─► Create GitHub repo from app-template (GitHub API)
+    │   (amerenda-coder app, org-level repo creation)
+    │
+    ├─► infra-mcp scaffold_app → k3s manifests for UAT + prod
+    │   infra-mcp open_deploy_pr → ArgoCD ready for UAT
+    │
+    ├─► infra-mcp add_mac_mini_runner → CI runners on new repo
+    │
+    └─► Dispatch coder agent:
+        POST /api/v1/dispatch { type: "code", title: plan.title,
+                                description: plan.full_description,
+                                repo: plan.repo_name }
+            │
+            ▼
+        Coder agent writes initial code, opens PR
+            │
+            ▼
+        GitHub PR event → reviewer agent fires automatically
+            │
+            ▼
+        PR merged → CI builds image → UAT manifest updated → ArgoCD syncs
+            │
+            ▼
+        QA agent runs against UAT endpoint
+            │
+            ▼
+        Prod deploy PR created → human approves → prod rolls
 ```
-
-No new infrastructure. Voice uses the same dispatch API as every other interface.
 
 ## What Gets Built
 
-### 16a — HA Intent Script (`praetor_dispatch`)
-
-A Home Assistant script that calls the Praetor dispatch API and polls for results.
-
-Add to `ha.amer.dev` config (via `docker exec homeassistant` → `/config/scripts.yaml` or UI):
-
-```yaml
-praetor_dispatch:
-  alias: "Dispatch Praetor Agent"
-  description: "Send a task to the Praetor platform and announce the result."
-  fields:
-    task_title:
-      description: "The task to run"
-      example: "Research Tailscale exit nodes"
-    task_type:
-      description: "research | code | pipeline"
-      default: "research"
-  sequence:
-    - service: rest_command.praetor_dispatch
-      data:
-        title: "{{ task_title }}"
-        type: "{{ task_type }}"
-      response_variable: dispatch_response
-
-    - variables:
-        task_id: "{{ dispatch_response.content | from_json | attr('task_id') }}"
-
-    - service: tts.speak
-      data:
-        message: "Got it. Running {{ task_type }} task. I'll let you know when it's done."
-        media_player_entity_id: media_player.living_room
-
-    - repeat:
-        count: 40  # max 20 minutes (30s × 40)
-        sequence:
-          - delay: "00:00:30"
-          - service: rest_command.praetor_status
-            data:
-              task_id: "{{ task_id }}"
-            response_variable: status_response
-          - if:
-              - condition: template
-                value_template: >
-                  {{ (status_response.content | from_json).done == true }}
-            then:
-              - service: tts.speak
-                data:
-                  message: >
-                    Praetor result: {{ (status_response.content | from_json).tts_summary }}
-                  media_player_entity_id: media_player.living_room
-              - stop: "Task complete"
-```
-
-### 16b — HA REST Commands
-
-Add to `/config/configuration.yaml`:
-
-```yaml
-rest_command:
-  praetor_dispatch:
-    url: "https://praetor.amer.dev/api/v1/dispatch"
-    method: POST
-    headers:
-      Authorization: "Bearer {{ states('input_text.praetor_api_key') }}"
-      Content-Type: application/json
-    payload: '{"title": "{{ title }}", "type": "{{ type }}"}'
-
-  praetor_status:
-    url: "https://praetor.amer.dev/api/v1/status/{{ task_id }}"
-    method: GET
-    headers:
-      Authorization: "Bearer {{ states('input_text.praetor_api_key') }}"
-```
-
-`input_text.praetor_api_key` — a helper that stores the `PRAETOR_API_KEY` value. Set it once in the HA UI; never hardcode in YAML.
-
-### 16c — Voice Intent Registration
-
-Register a custom intent in HA's conversation integration so the local voice assistant parses "research X" and "code X in repo Y" into structured calls.
-
-```yaml
-# /config/custom_sentences/en/praetor.yaml
-language: "en"
-intents:
-  PraetorResearch:
-    data:
-      - sentences:
-          - "research {topic}"
-          - "look up {topic}"
-          - "find information about {topic}"
-  PraetorCode:
-    data:
-      - sentences:
-          - "code {task} in {repo}"
-          - "implement {task} in repo {repo}"
-          - "write code for {task}"
-```
-
-Intent handlers in `/config/intent_script.yaml`:
-
-```yaml
-PraetorResearch:
-  action:
-    service: script.praetor_dispatch
-    data:
-      task_title: "Research: {{ topic }}"
-      task_type: research
-  speech:
-    text: "Starting research on {{ topic }}."
-
-PraetorCode:
-  action:
-    service: script.praetor_dispatch
-    data:
-      task_title: "{{ task }}"
-      task_type: code
-  speech:
-    text: "Got it. I'll start coding {{ task }}."
-```
-
-### 16d — TTS Response Length Handling
-
-Agent research results can be long. The TTS output must be trimmed to something speakable.
-
-Add `tts_summary` field to the `/api/v1/status` response:
+### 19a — AppPlan Schema
 
 ```python
-# In webhooks/dispatch_api.py status endpoint
-mem0_summary = memories[0]["memory"] if memories else None
-tts_summary = None
-if mem0_summary:
-    # First 2 sentences only for TTS — full summary still in mem0_summary
-    sentences = mem0_summary.split(". ")
-    tts_summary = ". ".join(sentences[:2]) + "."
+class AppPlan(BaseModel):
+    name: str                          # kebab-case, becomes repo name
+    description: str                   # what the app does (for coder prompt)
+    domain: str | None = None          # e.g. "myapp.amer.dev" (optional)
+    port: int = 8000
+    has_database: bool = False         # postgres via app-factory pattern
+    env_secrets: dict[str, str] = {}   # {ENV_VAR: bws-secret-name}
+    stateless: bool = True             # False = Komodo stateful (not yet automated)
+```
 
-return {
-    "task_id": task_id,
-    "done": bool(mem0_summary),
-    "mem0_summary": mem0_summary,
-    "tts_summary": tts_summary,
+### 19b — Repo Creation
+
+Use the GitHub API with the amerenda-coder GitHub App installation token to create a new repo from `app-template`:
+
+```
+POST /repos/amerenda/app-template/generate
+{
+  "owner": "amerenda",
+  "name": "<name>",
+  "private": false,
+  "description": "<description>"
 }
 ```
 
-HA reads `tts_summary` instead of `mem0_summary` for the spoken result.
+The `amerenda-coder` GitHub App needs `administration:write` permission at org level for this. Check and grant if not already set.
 
-## Phase 17 Ready Conditions
+### 19c — Runner Provisioning
 
-1. "Hey assistant, research Tailscale exit nodes" → `agent:research` Hatchet run starts within 15s
-2. HA announces "Got it. Running research task." immediately after dispatch
-3. HA polls status and announces the TTS summary when `done=true` (within 20 minutes)
-4. `PraetorCode` intent: "code add /healthz to ecdysis" → coder agent starts, HA confirms
-5. `input_text.praetor_api_key` helper holds the key — no hardcoded secrets in HA YAML
-6. TTS summary is ≤3 sentences (not raw dump of full research output)
-7. Works from both living room and bedroom media players
+Call `infra-mcp add_mac_mini_runner` for the new repo immediately after creation. This registers an ARC runner scale set on the mac-mini so the new repo's CI has a runner.
+
+### 19d — k3s Manifests via infra-mcp
+
+Reuse the existing `scaffold_app` + `open_deploy_pr` pattern from infra-mcp. The factory calls these with the `AppPlan` fields. ArgoCD will have the UAT namespace ready before the coder agent's first PR merges.
+
+### 19e — Coder Dispatch with Full Plan Context
+
+The coder agent currently receives `task_title` and `task_description`. For a new-app task, `task_description` includes the full `AppPlan` as structured context:
+
+```
+App: <name>
+Repo: https://github.com/amerenda/<name>
+Branch: amerenda-coder/initial-implementation
+Purpose: <description>
+Port: <port>
+Secrets needed: <env_secrets>
+UAT URL: https://<name>-uat.amer.dev
+```
+
+The coder agent clones the new repo (app-template skeleton), implements the app, opens a PR. From that point, the existing reviewer → CI → UAT → QA → prod chain handles everything automatically.
+
+### 19f — praetor_mcp Tool
+
+Expose `create_app(plan: AppPlan)` as a tool in the `praetor-mcp` MCP server so OpenWebUI/qwen3-35b-think can call it directly from chat. The model creates the plan conversationally, asks for approval, then calls `create_app` with the approved spec.
+
+### 19g — Plan Approval Step
+
+The model should always present a plan and wait for explicit approval before calling `create_app`. This is enforced via the system prompt on qwen3-35b-think in OpenWebUI:
+
+```
+When a user asks you to build an app:
+1. Gather requirements through conversation (2-3 exchanges max)
+2. Present a structured AppPlan summary for approval
+3. Wait for explicit "yes" / "looks good" / "go ahead" before calling create_app
+4. Never call create_app without explicit approval
+```
+
+## Phase 16 Ready Conditions
+
+1. User describes an app in OpenWebUI → model creates a plan and waits for approval (does not auto-fire)
+2. User approves → `create_app` called → GitHub repo created within 30s
+3. Runner provisioned on new repo → CI can execute within 5 minutes of repo creation
+4. k3s UAT manifests created via infra-mcp → ArgoCD has the namespace before first CI run
+5. Coder agent opens a PR on the new repo with working initial code
+6. PR reviewer fires automatically on the PR
+7. PR merged → CI builds → UAT pod running (check with `get_app_status`)
+8. QA agent runs against the UAT endpoint and posts results
+9. Prod deploy PR created → after human merge, prod pod running
+10. Entire flow from "user approves plan" to "UAT running" completes in under 15 minutes

@@ -1,173 +1,141 @@
-# Phase 17 — Control Plane UI
+# Phase 17 — Intelligent MCP Agent
 
-**Goal:** A purpose-built React dashboard at `praetor.amer.dev` for platform operations — trigger agents, monitor runs, edit prompts, run benchmarks, manage MCPs, and scaffold new components. Replaces tab-switching between Hatchet, Langfuse, and claw.amer.dev for routine platform tasks.
+**Goal:** When an agent or user identifies that a new capability is needed, the platform automatically determines whether an existing MCP covers it, and if not, writes and deploys one. Adding a new tool to the platform is a conversation, not a manual process.
 
 ## Pre-conditions
 
-- Phase 17 complete (voice dispatch working — all dispatch paths confirmed stable)
-- `POST /api/v1/dispatch` and `GET /api/v1/status/{task_id}` live
-- Benchmark runner from Phase 14 working (UI wraps existing backend)
-- Scaffold worker from Phase 11 working (UI wraps existing `agent:scaffold` event)
-- MCP factory from Phase 15 working (UI wraps `POST /api/v1/mcp/register`)
-- Phase 12 health check passing (platform must be fully verified before adding UI complexity)
+- Phase 16 complete (full app pipeline — repo creation and CI automation working)
+- Phase 15 complete (MCP factory deployment API)
+- Phase 11 complete (scaffold worker — MCP code generation)
+- Research agent working (Phase 5)
+- MCP factory `POST /api/v1/mcp/register` stable
 
-## Design Principles
+## The Gap Today
 
-This is a **control plane**, not a chat interface. OpenWebUI (`claw.amer.dev`) stays for conversation. Praetor UI (`praetor.amer.dev`) is for platform operations only.
+Phase 15 gives you a deployment API: hand it a complete spec (image, port, secrets) and it opens a GitOps PR. What it doesn't do is think:
 
-Do not re-implement what Hatchet or Langfuse already do well. Link out to them for deep drill-downs.
+- Does an MCP already exist for this?
+- Is an MCP even the right tool, or is a direct API call enough?
+- If building new, what should it do exactly?
 
-## Stack
+Those decisions currently require a human. This phase makes them automatic.
 
-| Layer | Choice | Why |
-|-------|--------|-----|
-| Frontend | React + Vite | Already in stack (ecdysis uses React) |
-| Backend | FastAPI | Already in `praetor/webhooks/app.py` — extend with new router |
-| Auth | Existing amer.dev SSO | No new auth infra |
-
-New code lives in:
-- `praetor/ui/` — React app (built by CI → nginx serves static assets)
-- `praetor/webhooks/ui_api.py` — new FastAPI router for UI-specific endpoints, mounted on existing app
-
-## Feature Areas
-
-### Panel 1: Run Dashboard
-
-Unified view of recent agent runs across Hatchet + Langfuse.
+## Architecture
 
 ```
-Last 20 runs
-┌──────────┬──────────┬──────────┬──────────┬──────────┐
-│ Agent    │ Task     │ Status   │ Duration │ Trace    │
-├──────────┼──────────┼──────────┼──────────┼──────────┤
-│ research │ #1234    │ ✓ Done   │ 3m 12s   │ [View]   │
-│ coder    │ #1233    │ ✓ Done   │ 8m 45s   │ [View]   │
-│ reviewer │ PR #88   │ ✗ Failed │ 1m 02s   │ [View]   │
-└──────────┴──────────┴──────────┴──────────┴──────────┘
+Trigger: user in OpenWebUI or agent during task execution
+    │
+    │  "I need to be able to query Grafana alerts"
+    │  or: agent hits a tool gap mid-task
+    │
+    ▼
+POST /api/v1/mcp/request   ← new endpoint (or OpenWebUI tool call)
+    { capability: "query Grafana alerts from Grafana API" }
+    │
+    ├─► Research agent: search for existing MCP servers
+    │     - GitHub search: "mcp server grafana"
+    │     - Smithery / mcp.so registries
+    │     - ModelContextProtocol GitHub org
+    │     Returns: { found: bool, image: str | None, confidence: float, notes: str }
+    │
+    ├─► Decision:
+    │     found + confidence > 0.8 → use existing image
+    │     found + confidence < 0.8 → verify + test, then decide
+    │     not found → scaffold new MCP
+    │
+    ├─► Path A: existing image found
+    │     POST /api/v1/mcp/register { name, image, port, transport, env_secrets }
+    │     Returns PR URL
+    │
+    └─► Path B: no existing image
+          Dispatch scaffold worker: agent:scaffold
+            { type: "mcp", name: <name>, description: <capability> }
+          Scaffold worker:
+            - Creates MCP server code in dean-mcp/<name>/
+            - Opens PR on amerenda/dean-mcp
+            - CI builds + pushes image (amerenda/<name>:latest)
+          After PR merged + image built:
+            POST /api/v1/mcp/register { name, image, ... }
+          Returns: scaffold PR URL + (later) registry PR URL
 ```
 
-Backend: `GET /api/ui/runs` — pulls from Hatchet API, merges with Langfuse trace IDs. No re-implementation of Hatchet's full UI. "View" links go to `hatchet.amer.dev` or `langfuse.amer.dev`.
+## What Gets Built
 
-Auto-refreshes every 10s.
-
----
-
-### Panel 2: Trigger Panel
-
-Dispatch any agent without opening Vikunja or crafting a curl command.
+### 20a — MCP Request Endpoint
 
 ```
-Agent type: [ research ▾ ]
-Title:      [ Research Tailscale exit node ACL interaction ]
-[ Trigger → ]
+POST /api/v1/mcp/request
+{
+  "capability": "natural language description of the tool capability needed",
+  "preferred_name": "optional-name"    // optional
+}
 ```
 
-Posts to `POST /api/v1/dispatch`. Response shows task_id and links to Hatchet run. New run appears in Run Dashboard within 10s.
-
----
-
-### Panel 3: Prompt Quick-Edit
-
-Lists current production prompts from Langfuse. Click to open the prompt editor.
-
-```
-Prompts
-┌─────────────────────┬─────────┬────────────────┐
-│ Name                │ Version │ Last modified  │
-├─────────────────────┼─────────┼────────────────┤
-│ coder-system        │ v4      │ 2026-06-15     │
-│ research-system     │ v3      │ 2026-06-10     │
-│ reviewer-system     │ v2      │ 2026-06-01     │
-│ scaffold-system     │ v1      │ 2026-06-18     │
-└─────────────────────┴─────────┴────────────────┘
-[ Open in Langfuse ↗ ]
+Returns:
+```json
+{
+  "decision": "use_existing | scaffold_new",
+  "image": "ghcr.io/org/mcp-name:latest",  // if use_existing
+  "pr_url": "...",                          // registration or scaffold PR
+  "research_summary": "...",               // what the research agent found
+  "task_id": 12345                         // Hatchet run tracking the pipeline
+}
 ```
 
-Backend: `GET /api/ui/prompts` proxies `GET /api/public/prompts` from Langfuse API.
+### 20b — Research Agent MCP Search
 
----
+Extend the research agent with an MCP discovery tool. Given a capability description, it searches:
 
-### Panel 4: Benchmark Runner
+1. **Smithery** (`smithery.ai`) — largest MCP index
+2. **mcp.so** — community registry
+3. **GitHub** — search `"mcp-server" <keyword>` for repos with Dockerfiles
+4. **ModelContextProtocol org** — reference implementations
+5. **Existing praetor MCPs** — check the registry via `GET /api/v1/mcp` first
 
-Run eval datasets from the UI without the CLI script (Phase 14 backend is reused).
+Returns a confidence-ranked list of candidates with image names where available.
 
-```
-Dataset:  [ research-eval ▾ ]    (5 items)
-Model:    [ qwen3-35b ▾ ]
-Prompt:   [ research-system:v3 ▾ ]
-[ Run Benchmark → ]
+### 20c — Decision Logic
 
-Running... [3/5] ██████░░░░ 60%
+After research:
 
-Results:
-  Mean score: 0.87
-  Min score:  0.72
-  [ View in Langfuse ↗ ]
-```
+- `confidence >= 0.85` and image available on a public registry: use existing, call factory
+- `confidence >= 0.85` but no prebuilt image: scaffold from source + build
+- `confidence < 0.85`: ask user for confirmation before proceeding (via OpenWebUI or a Vikunja task comment)
+- No results: proceed with scaffold_new
 
-Backend: `POST /api/ui/benchmark` — dispatches N `agent:benchmark` Hatchet events, streams progress via SSE.
+### 20d — Scaffold → Build → Register Pipeline
 
----
+When scaffolding is needed, the flow is:
 
-### Panel 5: Scaffold Form
+1. `agent:scaffold` event → scaffold worker creates `dean-mcp/<name>/server.py` + Dockerfile
+2. Scaffold PR merged → CI builds `amerenda/<name>:latest`
+3. Hatchet monitors for the CI completion (polls GitHub API for the build job)
+4. On success: calls `POST /api/v1/mcp/register` automatically
+5. Returns the final registry PR URL
 
-Form-based version of the OpenWebUI scaffold conversation.
+This is a multi-step Hatchet workflow with a wait step between scaffold-merge and register.
 
-```
-Type:  [ Agent ▾ ]
-Name:  [ grafana-monitor ]
-Description:
-  ┌─────────────────────────────────────────┐
-  │ Monitors Grafana alerts and creates     │
-  │ Vikunja tasks when alerts fire.         │
-  └─────────────────────────────────────────┘
-[ Scaffold → ]
-```
+### 20e — praetor_mcp Tool
 
-Backend: `POST /api/ui/scaffold` — calls `POST /api/v1/dispatch` with `type=scaffold`.
-
----
-
-### Panel 6: MCP Registry
-
-View and manage registered MCPs (Phase 15 backend).
+Add `request_mcp(capability: str)` as a tool in the praetor-mcp MCP server. This is callable from OpenWebUI mid-conversation:
 
 ```
-Registered MCPs
-┌──────────────────────┬──────────┬──────────┬───────────┐
-│ Name                 │ Status   │ Tools    │ Actions   │
-├──────────────────────┼──────────┼──────────┼───────────┤
-│ mcp-searxng          │ ✓ Healthy│ 3        │ [Remove]  │
-│ github-mcp           │ ✓ Healthy│ 12       │ [Remove]  │
-│ kubernetes-readonly  │ ✓ Healthy│ 8        │ [Remove]  │
-│ kubernetes-rw        │ ✓ Healthy│ 12       │ [Remove]  │
-└──────────────────────┴──────────┴──────────┴───────────┘
-[ + Register MCP ]
+User: "Can you query my Grafana alerts?"
+Model: "I don't have that tool yet. Let me find or build an MCP for it."
+[model calls request_mcp("query Grafana alerts from Grafana HTTP API")]
+Model: "Found mcp-grafana on Smithery. I'm registering it now — PR #... opened.
+        Once merged, I'll have access to grafana_list_alerts, grafana_get_datasources, etc."
 ```
 
-Backend: `GET /api/v1/mcp` (Phase 15 endpoint). Register form posts to `POST /api/v1/mcp/register`.
+### 20f — Duplicate Prevention
 
----
+Before any research, check `GET /api/v1/mcp` — if a registered MCP already covers the capability (by name or description match), return it immediately without opening a PR.
 
-## Deployment
+## Phase 17 Ready Conditions
 
-New component in `praetor` repo: `praetor-ui`.
-
-CI adds a build step for the `praetor-ui` image (nginx serving React static assets).
-
-**k3s manifests:** Add `praetor-ui` Deployment + Service via app-factory. Existing `praetor.amer.dev` ingress routes:
-- `/` → praetor-ui (nginx)
-- `/api/` → webhook-adapter (FastAPI)
-- `/webhooks/` → webhook-adapter (FastAPI, existing)
-
-## Phase 18 Ready Conditions
-
-1. `https://praetor.amer.dev` loads the control plane UI (requires auth)
-2. Run Dashboard shows last 20 runs auto-refreshing every 10s
-3. Trigger Panel: dispatch `type=research` → run appears in dashboard within 10s
-4. Prompt Quick-Edit: lists all Langfuse prompts with correct versions
-5. Benchmark Runner: 5-item eval suite completes and shows mean score inline
-6. Scaffold Form: submit agent scaffold → draft PR opens on `amerenda/praetor` within 3 minutes
-7. MCP Registry: lists all registered MCPs with tool counts and health status
-8. All existing webhook paths (`/webhooks/vikunja`, `/webhooks/github`, `/api/v1/dispatch`) still work
-9. `praetor-ui` pod Running, multi-arch image built by CI
+1. `POST /api/v1/mcp/request { "capability": "search the web" }` → research agent finds mcp-searxng already registered, returns immediately with no new PR
+2. `POST /api/v1/mcp/request { "capability": "query Grafana alerts" }` → research finds existing image, factory PR opened within 2 minutes
+3. `POST /api/v1/mcp/request { "capability": "send a push notification to ntfy" }` → no existing MCP found → scaffold worker opens a PR on dean-mcp within 5 minutes
+4. After scaffold PR merged + image built → register PR opened automatically (no human trigger)
+5. `request_mcp` callable from OpenWebUI conversation mid-task
+6. Confidence < 0.85 case: Hatchet run pauses and posts a clarification request before proceeding

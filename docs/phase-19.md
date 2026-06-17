@@ -1,141 +1,196 @@
-# Phase 19 — Intelligent MCP Agent
+# Phase 19 — Voice Dispatch
 
-**Goal:** When an agent or user identifies that a new capability is needed, the platform automatically determines whether an existing MCP covers it, and if not, writes and deploys one. Adding a new tool to the platform is a conversation, not a manual process.
+**Goal:** Speak a command to Home Assistant → Praetor agent runs → HA announces the result via TTS. Voice is a first-class dispatch interface, identical in capability to claw.amer.dev or opencode.
 
 ## Pre-conditions
 
-- Phase 18 complete (full app pipeline — repo creation and CI automation working)
-- Phase 15 complete (MCP factory deployment API)
-- Phase 11 complete (scaffold worker — MCP code generation)
-- Research agent working (Phase 5)
-- MCP factory `POST /api/v1/mcp/register` stable
-
-## The Gap Today
-
-Phase 15 gives you a deployment API: hand it a complete spec (image, port, secrets) and it opens a GitOps PR. What it doesn't do is think:
-
-- Does an MCP already exist for this?
-- Is an MCP even the right tool, or is a direct API call enough?
-- If building new, what should it do exactly?
-
-Those decisions currently require a human. This phase makes them automatic.
+- Phase 15 complete (MCP factory stable — platform fully instrumented)
+- Phase 14 complete (quality baselines established — voice must hit known-good agents)
+- `POST /api/v1/dispatch` live (Phase 11)
+- `GET /api/v1/status/{task_id}` live (status polling endpoint)
+- Piper TTS running (already in `llm-agents` stack on mac-mini-m4)
+- Home Assistant at `https://ha.amer.dev` with `$HA_TOKEN` available
 
 ## Architecture
 
 ```
-Trigger: user in OpenWebUI or agent during task execution
-    │
-    │  "I need to be able to query Grafana alerts"
-    │  or: agent hits a tool gap mid-task
-    │
-    ▼
-POST /api/v1/mcp/request   ← new endpoint (or OpenWebUI tool call)
-    { capability: "query Grafana alerts from Grafana API" }
-    │
-    ├─► Research agent: search for existing MCP servers
-    │     - GitHub search: "mcp server grafana"
-    │     - Smithery / mcp.so registries
-    │     - ModelContextProtocol GitHub org
-    │     Returns: { found: bool, image: str | None, confidence: float, notes: str }
-    │
-    ├─► Decision:
-    │     found + confidence > 0.8 → use existing image
-    │     found + confidence < 0.8 → verify + test, then decide
-    │     not found → scaffold new MCP
-    │
-    ├─► Path A: existing image found
-    │     POST /api/v1/mcp/register { name, image, port, transport, env_secrets }
-    │     Returns PR URL
-    │
-    └─► Path B: no existing image
-          Dispatch scaffold worker: agent:scaffold
-            { type: "mcp", name: <name>, description: <capability> }
-          Scaffold worker:
-            - Creates MCP server code in dean-mcp/<name>/
-            - Opens PR on amerenda/dean-mcp
-            - CI builds + pushes image (amerenda/<name>:latest)
-          After PR merged + image built:
-            POST /api/v1/mcp/register { name, image, ... }
-          Returns: scaffold PR URL + (later) registry PR URL
+"Hey, research Tailscale exit nodes"
+          │
+          ▼
+  Home Assistant
+  (voice command intent: praetor_dispatch)
+          │
+          ▼
+  HA → REST API → POST /api/v1/dispatch
+          │
+          ▼
+  Hatchet dispatches agent
+          │
+          ▼
+  HA polls GET /api/v1/status/{task_id} (every 30s, up to 20 min)
+          │
+          ▼
+  done=true → HA calls piper TTS with mem0_summary
+          │
+          ▼
+  HA announces result via media player
 ```
+
+No new infrastructure. Voice uses the same dispatch API as every other interface.
 
 ## What Gets Built
 
-### 20a — MCP Request Endpoint
+### 16a — HA Intent Script (`praetor_dispatch`)
 
+A Home Assistant script that calls the Praetor dispatch API and polls for results.
+
+Add to `ha.amer.dev` config (via `docker exec homeassistant` → `/config/scripts.yaml` or UI):
+
+```yaml
+praetor_dispatch:
+  alias: "Dispatch Praetor Agent"
+  description: "Send a task to the Praetor platform and announce the result."
+  fields:
+    task_title:
+      description: "The task to run"
+      example: "Research Tailscale exit nodes"
+    task_type:
+      description: "research | code | pipeline"
+      default: "research"
+  sequence:
+    - service: rest_command.praetor_dispatch
+      data:
+        title: "{{ task_title }}"
+        type: "{{ task_type }}"
+      response_variable: dispatch_response
+
+    - variables:
+        task_id: "{{ dispatch_response.content | from_json | attr('task_id') }}"
+
+    - service: tts.speak
+      data:
+        message: "Got it. Running {{ task_type }} task. I'll let you know when it's done."
+        media_player_entity_id: media_player.living_room
+
+    - repeat:
+        count: 40  # max 20 minutes (30s × 40)
+        sequence:
+          - delay: "00:00:30"
+          - service: rest_command.praetor_status
+            data:
+              task_id: "{{ task_id }}"
+            response_variable: status_response
+          - if:
+              - condition: template
+                value_template: >
+                  {{ (status_response.content | from_json).done == true }}
+            then:
+              - service: tts.speak
+                data:
+                  message: >
+                    Praetor result: {{ (status_response.content | from_json).tts_summary }}
+                  media_player_entity_id: media_player.living_room
+              - stop: "Task complete"
 ```
-POST /api/v1/mcp/request
-{
-  "capability": "natural language description of the tool capability needed",
-  "preferred_name": "optional-name"    // optional
+
+### 16b — HA REST Commands
+
+Add to `/config/configuration.yaml`:
+
+```yaml
+rest_command:
+  praetor_dispatch:
+    url: "https://praetor.amer.dev/api/v1/dispatch"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ states('input_text.praetor_api_key') }}"
+      Content-Type: application/json
+    payload: '{"title": "{{ title }}", "type": "{{ type }}"}'
+
+  praetor_status:
+    url: "https://praetor.amer.dev/api/v1/status/{{ task_id }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ states('input_text.praetor_api_key') }}"
+```
+
+`input_text.praetor_api_key` — a helper that stores the `PRAETOR_API_KEY` value. Set it once in the HA UI; never hardcode in YAML.
+
+### 16c — Voice Intent Registration
+
+Register a custom intent in HA's conversation integration so the local voice assistant parses "research X" and "code X in repo Y" into structured calls.
+
+```yaml
+# /config/custom_sentences/en/praetor.yaml
+language: "en"
+intents:
+  PraetorResearch:
+    data:
+      - sentences:
+          - "research {topic}"
+          - "look up {topic}"
+          - "find information about {topic}"
+  PraetorCode:
+    data:
+      - sentences:
+          - "code {task} in {repo}"
+          - "implement {task} in repo {repo}"
+          - "write code for {task}"
+```
+
+Intent handlers in `/config/intent_script.yaml`:
+
+```yaml
+PraetorResearch:
+  action:
+    service: script.praetor_dispatch
+    data:
+      task_title: "Research: {{ topic }}"
+      task_type: research
+  speech:
+    text: "Starting research on {{ topic }}."
+
+PraetorCode:
+  action:
+    service: script.praetor_dispatch
+    data:
+      task_title: "{{ task }}"
+      task_type: code
+  speech:
+    text: "Got it. I'll start coding {{ task }}."
+```
+
+### 16d — TTS Response Length Handling
+
+Agent research results can be long. The TTS output must be trimmed to something speakable.
+
+Add `tts_summary` field to the `/api/v1/status` response:
+
+```python
+# In webhooks/dispatch_api.py status endpoint
+mem0_summary = memories[0]["memory"] if memories else None
+tts_summary = None
+if mem0_summary:
+    # First 2 sentences only for TTS — full summary still in mem0_summary
+    sentences = mem0_summary.split(". ")
+    tts_summary = ". ".join(sentences[:2]) + "."
+
+return {
+    "task_id": task_id,
+    "done": bool(mem0_summary),
+    "mem0_summary": mem0_summary,
+    "tts_summary": tts_summary,
 }
 ```
 
-Returns:
-```json
-{
-  "decision": "use_existing | scaffold_new",
-  "image": "ghcr.io/org/mcp-name:latest",  // if use_existing
-  "pr_url": "...",                          // registration or scaffold PR
-  "research_summary": "...",               // what the research agent found
-  "task_id": 12345                         // Hatchet run tracking the pipeline
-}
-```
-
-### 20b — Research Agent MCP Search
-
-Extend the research agent with an MCP discovery tool. Given a capability description, it searches:
-
-1. **Smithery** (`smithery.ai`) — largest MCP index
-2. **mcp.so** — community registry
-3. **GitHub** — search `"mcp-server" <keyword>` for repos with Dockerfiles
-4. **ModelContextProtocol org** — reference implementations
-5. **Existing praetor MCPs** — check the registry via `GET /api/v1/mcp` first
-
-Returns a confidence-ranked list of candidates with image names where available.
-
-### 20c — Decision Logic
-
-After research:
-
-- `confidence >= 0.85` and image available on a public registry: use existing, call factory
-- `confidence >= 0.85` but no prebuilt image: scaffold from source + build
-- `confidence < 0.85`: ask user for confirmation before proceeding (via OpenWebUI or a Vikunja task comment)
-- No results: proceed with scaffold_new
-
-### 20d — Scaffold → Build → Register Pipeline
-
-When scaffolding is needed, the flow is:
-
-1. `agent:scaffold` event → scaffold worker creates `dean-mcp/<name>/server.py` + Dockerfile
-2. Scaffold PR merged → CI builds `amerenda/<name>:latest`
-3. Hatchet monitors for the CI completion (polls GitHub API for the build job)
-4. On success: calls `POST /api/v1/mcp/register` automatically
-5. Returns the final registry PR URL
-
-This is a multi-step Hatchet workflow with a wait step between scaffold-merge and register.
-
-### 20e — praetor_mcp Tool
-
-Add `request_mcp(capability: str)` as a tool in the praetor-mcp MCP server. This is callable from OpenWebUI mid-conversation:
-
-```
-User: "Can you query my Grafana alerts?"
-Model: "I don't have that tool yet. Let me find or build an MCP for it."
-[model calls request_mcp("query Grafana alerts from Grafana HTTP API")]
-Model: "Found mcp-grafana on Smithery. I'm registering it now — PR #... opened.
-        Once merged, I'll have access to grafana_list_alerts, grafana_get_datasources, etc."
-```
-
-### 20f — Duplicate Prevention
-
-Before any research, check `GET /api/v1/mcp` — if a registered MCP already covers the capability (by name or description match), return it immediately without opening a PR.
+HA reads `tts_summary` instead of `mem0_summary` for the spoken result.
 
 ## Phase 19 Ready Conditions
 
-1. `POST /api/v1/mcp/request { "capability": "search the web" }` → research agent finds mcp-searxng already registered, returns immediately with no new PR
-2. `POST /api/v1/mcp/request { "capability": "query Grafana alerts" }` → research finds existing image, factory PR opened within 2 minutes
-3. `POST /api/v1/mcp/request { "capability": "send a push notification to ntfy" }` → no existing MCP found → scaffold worker opens a PR on dean-mcp within 5 minutes
-4. After scaffold PR merged + image built → register PR opened automatically (no human trigger)
-5. `request_mcp` callable from OpenWebUI conversation mid-task
-6. Confidence < 0.85 case: Hatchet run pauses and posts a clarification request before proceeding
+1. "Hey assistant, research Tailscale exit nodes" → `agent:research` Hatchet run starts within 15s
+2. HA announces "Got it. Running research task." immediately after dispatch
+3. HA polls status and announces the TTS summary when `done=true` (within 20 minutes)
+4. `PraetorCode` intent: "code add /healthz to ecdysis" → coder agent starts, HA confirms
+5. `input_text.praetor_api_key` helper holds the key — no hardcoded secrets in HA YAML
+6. TTS summary is ≤3 sentences (not raw dump of full research output)
+7. Works from both living room and bedroom media players

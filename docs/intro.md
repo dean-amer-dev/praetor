@@ -188,11 +188,11 @@ Every phase file lists its pre-conditions. The current phase is always the lowes
 | 13 | OpenWebUI Integration | [phase-13.md](./phase-13.md) |
 | 14 | Agent Benchmarking & Eval | [phase-14.md](./phase-14.md) |
 | 15 | Self-Service MCP Factory | [phase-15.md](./phase-15.md) |
-| 16 | Voice Dispatch | [phase-16.md](./phase-16.md) |
-| 17 | Control Plane UI | [phase-17.md](./phase-17.md) |
-| 18 | Full App Pipeline | [phase-18.md](./phase-18.md) |
-| 19 | Intelligent MCP Agent | [phase-19.md](./phase-19.md) |
-| 20 | Kubernetes MCP | [phase-20.md](./phase-20.md) |
+| 16 | Full App Pipeline | [phase-16.md](./phase-16.md) |
+| 17 | Intelligent MCP Agent | [phase-17.md](./phase-17.md) |
+| 18 | Kubernetes MCP | [phase-18.md](./phase-18.md) |
+| 19 | Voice Dispatch | [phase-19.md](./phase-19.md) |
+| 20 | Control Plane UI | [phase-20.md](./phase-20.md) |
 
 ## Non-Goals
 

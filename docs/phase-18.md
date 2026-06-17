@@ -1,150 +1,82 @@
-# Phase 18 — Full App Pipeline
+# Phase 18 — Kubernetes MCP
 
-**Goal:** From an OpenWebUI conversation, go from "here's what I want to build" to a running UAT deployment with CI/CD fully wired — without touching the terminal. This phase adds the two missing pieces the coder agent currently can't do on its own: (1) create a new GitHub repo from the app-template, and (2) provision CI runners for it. After this phase, the path from idea to UAT is fully automated.
+**Goal:** Use the Phase 19 Intelligent MCP Agent to discover and deploy `mcp-server-kubernetes`, making it available to praetor agents with two access tiers: read-only (safe for diagnostic agents) and read-write (for operational tasks like scaling the benchmark-worker). This phase is the first real-world test of the intelligent MCP pipeline.
 
 ## Pre-conditions
 
-- Phase 17 complete (control plane UI — full platform confirmed stable before adding app creation)
-- `infra-mcp scaffold_app` and `open_deploy_pr` working (Phase 0)
-- `infra-mcp add_mac_mini_runner` available (Phase 0)
-- Coder agent working end-to-end (Phase 6)
-- PR reviewer working (Phase 7)
-- QA agent working (Phase 7)
-- `app-template` repo exists at `amerenda/app-template` with CI skeleton
+- Phase 17 complete (Intelligent MCP Agent — `POST /api/v1/mcp/request` working)
+- Phase 15 complete (MCP factory deployment API)
+- k3s cluster accessible from MCP pods (in-cluster service accounts)
 
-## The Gap Today
+## How This Phase Is Executed
 
-The coder agent writes code and opens PRs on **existing repos** only. To build a brand-new app you currently need to manually:
-
-1. Create a GitHub repo (from `app-template`)
-2. Add runners to that repo (via `infra-mcp add_mac_mini_runner`)
-3. Create the repo's k3s manifests (UAT + prod) in `k3s-dean-gitops`
-4. Then give the coder agent a task on the new repo
-
-This phase collapses steps 1-3 into a single automated flow triggered from OpenWebUI.
-
-## Architecture
+Rather than manually calling `POST /api/v1/mcp/register` as was done in earlier phases, Phase 20 is triggered via the intelligent agent:
 
 ```
-OpenWebUI conversation
-    │
-    │  User: "Build an app that does X"
-    │  Model: generates AppPlan, asks for approval
-    │  User: approves
-    │  Model: calls praetor_mcp.create_app(plan)
-    │
-    ▼
-POST /api/v1/app/create
-    │
-    ├─► Create GitHub repo from app-template (GitHub API)
-    │   (amerenda-coder app, org-level repo creation)
-    │
-    ├─► infra-mcp scaffold_app → k3s manifests for UAT + prod
-    │   infra-mcp open_deploy_pr → ArgoCD ready for UAT
-    │
-    ├─► infra-mcp add_mac_mini_runner → CI runners on new repo
-    │
-    └─► Dispatch coder agent:
-        POST /api/v1/dispatch { type: "code", title: plan.title,
-                                description: plan.full_description,
-                                repo: plan.repo_name }
-            │
-            ▼
-        Coder agent writes initial code, opens PR
-            │
-            ▼
-        GitHub PR event → reviewer agent fires automatically
-            │
-            ▼
-        PR merged → CI builds image → UAT manifest updated → ArgoCD syncs
-            │
-            ▼
-        QA agent runs against UAT endpoint
-            │
-            ▼
-        Prod deploy PR created → human approves → prod rolls
+POST /api/v1/mcp/request
+{ "capability": "query and manage Kubernetes cluster resources — pods, deployments, logs, scaling" }
 ```
 
-## What Gets Built
+The research agent finds `ghcr.io/flux159/mcp-server-kubernetes` (high confidence), the factory registers it, and the two instances below are deployed. This validates the full Phase 17 pipeline end-to-end.
 
-### 19a — AppPlan Schema
+## Implementation
 
-```python
-class AppPlan(BaseModel):
-    name: str                          # kebab-case, becomes repo name
-    description: str                   # what the app does (for coder prompt)
-    domain: str | None = None          # e.g. "myapp.amer.dev" (optional)
-    port: int = 8000
-    has_database: bool = False         # postgres via app-factory pattern
-    env_secrets: dict[str, str] = {}   # {ENV_VAR: bws-secret-name}
-    stateless: bool = True             # False = Komodo stateful (not yet automated)
-```
+### 20a — Deploy Read-Only Instance
 
-### 19b — Repo Creation
+Via Phase 17 intelligent agent (research → register):
 
-Use the GitHub API with the amerenda-coder GitHub App installation token to create a new repo from `app-template`:
-
-```
-POST /repos/amerenda/app-template/generate
+```json
+POST /api/v1/mcp/register
 {
-  "owner": "amerenda",
-  "name": "<name>",
-  "private": false,
-  "description": "<description>"
+  "name": "kubernetes-readonly",
+  "image": "ghcr.io/flux159/mcp-server-kubernetes:latest",
+  "port": 3000,
+  "transport": "http",
+  "env_secrets": {}
 }
 ```
 
-The `amerenda-coder` GitHub App needs `administration:write` permission at org level for this. Check and grant if not already set.
+Uses in-cluster service account with `get`/`list`/`watch` RBAC on the praetor namespace. Tools available: `kubectl_get`, `kubectl_describe`, `kubectl_logs`, `kubectl_events`, `explain_resource`.
 
-### 19c — Runner Provisioning
+### 20b — Deploy Read-Write Instance
 
-Call `infra-mcp add_mac_mini_runner` for the new repo immediately after creation. This registers an ARC runner scale set on the mac-mini so the new repo's CI has a runner.
-
-### 19d — k3s Manifests via infra-mcp
-
-Reuse the existing `scaffold_app` + `open_deploy_pr` pattern from infra-mcp. The factory calls these with the `AppPlan` fields. ArgoCD will have the UAT namespace ready before the coder agent's first PR merges.
-
-### 19e — Coder Dispatch with Full Plan Context
-
-The coder agent currently receives `task_title` and `task_description`. For a new-app task, `task_description` includes the full `AppPlan` as structured context:
-
-```
-App: <name>
-Repo: https://github.com/amerenda/<name>
-Branch: amerenda-coder/initial-implementation
-Purpose: <description>
-Port: <port>
-Secrets needed: <env_secrets>
-UAT URL: https://<name>-uat.amer.dev
+```json
+POST /api/v1/mcp/register
+{
+  "name": "kubernetes-rw",
+  "image": "ghcr.io/flux159/mcp-server-kubernetes:latest",
+  "port": 3000,
+  "transport": "http",
+  "env_secrets": {}
+}
 ```
 
-The coder agent clones the new repo (app-template skeleton), implements the app, opens a PR. From that point, the existing reviewer → CI → UAT → QA → prod chain handles everything automatically.
+Full access: `kubectl_scale`, `kubectl_apply`, `kubectl_patch`, `kubectl_rollout`. Scoped to the praetor namespace only.
 
-### 19f — praetor_mcp Tool
+### 20c — Service Accounts
 
-Expose `create_app(plan: AppPlan)` as a tool in the `praetor-mcp` MCP server so OpenWebUI/qwen3-35b-think can call it directly from chat. The model creates the plan conversationally, asks for approval, then calls `create_app` with the approved spec.
+Two k3s service accounts provisioned alongside the MCP deployments:
+- `mcp-kubernetes-readonly-sa` — ClusterRole: `view` (built-in)
+- `mcp-kubernetes-rw-sa` — ClusterRole: custom, `get`/`list`/`watch`/`update`/`patch` on `deployments`, `pods`, `services` in the `praetor` namespace only
 
-### 19g — Plan Approval Step
+### 20d — Benchmark Worker Scale Flow
 
-The model should always present a plan and wait for explicit approval before calling `create_app`. This is enforced via the system prompt on qwen3-35b-think in OpenWebUI:
+Replace the current manual `kubectl scale` workaround. When running benchmarks:
 
-```
-When a user asks you to build an app:
-1. Gather requirements through conversation (2-3 exchanges max)
-2. Present a structured AppPlan summary for approval
-3. Wait for explicit "yes" / "looks good" / "go ahead" before calling create_app
-4. Never call create_app without explicit approval
-```
+1. Claude calls `kubernetes-rw` tool `kubectl_scale deployment/praetor-benchmark-worker --replicas=1 -n praetor`
+2. Dispatches benchmark events
+3. Polls until benchmarks complete
+4. Scales back down to 0
 
-## Phase 19 Ready Conditions
+### 20e — Wire into Agent Context
 
-1. User describes an app in OpenWebUI → model creates a plan and waits for approval (does not auto-fire)
-2. User approves → `create_app` called → GitHub repo created within 30s
-3. Runner provisioned on new repo → CI can execute within 5 minutes of repo creation
-4. k3s UAT manifests created via infra-mcp → ArgoCD has the namespace before first CI run
-5. Coder agent opens a PR on the new repo with working initial code
-6. PR reviewer fires automatically on the PR
-7. PR merged → CI builds → UAT pod running (check with `get_app_status`)
-8. QA agent runs against the UAT endpoint and posts results
-9. Prod deploy PR created → after human merge, prod pod running
-10. Entire flow from "user approves plan" to "UAT running" completes in under 15 minutes
+Add `kubernetes-readonly` to the research agent's MCP server list in LiteLLM. The read-write instance is invoked explicitly only (by Claude Code or a platform operator, not autonomously by praetor agents).
+
+## Phase 18 Ready Conditions
+
+1. `POST /api/v1/mcp/request` with kubernetes capability → research agent finds the image, factory PR opened (validates Phase 19)
+2. `kubernetes-readonly` deployed and healthy; `kubectl_get pods -n praetor` returns current pod list
+3. `kubernetes-rw` deployed and healthy; `kubectl_scale` successfully scales a deployment
+4. Benchmark-worker scale-up/down works end-to-end via `kubernetes-rw` (replicas 0→1→0)
+5. Research agent can call `kubectl_logs` and `kubectl_describe` via `kubernetes-readonly` during a task
+6. Neither MCP instance can affect namespaces outside `praetor` (RBAC verified)
