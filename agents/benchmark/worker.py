@@ -54,13 +54,14 @@ async def _run_benchmark(input: BenchmarkInput, context: Context) -> dict:
     score_value, reason = score_output(agent_output, expected)
 
     # Write score to Langfuse and link to dataset item
-    from langfuse import Langfuse
+    trace_id = langfuse_context.get_current_trace_id()
     lf.score(
+        trace_id=trace_id,
         name="benchmark-score",
         value=score_value,
         comment=reason,
     )
-    item.link(lf, run_name=run_name)
+    item.link(trace_id=trace_id, run_name=run_name)
 
     langfuse_context.update_current_trace(output={"score": score_value, "reason": reason})
     return {
