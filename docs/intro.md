@@ -1,10 +1,10 @@
 # Praetor Platform — Overview
 
-This document set breaks down the **Local LLM Agent Platform** plan into individual phase files for tracking and execution. Below is the complete architecture summary from `plan.md`.
+This document set breaks down the **Local LLM Agent Platform** plan into individual phase files for tracking and execution. Below is the complete architecture summary.
 
 ## Intent
 
-A multi-agent platform where different agents collaborate on tasks, share memory, and call local models — triggered automatically from external systems (Vikunja, GitHub, cron, eventually chat/voice). No custom agent loops, no custom harness code, no custom dispatcher.
+A multi-agent platform where different agents collaborate on tasks, share memory, and call local models — triggered from a conversational interface (OpenWebUI), with GitHub, voice, and API as secondary entry points. No custom agent loops, no custom harness code, no custom dispatcher.
 
 ## Full Stack
 
@@ -19,23 +19,112 @@ A multi-agent platform where different agents collaborate on tasks, share memory
 
 **Stateful services live on Mac Mini. Everything else is a stateless k3s Deployment.**
 
-Qdrant and Hatchet/Mem0 schemas both live in Mac Mini's existing PostgreSQL — separate databases, one server.
+## Trigger Architecture
+
+```
+Primary interface
+─────────────────────────────────────────────────────────────────
+  OpenWebUI (bot.amer.dev)
+  qwen3-35b-think
+  praetor_mcp tool + infra_mcp tool wired in
+         │
+         │  User: "I want an app that does X"
+         │  Model: creates plan, asks for approval
+         │  User: approves
+         │  Model: calls praetor_mcp tools → Hatchet events fire
+         │
+         ▼
+      Hatchet
+      ┌─── Events API ─────────────────────────────────────────┐
+      │    Cron scheduler                                       │
+      │    GitHub PR webhook                                    │
+      │    Task DB (PostgreSQL)                                 │
+      │    Web UI (history, logs, retries)                      │
+      └────────────────────────────────────────────────────────┘
+                            │
+           ┌────────────────┼────────────────┐
+           │                │                │
+       Research           Coder          PR Reviewer
+       Worker             Worker          Worker
+           │                │                │
+           └────────────────┴────────────────┘
+                            │
+                       PydanticAI
+                  (harness, tool dispatch,
+                   Pydantic Graph for multi-agent)
+                            │
+                   ┌─────────┴─────────┐
+                   │                   │
+               LiteLLM              Mem0
+              (inference)          (memory)
+                   │                   │
+          Model containers        pgvector
+                                (in Mac Mini PG)
+
+Secondary interfaces
+─────────────────────────────────────────────────────────────────
+  GitHub PR events  →  reviewer + QA agents (automated, no human)
+  Voice (HA)        →  POST /api/v1/dispatch (Phase 17)
+  Vikunja task      →  webhook → Hatchet (optional, occasional use)
+  Direct API        →  POST /api/v1/dispatch (curl, scripts, MCP)
+```
+
+## Primary User Flow
+
+The intended interaction model is conversational:
+
+```
+1. User opens OpenWebUI (bot.amer.dev), using qwen3-35b-think
+2. User describes what they want: "Build me an app that does X"
+3. Model (with praetor_mcp + infra_mcp tools) creates a structured plan:
+      - Does this need a new repo?
+      - What tech stack?
+      - Does it need MCP tools? (agent researches existing MCPs first)
+      - Stateless k3s service or stateful?
+      - What env secrets / integrations?
+4. User reviews and approves (or modifies) the plan in chat
+5. Model calls praetor_mcp tools to execute:
+      - Create repo if needed (via coder GitHub App)
+      - Add CI runners to the new repo
+      - Dispatch coder agent with the approved plan
+      - Coder opens a PR → reviewer fires → UAT deploys via CI → QA runs
+      - Prod deploy PR waits for human approval
+6. For MCPs specifically:
+      - Research agent checks if an MCP already exists publicly
+      - If yes: register it via the MCP factory (Phase 15)
+      - If no: scaffold worker writes the code, CI builds the image, factory deploys it
+```
+
+**Vikunja tasks are optional** — a secondary input for tasks created manually or by scripts. Not the intended day-to-day path.
+
+## CI/CD Pipeline (for stateless k3s apps)
+
+Every new app follows this pipeline automatically once the repo exists:
+
+```
+push to main
+    │
+    ▼
+CI: test → build → push image (sha-tag + latest)
+    │
+    ├──► UAT manifest update → commit directly to k3s-dean-gitops main
+    │    ArgoCD auto-syncs → UAT pods rolling
+    │
+    └──► Prod deploy PR created (deploy/<app>-prod-*)
+         Human reviews + approves → prod rolls
+```
+
+New repos are bootstrapped from `app-template` (Phase 19). Runners are provisioned via `infra-mcp.add_mac_mini_runner`.
 
 ## Why These Choices
 
 ### Hatchet (not a custom dispatcher)
 
-Hatchet is an open-source AI agent orchestration engine. It is exactly the dispatcher needed without writing one:
-
-- **Triggers built-in:** cron schedules, webhooks (GitHub PR → worker), events API (any interface pushes an event, Hatchet dispatches the right worker), inter-service calls
-- **Durable execution:** tasks survive worker crashes and restart from where they left off
-- **Task tracking DB:** every run has status, logs, input, output, duration stored in PostgreSQL
+- **Triggers built-in:** cron schedules, webhooks, events API
+- **Durable execution:** tasks survive worker crashes
+- **Task tracking DB:** every run has status, logs, input, output, duration
 - **Web UI:** full task history, retries, cancellation
-- **Retry policies, timeouts, concurrency limits** — all config, no code
-- **Hatchet Lite** = single Docker image + PostgreSQL only. No RabbitMQ, no Kafka.
-- **Python SDK:** workers are decorated functions — minimal code
-
-The "dispatcher" is now Hatchet. Writing one is off the table.
+- **Hatchet Lite** = single Docker image + PostgreSQL only
 
 ### PydanticAI (inside Hatchet workers)
 
@@ -43,110 +132,69 @@ The "dispatcher" is now Hatchet. Writing one is off the table.
 - 48% fewer tokens than CrewAI for equivalent tasks
 - `Pydantic Graph` handles multi-agent state passing within a pipeline
 - Stateless — fits naturally inside a Hatchet worker
-- V1 stable API (Sep 2025), MIT licensed
 
 ### Mem0 + pgvector
 
 - Mem0: stateless server on k3s, backed by PostgreSQL with pgvector extension
-- The mem0 OSS REST server hardcodes pgvector as its vector store — no Qdrant env vars exist in the server
 - All agents hit one Mem0 HTTP endpoint — concurrent writes handled by Mem0
-- Qdrant (Phase 2) remains deployed on Mac Mini for future agents that need direct vector search
-- No Neo4j (Graphiti ruled out — requires Neo4j v5.26+)
-
-## Trigger Architecture
-
-```
-External events
-──────────────────────────────────────────────────
-  Vikunja (webhook)     GitHub PR webhook   Any future interface
-         │                    │                (chat, voice, API)
-         │                    │                      │
-         └────────────────────┴──────────────────────┘
-                              │
-                           Hatchet
-                  ┌─── Cron scheduler ────────────────┐
-                  │    Webhook receiver                │
-                  │    Events API                      │
-                  │    Task DB (PostgreSQL)             │
-                  │    Web UI (history, logs, retries) │
-                  └───────────────────────────────────┘
-                              │
-               ┌───────────────┼───────────────┐
-               │               │               │
-         Research           Coder          PR Reviewer
-         Worker             Worker          Worker
-               │               │               │
-               └───────────────┴───────────────┘
-                              │
-                         PydanticAI
-                    (harness, tool dispatch,
-                     Pydantic Graph for multi-agent)
-                              │
-                     ┌─────────┴─────────┐
-                     │                   │
-                 LiteLLM              Mem0
-                (inference)          (memory)
-                     │                   │
-            Model containers        pgvector
-                                  (in Mac Mini PG)
-```
-
-### How triggers work in Hatchet
-
-**Vikunja webhook** — Vikunja POSTs to `https://praetor.amer.dev/webhooks/vikunja` on `task.updated` and `task.created` events (Vikunja has no `task.label.added` event — label changes arrive as `task.updated`). A FastAPI adapter validates the `X-Vikunja-Signature` HMAC-SHA256, inspects the task's current label list, and pushes the appropriate Hatchet event. If both `ai-research` and `ai-go` labels are present, it pushes `pipeline:research_code` directly. Idempotency key `vikunja-{task_id}-{label_id}` prevents duplicate runs.
-
-**GitHub PR webhook** — Hatchet receives the GitHub webhook directly, dispatches to PR Reviewer or Pipeline workers based on event type and labels. Same pattern as Vikunja but using GitHub's HMAC validation (`X-Hub-Signature-256`).
-
-**Cron** — registered in code at worker startup. E.g., every 30s → push `research:poll` event with `task_id`, every 5min → `test:ping`. Cron expression as env var, configurable via ConfigMap.
+- Qdrant remains deployed on Mac Mini for future agents that need direct vector search
 
 ## Where Things Live
 
 ### Mac Mini (stateful core stack)
 
-- **PostgreSQL** — existing installation; hosts Qdrant + Hatchet/Mem0 schemas in separate databases
+- **PostgreSQL** — existing; hosts Qdrant + Hatchet/Mem0 schemas in separate databases
 - **Qdrant** — vector store at `10.100.20.18:6333`, Docker via Komodo GitOps
-- **Komodo** — manages stateful services (Qdrant, PostgreSQL) from `komodo-dean-gitops`
+- **Komodo** — manages stateful services from `komodo-dean-gitops`
 
 ### k3s cluster (ArgoCD via k3s-dean-gitops)
 
-New Deployments:
-- **LiteLLM** — inference gateway
-- **Hatchet Lite** — dispatch engine, UI, cron, webhooks (points at Mac Mini PG)
-- **Mem0 server** — memory API (points at Mac Mini PG via pgvector)
-- **Agent workers** — one Deployment per agent type, pull tasks from Hatchet
+- **LiteLLM** — inference gateway at `litellm.amer.dev`
+- **Hatchet Lite** — dispatch engine, UI, cron, webhooks
+- **Mem0 server** — memory API
+- **Agent workers** — one Deployment per agent type
+- **MCP servers** — under `apps/mcp/<name>/` in k3s-dean-gitops
+
+### OpenWebUI (bot.amer.dev)
+
+- Primary user interface
+- `qwen3-35b-think` model — reasoning-enabled, tools wired in
+- `praetor_mcp` tools: dispatch agents, check status, register MCPs
+- `infra_mcp` tools: scaffold apps, provision services, add runners
 
 ## Phase Sequencing Rule
 
 **Phases are strictly sequential. Phase N cannot begin until Phase N-1 is fully complete.**
 
-Every phase file lists its pre-conditions. If a pre-condition is not met, stop and complete it before proceeding. Do not work on multiple phases in parallel. Do not skip a phase and return to it later — if a phase is blocked, resolve the blocker first.
-
-The current phase is always the lowest-numbered phase that is not yet ✅ Complete in `status.md`.
+Every phase file lists its pre-conditions. The current phase is always the lowest-numbered phase that is not yet ✅ Complete in `status.md`.
 
 ## Phases Overview
 
-| Phase | Name | Status | File |
-|-------|------|--------|------|
-| 0 | Deployment Foundation | ✅ Complete | [phase-00.md](./phase-00.md) |
-| 1 | Inference | ✅ Complete | [phase-01.md](./phase-01.md) |
-| 2 | Storage | ✅ Complete | [phase-02.md](./phase-02.md) |
-| 3 | Dispatch | ✅ Complete | [phase-03.md](./phase-03.md) |
-| 4 | Memory | ✅ Complete (verify in Phase 12) | [phase-04.md](./phase-04.md) |
-| 5 | Research Agent | ✅ Complete | [phase-05.md](./phase-05.md) |
-| 6 | Coder Agent | ✅ Complete | [phase-06.md](./phase-06.md) |
-| 7 | PR Reviewer + QA | ✅ Complete (verify in Phase 12) | [phase-07.md](./phase-07.md) |
-| 8 | Multi-Agent Pipeline | ✅ Complete | [phase-08.md](./phase-08.md) |
-| 9 | Observability + Prompts | ✅ Complete | [phase-09.md](./phase-09.md) |
-| 10 | MCP Gateway | ✅ Complete | [phase-10.md](./phase-10.md) |
-| 11 | Scaffold Worker | ✅ Complete | [phase-11.md](./phase-11.md) |
-| 12 | Platform Verification | ⬜ Next | [phase-12.md](./phase-12.md) |
-| 13 | Agent Benchmarking & Eval | ⬜ Blocked on 12 | [phase-13.md](./phase-13.md) |
-| 14 | Voice Dispatch | ⬜ Blocked on 13 | [phase-14.md](./phase-14.md) |
-| 15 | Control Plane UI | ⬜ Blocked on 14 | [phase-15.md](./phase-15.md) |
+| Phase | Name | File |
+|-------|------|------|
+| 0 | Deployment Foundation | [phase-00.md](./phase-00.md) |
+| 1 | Inference | [phase-01.md](./phase-01.md) |
+| 2 | Storage | [phase-02.md](./phase-02.md) |
+| 3 | Dispatch | [phase-03.md](./phase-03.md) |
+| 4 | Memory | [phase-04.md](./phase-04.md) |
+| 5 | Research Agent | [phase-05.md](./phase-05.md) |
+| 6 | Coder Agent | [phase-06.md](./phase-06.md) |
+| 7 | PR Reviewer + QA | [phase-07.md](./phase-07.md) |
+| 8 | Multi-Agent Pipeline | [phase-08.md](./phase-08.md) |
+| 9 | Observability + Prompts | [phase-09.md](./phase-09.md) |
+| 10 | MCP Gateway | [phase-10.md](./phase-10.md) |
+| 11 | Scaffold Worker | [phase-11.md](./phase-11.md) |
+| 12 | Platform Verification | [phase-12.md](./phase-12.md) |
+| 13 | OpenWebUI Integration | [phase-13.md](./phase-13.md) |
+| 14 | Agent Benchmarking & Eval | [phase-14.md](./phase-14.md) |
+| 15 | Self-Service MCP Factory | [phase-15.md](./phase-15.md) |
+| 16 | Kubernetes MCP | [phase-16.md](./phase-16.md) |
+| 17 | Voice Dispatch | [phase-17.md](./phase-17.md) |
+| 18 | Control Plane UI | [phase-18.md](./phase-18.md) |
+| 19 | Full App Pipeline | [phase-19.md](./phase-19.md) |
+| 20 | Intelligent MCP Agent | [phase-20.md](./phase-20.md) |
 
 ## Non-Goals
-
-This platform does **not** require:
 
 - No custom dispatcher code
 - No custom agent loop

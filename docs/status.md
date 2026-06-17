@@ -17,10 +17,12 @@
 | 12 | Platform Verification | ✅ Complete | All smoke tests pass (18/18); health check green; Phase 4+7 verified; OOM fix + MCP URL fix merged (k3s-dean-gitops #802) |
 | 13 | OpenWebUI Integration | ✅ Complete | mcp-bridge exposes praetor_mcp + infra_mcp tools; system prompt set on qwen3-35b-think; ENABLE_MEMORIES+MEM0 env vars live; native Mem0 provider not in current OWU build (env pre-wired for when it lands) |
 | 14 | Agent Benchmarking & Eval | ✅ Complete | benchmark-worker deployed; baseline run `baseline-1781706219` complete (10/10); research-eval mean=1.000, reviewer-eval mean=0.846 recorded in eval-baselines.md |
-| 15 | Self-Service MCP Factory | 🔄 In progress | POST/GET/DELETE /api/v1/mcp; k8s ConfigMap registry; GitOps PR factory; k3s-dean-gitops RBAC + coder-app creds wired |
+| 15 | Self-Service MCP Factory | ✅ Complete | POST /api/v1/mcp/register → GitOps PR on k3s-dean-gitops (deployment + service + ArgoCD app + LiteLLM mcp_servers); GET /api/v1/mcp lists from k8s ConfigMap registry; 19 unit tests |
 | 16 | Kubernetes MCP | ⬜ Not started | Requires Phase 15 (deployed via factory) |
 | 17 | Voice Dispatch | ⬜ Not started | Requires Phase 16 |
 | 18 | Control Plane UI | ⬜ Not started | Requires Phase 17; includes MCP Registry panel (Phase 15) |
+| 19 | Full App Pipeline | ⬜ Not started | Requires Phase 18; new repo creation + CI runners + coder → UAT → QA → prod |
+| 20 | Intelligent MCP Agent | ⬜ Not started | Requires Phase 19; research + decide + scaffold + deploy MCP in one conversation |
 
 ## OpenWebUI (bot.amer.dev)
 
