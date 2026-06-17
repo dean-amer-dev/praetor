@@ -1,4 +1,5 @@
 """PydanticAI coder agent: clones repos, implements tasks, opens draft PRs."""
+import asyncio
 import os
 import subprocess
 from pathlib import Path
@@ -53,10 +54,12 @@ def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT) -> str:
 
 
 @observe()
-def read_file(path: str) -> str:
+async def read_file(path: str) -> str:
     """Read a file relative to SCRATCH_DIR."""
     full = _scratch(path)
-    return _truncate(Path(full).read_text(errors="replace"))
+    loop = asyncio.get_event_loop()
+    text = await loop.run_in_executor(None, lambda: Path(full).read_text(errors="replace"))
+    return _truncate(text)
 
 
 @observe()
@@ -69,20 +72,21 @@ def write_file(path: str, content: str) -> str:
 
 
 @observe()
-def run_shell(cmd: str) -> str:
+async def run_shell(cmd: str) -> str:
     """Run a shell command with cwd=SCRATCH_DIR. Returns stdout+stderr."""
     if ".." in cmd and ("/" in cmd or "\\" in cmd):
         # Block path-traversal patterns like ../../etc
         raise ValueError("path traversal blocked in shell command")
     Path(SCRATCH_DIR).mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        cmd,
-        shell=True,
-        cwd=SCRATCH_DIR,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
+
+    def _run() -> subprocess.CompletedProcess:
+        return subprocess.run(
+            cmd, shell=True, cwd=SCRATCH_DIR,
+            capture_output=True, text=True, timeout=300,
+        )
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _run)
     output = result.stdout + result.stderr
     return _truncate(output) if output else f"(exit {result.returncode})"
 
