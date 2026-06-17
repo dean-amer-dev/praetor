@@ -33,9 +33,57 @@ jobs:
         id: tag
         run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-  build-amd64:
-    needs: [set-tag, test]
+  detect-changes:
     if: github.event_name != 'pull_request'
+    runs-on: arc-runner-praetor
+    outputs:
+      rebuild: ${{ steps.detect.outputs.rebuild }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+      - id: detect
+        run: |
+          # workflow_dispatch always rebuilds everything
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo 'rebuild=["coder","research","pipeline","webhook","qa","reviewer","benchmark"]' >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch — rebuilding all components"
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only HEAD~1 HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          REBUILD=()
+
+          # Shared files force full rebuild
+          if echo "$CHANGED" | grep -qE '^(requirements\.txt|common/)'; then
+            REBUILD=(coder research pipeline webhook qa reviewer benchmark)
+          else
+            echo "$CHANGED" | grep -qE '^(agents/coder/|Dockerfile\.coder-worker)' && REBUILD+=(coder)
+            echo "$CHANGED" | grep -qE '^(agents/research/|Dockerfile\.research-worker)' && REBUILD+=(research)
+            echo "$CHANGED" | grep -qE '^(pipelines/|Dockerfile\.pipeline-worker)' && REBUILD+=(pipeline)
+            echo "$CHANGED" | grep -qE '^(webhooks/|Dockerfile\.webhook-adapter)' && REBUILD+=(webhook)
+            echo "$CHANGED" | grep -qE '^(agents/qa/|Dockerfile\.qa-worker)' && REBUILD+=(qa)
+            echo "$CHANGED" | grep -qE '^(agents/pr_reviewer/|Dockerfile\.reviewer-worker)' && REBUILD+=(reviewer)
+            echo "$CHANGED" | grep -qE '^(agents/benchmark/|Dockerfile\.benchmark-worker)' && REBUILD+=(benchmark)
+          fi
+
+          # build.yaml change forces full rebuild
+          if echo "$CHANGED" | grep -qE '\.github/workflows/build\.yaml'; then
+            REBUILD=(coder research pipeline webhook qa reviewer benchmark)
+          fi
+
+          JSON=$(python3 -c "import sys,json; print(json.dumps(sys.argv[1:]))" "${REBUILD[@]}")
+          echo "rebuild=$JSON" >> "$GITHUB_OUTPUT"
+          echo "Components to rebuild: $JSON"
+
+  build-amd64:
+    needs: [detect-changes, set-tag, test]
+    if: |
+      github.event_name != 'pull_request' &&
+      contains(fromJSON(needs.detect-changes.outputs.rebuild), matrix.component)
     runs-on: arc-runner-praetor
     strategy:
       fail-fast: false
@@ -77,8 +125,10 @@ jobs:
           docker push "${{ matrix.image }}:${{ needs.set-tag.outputs.tag }}-amd64"
 
   build-arm64:
-    needs: [set-tag, test]
-    if: github.event_name != 'pull_request'
+    needs: [detect-changes, set-tag, test]
+    if: |
+      github.event_name != 'pull_request' &&
+      needs.detect-changes.outputs.rebuild != '[]'
     runs-on: [self-hosted, mac-mini]
     steps:
       - uses: actions/checkout@v6
@@ -86,12 +136,13 @@ jobs:
       - name: Login to Docker Hub
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
-      - name: Free disk space
-        run: docker system prune -af --volumes
+      - name: Free disk space (dangling images only)
+        run: docker image prune -f
 
-      - name: Build and push all images (arm64)
+      - name: Build and push changed images (arm64)
         env:
           TAG: ${{ needs.set-tag.outputs.tag }}
+          REBUILD: ${{ needs.detect-changes.outputs.rebuild }}
         run: |
           for entry in \
             "coder:Dockerfile.coder-worker:amerenda/praetor-coder" \
@@ -104,24 +155,43 @@ jobs:
             COMPONENT=$(echo "$entry" | cut -d: -f1)
             DOCKERFILE=$(echo "$entry" | cut -d: -f2)
             IMAGE=$(echo "$entry" | cut -d: -f3)
+
+            # Skip if not in rebuild list
+            if ! python3 -c "import sys,json; c=json.loads(sys.argv[1]); sys.exit(0 if sys.argv[2] in c else 1)" "$REBUILD" "$COMPONENT"; then
+              echo "Skipping $COMPONENT (not changed)"
+              continue
+            fi
+
             echo "Building $COMPONENT arm64..."
-            docker build --no-cache -t "${IMAGE}:${TAG}-arm64" -f "${DOCKERFILE}" .
+            docker build -t "${IMAGE}:${TAG}-arm64" -f "${DOCKERFILE}" .
             docker push "${IMAGE}:${TAG}-arm64"
             docker rmi "${IMAGE}:${TAG}-arm64" || true
           done
 
   manifest:
-    needs: [set-tag, build-amd64, build-arm64]
+    needs: [detect-changes, set-tag, build-amd64, build-arm64]
+    if: |
+      github.event_name != 'pull_request' &&
+      needs.detect-changes.outputs.rebuild != '[]' &&
+      !failure()
     runs-on: arc-runner-praetor
     steps:
       - name: Login to Docker Hub
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
-      - name: Create multi-arch manifests
+      - name: Create multi-arch manifests for rebuilt components
         env:
           TAG: ${{ needs.set-tag.outputs.tag }}
+          REBUILD: ${{ needs.detect-changes.outputs.rebuild }}
         run: |
           for IMAGE in praetor-coder praetor-pipeline praetor-research praetor-webhook praetor-qa praetor-reviewer praetor-benchmark; do
+            COMPONENT=$(echo "$IMAGE" | sed 's/praetor-//')
+
+            if ! python3 -c "import sys,json; c=json.loads(sys.argv[1]); sys.exit(0 if sys.argv[2] in c else 1)" "$REBUILD" "$COMPONENT"; then
+              echo "Skipping manifest for $COMPONENT (not rebuilt)"
+              continue
+            fi
+
             docker buildx imagetools create -t "amerenda/${IMAGE}:${TAG}" \
               "amerenda/${IMAGE}:${TAG}-amd64" \
               "amerenda/${IMAGE}:${TAG}-arm64"
