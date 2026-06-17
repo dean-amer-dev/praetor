@@ -82,19 +82,11 @@ jobs:
 
           # Full matrix JSON for build-amd64 — only include components to rebuild
           MATRIX=$(python3 -c "
-import sys, json
-components = json.loads(sys.argv[1])
-MAP = {
-  'coder':    {'component': 'coder',     'image': 'amerenda/praetor-coder',     'dockerfile': 'Dockerfile.coder-worker'},
-  'pipeline': {'component': 'pipeline',  'image': 'amerenda/praetor-pipeline',  'dockerfile': 'Dockerfile.pipeline-worker'},
-  'research': {'component': 'research',  'image': 'amerenda/praetor-research',  'dockerfile': 'Dockerfile.research-worker'},
-  'webhook':  {'component': 'webhook',   'image': 'amerenda/praetor-webhook',   'dockerfile': 'Dockerfile.webhook-adapter'},
-  'qa':       {'component': 'qa',        'image': 'amerenda/praetor-qa',        'dockerfile': 'Dockerfile.qa-worker'},
-  'reviewer': {'component': 'reviewer',  'image': 'amerenda/praetor-reviewer',  'dockerfile': 'Dockerfile.reviewer-worker'},
-  'benchmark':{'component': 'benchmark', 'image': 'amerenda/praetor-benchmark', 'dockerfile': 'Dockerfile.benchmark-worker'},
-}
-print(json.dumps([MAP[c] for c in components if c in MAP]))
-" "$JSON")
+          import sys,json
+          c=json.loads(sys.argv[1])
+          M={'coder':{'component':'coder','image':'amerenda/praetor-coder','dockerfile':'Dockerfile.coder-worker'},'pipeline':{'component':'pipeline','image':'amerenda/praetor-pipeline','dockerfile':'Dockerfile.pipeline-worker'},'research':{'component':'research','image':'amerenda/praetor-research','dockerfile':'Dockerfile.research-worker'},'webhook':{'component':'webhook','image':'amerenda/praetor-webhook','dockerfile':'Dockerfile.webhook-adapter'},'qa':{'component':'qa','image':'amerenda/praetor-qa','dockerfile':'Dockerfile.qa-worker'},'reviewer':{'component':'reviewer','image':'amerenda/praetor-reviewer','dockerfile':'Dockerfile.reviewer-worker'},'benchmark':{'component':'benchmark','image':'amerenda/praetor-benchmark','dockerfile':'Dockerfile.benchmark-worker'}}
+          print(json.dumps([M[x] for x in c if x in M]))
+          " "$JSON")
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "Components to rebuild: $JSON"
 
