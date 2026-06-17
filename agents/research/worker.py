@@ -54,11 +54,10 @@ def main() -> None:
         input_validator=ResearchInput,
         execution_timeout=timedelta(minutes=10),
         retries=1,
-        # One active run per task_id — deduplicates duplicate webhook deliveries
         concurrency=ConcurrencyExpression(
-            expression="string(input.task_id)",
+            expression='"research"',
             max_runs=1,
-            limit_strategy=ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
+            limit_strategy=ConcurrencyLimitStrategy.CANCEL_NEWEST,
         ),
     )(_run_research)
 
