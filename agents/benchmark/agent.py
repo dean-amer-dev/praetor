@@ -6,18 +6,12 @@ import os
 
 import httpx
 from langfuse import Langfuse
-from pydantic_ai.models.openai import OpenAIModel
-from pydantic_ai.providers.openai import OpenAIProvider
 
-
-def _build_model() -> OpenAIModel:
-    return OpenAIModel(
-        model_name=os.environ.get("LLM_MODEL", "qwen3-35b"),
-        provider=OpenAIProvider(
-            base_url=os.environ["LITELLM_BASE_URL"],
-            api_key=os.environ["LITELLM_API_KEY"],
-        ),
-    )
+_RESEARCH_SYSTEM_PROMPT = (
+    "You are a research agent. Given a topic, research it thoroughly and provide a "
+    "concise, well-structured markdown report. Include key findings, relevant comparisons, "
+    "and practical recommendations where applicable. Cite specific details and be precise."
+)
 
 
 def _langfuse() -> Langfuse:
@@ -62,22 +56,32 @@ def score_output(agent_output: str, expected_criteria: dict) -> tuple[float, str
 
 
 async def run_research_benchmark(item_input: dict, agent_id: str) -> str:
-    """Run the research agent in benchmark mode (no Vikunja update)."""
-    from agents.research.agent import build_agent
+    """Evaluate research quality via direct LLM call.
 
+    Uses a direct completion rather than the pydantic-ai agent to avoid the
+    memory footprint of loading the MCP stack inside the benchmark worker.
+    """
     task_title = item_input.get("task_title", item_input.get("input", ""))
     task_description = item_input.get("task_description", "")
-    prompt = f"Task: {task_title}"
+    user_prompt = f"Research topic: {task_title}"
     if task_description:
-        prompt += f"\n\nDescription: {task_description}"
-    prompt += (
-        "\n\nResearch this topic thoroughly. Store key findings in memory under "
-        f"agent_id='{agent_id}'. Return a concise markdown research report. "
-        "Do NOT call update_vikunja_task — this is a benchmark run."
+        user_prompt += f"\n\nDetails: {task_description}"
+    user_prompt += "\n\nProvide a thorough markdown research report with key findings."
+    resp = httpx.post(
+        f"{os.environ['LITELLM_BASE_URL']}/chat/completions",
+        json={
+            "model": os.environ.get("LLM_MODEL", "qwen3-35b"),
+            "messages": [
+                {"role": "system", "content": _RESEARCH_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_tokens": 2048,
+        },
+        headers={"Authorization": f"Bearer {os.environ['LITELLM_API_KEY']}"},
+        timeout=180,
     )
-    agent = build_agent()
-    result = await agent.run(prompt)
-    return str(result.output)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
 
 
 async def run_reviewer_benchmark(item_input: dict) -> str:
