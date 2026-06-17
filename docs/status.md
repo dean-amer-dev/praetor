@@ -18,7 +18,7 @@
 | 13 | OpenWebUI Integration | ✅ Complete | mcp-bridge exposes praetor_mcp + infra_mcp tools; system prompt set on qwen3-35b-think; ENABLE_MEMORIES+MEM0 env vars live; native Mem0 provider not in current OWU build (env pre-wired for when it lands) |
 | 14 | Agent Benchmarking & Eval | ✅ Complete | benchmark-worker deployed; baseline run `baseline-1781706219` complete (10/10); research-eval mean=1.000, reviewer-eval mean=0.846 recorded in eval-baselines.md |
 | 15 | Self-Service MCP Factory | ✅ Complete | POST /api/v1/mcp/register → GitOps PR on k3s-dean-gitops (deployment + service + ArgoCD app + LiteLLM mcp_servers); GET /api/v1/mcp lists from k8s ConfigMap registry; 19 unit tests |
-| 16 | Full App Pipeline | ⬜ Not started | Requires Phase 15; new repo creation + CI runners + coder → UAT → QA → prod |
+| 16 | Full App Pipeline | 🔄 In progress | amerenda/praetor#54 + amerenda/dean-mcp#19; merges pending Phase 15 docs (#53) |
 | 17 | Intelligent MCP Agent | ⬜ Not started | Requires Phase 16; research + decide + scaffold + deploy MCP in one conversation |
 | 18 | Kubernetes MCP | ⬜ Not started | Requires Phase 17; first real test of intelligent MCP pipeline |
 | 19 | Voice Dispatch | ⬜ Not started | Requires Phase 15 |
