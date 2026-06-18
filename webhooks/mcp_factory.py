@@ -458,7 +458,10 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
         "pr_url": pr_url,
         "status": "pending",
     }
-    await _save_registry(registry)
+    try:
+        await _save_registry(registry)
+    except Exception as exc:
+        logger.error("mcp-factory: registry save failed (PR %s already opened): %s", pr_url, exc)
 
     logger.info("mcp-factory: registered %s → %s", reg.name, pr_url)
     return McpRegisterResponse(
