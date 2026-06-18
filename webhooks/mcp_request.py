@@ -153,7 +153,13 @@ async def _research_mcp(capability: str) -> McpResearchResult:
             notes=f"Research failed: LiteLLM returned {resp.status_code}",
         )
     try:
-        content = resp.json()["choices"][0]["message"]["content"]
+        content = resp.json()["choices"][0]["message"]["content"] or ""
+        # Strip markdown code fences (llama.cpp doesn't strictly enforce json_object mode)
+        content = content.strip()
+        if content.startswith("```"):
+            # ```json ... ``` or ``` ... ```
+            inner = content.split("```", 2)
+            content = inner[1].lstrip("json").strip() if len(inner) > 1 else content
         data = json.loads(content)
         return McpResearchResult(
             found=bool(data.get("found", False)),
