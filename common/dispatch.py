@@ -5,12 +5,13 @@ from typing import Literal
 
 from hatchet_sdk import Hatchet
 
-AgentType = Literal["research", "code", "pipeline"]
+AgentType = Literal["research", "code", "pipeline", "scaffold"]
 
 EVENT_MAP: dict[str, str] = {
     "research": "agent:research",
     "code":     "agent:code",
     "pipeline": "pipeline:research_code",
+    "scaffold": "agent:scaffold",
 }
 
 _hatchet: Hatchet | None = None
