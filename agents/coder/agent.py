@@ -9,6 +9,7 @@ from pydantic_ai import Agent
 from pydantic_ai.mcp import MCPServerHTTP
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.usage import UsageLimits
 
 from common.memory_tools import add_memory, search_memory
 from common.github_app import get_installation_token
@@ -42,7 +43,8 @@ def _scratch(path: str) -> str:
     return str(resolved)
 
 
-_MAX_TOOL_OUTPUT = 64 * 1024  # 64KB — keeps message history bounded
+_MAX_TOOL_OUTPUT = 64 * 1024       # 64KB returned to message history
+_MAX_SUBPROCESS_CAPTURE = 4 * 1024 * 1024  # 4MB buffered in memory before truncation
 
 
 def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT) -> str:
@@ -79,16 +81,43 @@ async def run_shell(cmd: str) -> str:
         raise ValueError("path traversal blocked in shell command")
     Path(SCRATCH_DIR).mkdir(parents=True, exist_ok=True)
 
-    def _run() -> subprocess.CompletedProcess:
-        return subprocess.run(
+    def _run() -> str:
+        # Stream output in chunks so a large-output subprocess can't OOM the process.
+        # Subprocess writes to a pipe; we read up to _MAX_SUBPROCESS_CAPTURE bytes
+        # and discard the rest (still draining the pipe to avoid blocking the child).
+        with subprocess.Popen(
             cmd, shell=True, cwd=SCRATCH_DIR,
-            capture_output=True, text=True, timeout=300,
-        )
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True,
+        ) as proc:
+            chunks: list[str] = []
+            total = 0
+            overflow = False
+            assert proc.stdout is not None
+            while True:
+                chunk = proc.stdout.read(8192)
+                if not chunk:
+                    break
+                if total < _MAX_SUBPROCESS_CAPTURE:
+                    keep = min(len(chunk), _MAX_SUBPROCESS_CAPTURE - total)
+                    chunks.append(chunk[:keep])
+                    total += keep
+                    if total >= _MAX_SUBPROCESS_CAPTURE:
+                        overflow = True
+                # Always drain to avoid blocking the subprocess
+            try:
+                proc.wait(timeout=300)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                chunks.append("\n[subprocess timed out after 300s]")
+            output = "".join(chunks)
+            if overflow:
+                output += f"\n[subprocess output exceeded {_MAX_SUBPROCESS_CAPTURE // 1024 // 1024}MB and was truncated]"
+            return _truncate(output) if output else f"(exit {proc.returncode})"
 
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _run)
-    output = result.stdout + result.stderr
-    return _truncate(output) if output else f"(exit {result.returncode})"
+    return await loop.run_in_executor(None, _run)
 
 
 @observe()
