@@ -5,6 +5,7 @@ from datetime import timedelta
 from hatchet_sdk import Context, Hatchet
 from hatchet_sdk.types.concurrency import ConcurrencyExpression, ConcurrencyLimitStrategy
 from pydantic import BaseModel
+from pydantic_ai.usage import UsageLimits
 
 from .agent import build_agent, update_vikunja_task
 from common.langfuse_tools import langfuse_context, observe
@@ -47,7 +48,10 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
         f"task {input.task_id} and mark it done."
     )
     agent = _get_agent()
-    result = await agent.run(prompt)
+    result = await agent.run(
+        prompt,
+        usage_limits=UsageLimits(request_limit=50),
+    )
     langfuse_context.update_current_trace(output=result.output)
     return {"result": result.output, "task_id": input.task_id}
 
