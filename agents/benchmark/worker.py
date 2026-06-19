@@ -1,6 +1,7 @@
 """Hatchet worker: handles agent:benchmark events."""
 from __future__ import annotations
 
+import time
 from datetime import timedelta
 
 from hatchet_sdk import Context, Hatchet
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 
 from .agent import _langfuse, run_research_benchmark, run_reviewer_benchmark, score_output
 from common.langfuse_tools import langfuse_context, observe
+from common.metrics import start_metrics_server, task_invocations, task_active, task_duration
 
 
 class BenchmarkInput(BaseModel):
@@ -19,10 +21,11 @@ class BenchmarkInput(BaseModel):
     run_name: str = ""     # Langfuse experiment name; auto-generated if empty
 
 
+_AGENT_NAME = "benchmark"
+
+
 @observe(capture_input=False, capture_output=False)
 async def _run_benchmark(input: BenchmarkInput, context: Context) -> dict:
-    import time
-
     lf = _langfuse()
     run_name = input.run_name or f"{input.dataset_name}-{int(time.time())}"
 
@@ -43,37 +46,48 @@ async def _run_benchmark(input: BenchmarkInput, context: Context) -> dict:
 
     # Run the target agent
     agent_id = f"benchmark-{input.dataset_name}-{input.dataset_item_id}"
-    if input.agent_type == "research":
-        agent_output = await run_research_benchmark(item_input, agent_id)
-    elif input.agent_type == "review":
-        agent_output = await run_reviewer_benchmark(item_input)
-    else:
-        raise ValueError(f"unknown agent_type: {input.agent_type!r}")
+    task_active.labels(agent=_AGENT_NAME).inc()
+    t0 = time.monotonic()
+    try:
+        if input.agent_type == "research":
+            agent_output = await run_research_benchmark(item_input, agent_id)
+        elif input.agent_type == "review":
+            agent_output = await run_reviewer_benchmark(item_input)
+        else:
+            raise ValueError(f"unknown agent_type: {input.agent_type!r}")
 
-    # Score via LLM judge
-    score_value, reason = score_output(agent_output, expected)
+        # Score via LLM judge
+        score_value, reason = score_output(agent_output, expected)
 
-    # Write score to Langfuse and link to dataset item
-    trace_id = langfuse_context.get_current_trace_id()
-    lf.score(
-        trace_id=trace_id,
-        name="benchmark-score",
-        value=score_value,
-        comment=reason,
-    )
-    item.link(None, run_name=run_name, trace_id=trace_id)
+        # Write score to Langfuse and link to dataset item
+        trace_id = langfuse_context.get_current_trace_id()
+        lf.score(
+            trace_id=trace_id,
+            name="benchmark-score",
+            value=score_value,
+            comment=reason,
+        )
+        item.link(None, run_name=run_name, trace_id=trace_id)
 
-    langfuse_context.update_current_trace(output={"score": score_value, "reason": reason})
-    return {
-        "dataset_name": input.dataset_name,
-        "item_id": input.dataset_item_id,
-        "score": score_value,
-        "reason": reason,
-        "run_name": run_name,
-    }
+        langfuse_context.update_current_trace(output={"score": score_value, "reason": reason})
+        task_invocations.labels(agent=_AGENT_NAME, status="success").inc()
+        return {
+            "dataset_name": input.dataset_name,
+            "item_id": input.dataset_item_id,
+            "score": score_value,
+            "reason": reason,
+            "run_name": run_name,
+        }
+    except Exception:
+        task_invocations.labels(agent=_AGENT_NAME, status="error").inc()
+        raise
+    finally:
+        task_active.labels(agent=_AGENT_NAME).dec()
+        task_duration.labels(agent=_AGENT_NAME).observe(time.monotonic() - t0)
 
 
 def main() -> None:
+    start_metrics_server(_AGENT_NAME)
     hatchet = Hatchet()
 
     run_benchmark = hatchet.task(
