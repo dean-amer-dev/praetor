@@ -1,10 +1,11 @@
 """FastAPI router: receives GitHub pull_request webhooks, dispatches Hatchet events."""
+import asyncio
 import hashlib
 import hmac
 import logging
 import os
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from hatchet_sdk import Hatchet
 
 logger = logging.getLogger(__name__)
@@ -31,8 +32,17 @@ def _verify_signature(body: bytes, header: str | None) -> None:
         raise HTTPException(status_code=401, detail="invalid signature")
 
 
+def _dispatch_pr_event(repo: str, pr_number: str, pr_url: str, diff_url: str, author: str) -> None:
+    _get_hatchet().event.push(
+        "github:pr_opened",
+        {"repo": repo, "pr_number": pr_number, "pr_url": pr_url, "diff_url": diff_url, "author": author},
+        additional_metadata={"pr_url": pr_url},
+    )
+    logger.info("dispatched github:pr_opened for %s#%s", repo, pr_number)
+
+
 @router.post("/webhooks/github")
-async def github_webhook(request: Request) -> dict:
+async def github_webhook(request: Request, background_tasks: BackgroundTasks) -> dict:
     body = await request.body()
     _verify_signature(body, request.headers.get("X-Hub-Signature-256"))
 
@@ -54,16 +64,6 @@ async def github_webhook(request: Request) -> dict:
     diff_url = pr.get("diff_url", "")
     author = pr.get("user", {}).get("login", "")
 
-    _get_hatchet().event.push(
-        "github:pr_opened",
-        {
-            "repo": repo,
-            "pr_number": pr_number,
-            "pr_url": pr_url,
-            "diff_url": diff_url,
-            "author": author,
-        },
-        additional_metadata={"pr_url": pr_url},
-    )
-    logger.info("dispatched github:pr_opened for %s#%s", repo, pr_number)
+    # Push to Hatchet in the background so GitHub gets a fast 200 and stops retrying.
+    background_tasks.add_task(_dispatch_pr_event, repo, pr_number, pr_url, diff_url, author)
     return {"status": "ok", "dispatched": "github:pr_opened"}

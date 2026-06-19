@@ -49,7 +49,7 @@ def main() -> None:
         concurrency=ConcurrencyExpression(
             expression="input.repo + input.pr_number",
             max_runs=1,
-            limit_strategy=ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
+            limit_strategy=ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
         ),
     )(_run_reviewer)
 
