@@ -103,7 +103,7 @@ def post_review_comment(repo: str, pr_number: str, body: str, event: str, token:
         timeout=15,
     )
     existing.raise_for_status()
-    bot_login = os.environ.get("GITHUB_BOT_LOGIN", "amerenda-reviewer[bot]")
+    bot_login = os.environ.get("GITHUB_BOT_LOGIN", "praetor-reviewer[bot]")
     if any(r.get("user", {}).get("login", "") == bot_login for r in existing.json()):
         return "already reviewed — skipping duplicate"
 

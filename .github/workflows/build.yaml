@@ -188,18 +188,26 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.CODER_APP_ID }}
+          private-key: ${{ secrets.CODER_APP_PRIVATE_KEY }}
+          repositories: k3s-dean-gitops
+
       - name: Create deploy PR in k3s-dean-gitops
         env:
           TAG: ${{ needs.set-tag.outputs.tag }}
           REBUILD: ${{ needs.detect-changes.outputs.rebuild }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           rm -rf /tmp/gitops
-          git clone https://x-access-token:${GITOPS_PAT}@github.com/${GITOPS_REPO}.git /tmp/gitops
+          git clone https://x-access-token:${APP_TOKEN}@github.com/${GITOPS_REPO}.git /tmp/gitops
           cd /tmp/gitops
 
           # Close any existing praetor deploy PRs to avoid stale branches
           EXISTING_PRS=$(curl -s \
-            -H "Authorization: token ${GITOPS_PAT}" \
+            -H "Authorization: token ${APP_TOKEN}" \
             "https://api.github.com/repos/${GITOPS_REPO}/pulls?state=open&per_page=100" \
             | python3 -c "
           import json,sys
@@ -211,7 +219,7 @@ jobs:
           for PR_NUM in $EXISTING_PRS; do
             echo "Closing superseded PR #${PR_NUM}"
             curl -s -X PATCH \
-              -H "Authorization: token ${GITOPS_PAT}" \
+              -H "Authorization: token ${APP_TOKEN}" \
               "https://api.github.com/repos/${GITOPS_REPO}/pulls/${PR_NUM}" \
               -d '{"state":"closed"}' > /dev/null
           done
@@ -237,8 +245,8 @@ jobs:
             fi
           done
 
-          git config user.name "amerenda-deploy-bot[bot]"
-          git config user.email "3192609+amerenda-deploy-bot[bot]@users.noreply.github.com"
+          git config user.name "praetor-coder[bot]"
+          git config user.email "praetor-coder[bot]@users.noreply.github.com"
           git add -A
           git diff --cached --quiet && { echo "No manifest changes — skipping PR"; exit 0; }
           git commit -m "deploy: praetor ${TAG}"
@@ -249,7 +257,7 @@ jobs:
           PR_BODY="**praetor ${TAG}**${NL}${NL}${COMMIT_MSG}${NL}${NL}Source: https://github.com/amerenda/praetor/commit/${GITHUB_SHA}"
 
           PR_RESPONSE=$(curl -s -X POST \
-            -H "Authorization: token ${GITOPS_PAT}" \
+            -H "Authorization: token ${APP_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
             -d "$(jq -n \
@@ -261,7 +269,7 @@ jobs:
 
           PR_NUMBER=$(echo "$PR_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['number'])")
           curl -s -X POST \
-            -H "Authorization: token ${GITOPS_PAT}" \
+            -H "Authorization: token ${APP_TOKEN}" \
             "https://api.github.com/repos/${GITOPS_REPO}/issues/${PR_NUMBER}/assignees" \
             -d '{"assignees":["amerenda"]}'
           echo "Deploy PR #${PR_NUMBER} created: deploy/praetor-${TAG}"
