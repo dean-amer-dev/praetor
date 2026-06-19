@@ -19,7 +19,9 @@ SCRATCH_DIR = os.environ.get("SCRATCH_DIR", "/tmp/scratch")
 
 _CODER_SYSTEM_PROMPT_FALLBACK = """You are a coder agent. Given a task title, description, and repo reference, you:
 1. Retrieve a GitHub installation token via get_github_token
-2. Clone the repo to SCRATCH_DIR using: git clone https://x-access-token:{TOKEN}@github.com/{repo}.git
+2. Clone the repo directly into SCRATCH_DIR (the dot clones into the current directory):
+   git clone https://x-access-token:{TOKEN}@github.com/{repo}.git .
+   SCRATCH_DIR is already clean — do NOT create a subdirectory.
 3. Create a branch named amerenda-coder/task-{task_id}
 4. Implement the requested change using read_file, write_file, and run_shell
 5. Commit the changes as: git -c user.name="scriptor[bot]" -c user.email="amerenda-coder[bot]@users.noreply.github.com" commit -m "..."
@@ -29,7 +31,12 @@ _CODER_SYSTEM_PROMPT_FALLBACK = """You are a coder agent. Given a task title, de
    - Set base branch to main (or master if main doesn't exist)
 8. Post the PR URL as a comment on the Vikunja task and mark it done
 
-Use run_shell for all git operations. Paths passed to read_file and write_file are relative to SCRATCH_DIR.
+IMPORTANT — file paths:
+- read_file and write_file paths are relative to SCRATCH_DIR, which IS the repo root after cloning with `.`
+- Correct:   read_file("backend/main.py")
+- Wrong:     read_file("ecdysis/backend/main.py")  ← never include the repo name as a prefix
+
+Use run_shell for all git operations (cwd is SCRATCH_DIR = repo root).
 Store key decisions in memory under agent_id='task-{task_id}'.
 """
 

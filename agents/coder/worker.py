@@ -1,6 +1,9 @@
 """Hatchet worker: handles agent:code events (Hatchet SDK v1.x)."""
+import os
 import re
+import shutil
 from datetime import timedelta
+from pathlib import Path
 
 from hatchet_sdk import Context, Hatchet
 from hatchet_sdk.types.concurrency import ConcurrencyExpression, ConcurrencyLimitStrategy
@@ -33,6 +36,13 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
         input=input.model_dump(),
         tags=["coder", f"task-{input.task_id}"],
     )
+    # Clean scratch before each run — emptyDir persists across container restarts within a pod,
+    # so a stale partial clone from a previous OOM-killed run would confuse the agent.
+    scratch = Path(os.environ.get("SCRATCH_DIR", "/tmp/scratch"))
+    scratch.mkdir(parents=True, exist_ok=True)
+    for item in scratch.iterdir():
+        shutil.rmtree(item) if item.is_dir() else item.unlink()
+
     repo_match = re.search(r"repo:\s*(\S+)", input.task_description)
     if not repo_match:
         err = "no repo reference found in task description — add 'repo: owner/name' to the description"
