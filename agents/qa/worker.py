@@ -1,10 +1,12 @@
 """Hatchet worker: handles deploy:staging events."""
+import time
 from datetime import timedelta
 
 from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel
 
 from .agent import build_agent
+from common.metrics import start_metrics_server, task_invocations, task_active, task_duration
 
 _agent = None
 
@@ -25,6 +27,9 @@ class StagingDeployInput(BaseModel):
     author: str = ""
 
 
+_AGENT_NAME = "qa"
+
+
 async def _run_qa(input: StagingDeployInput, context: Context) -> dict:
     prompt = (
         f"Run QA for staging deploy of {input.repo}.\n"
@@ -33,11 +38,22 @@ async def _run_qa(input: StagingDeployInput, context: Context) -> dict:
         f"Check the URL is reachable and the page loads without errors. Report results."
     )
     agent = _get_agent()
-    result = await agent.run(prompt)
-    return {"result": result.output, "deploy_url": input.deploy_url}
+    task_active.labels(agent=_AGENT_NAME).inc()
+    t0 = time.monotonic()
+    try:
+        result = await agent.run(prompt)
+        task_invocations.labels(agent=_AGENT_NAME, status="success").inc()
+        return {"result": result.output, "deploy_url": input.deploy_url}
+    except Exception:
+        task_invocations.labels(agent=_AGENT_NAME, status="error").inc()
+        raise
+    finally:
+        task_active.labels(agent=_AGENT_NAME).dec()
+        task_duration.labels(agent=_AGENT_NAME).observe(time.monotonic() - t0)
 
 
 def main() -> None:
+    start_metrics_server(_AGENT_NAME)
     hatchet = Hatchet()
 
     run_qa = hatchet.task(

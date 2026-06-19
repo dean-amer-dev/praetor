@@ -2,6 +2,7 @@
 import os
 import re
 import shutil
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from pydantic_ai.usage import UsageLimits
 
 from .agent import build_agent, update_vikunja_task
 from common.langfuse_tools import langfuse_context, observe
+from common.metrics import start_metrics_server, task_invocations, task_active, task_duration
 
 _agent = None
 
@@ -27,6 +29,9 @@ class CoderInput(BaseModel):
     task_id: int
     task_title: str
     task_description: str = ""
+
+
+_AGENT_NAME = "coder"
 
 
 @observe()
@@ -47,6 +52,7 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
     if not repo_match:
         err = "no repo reference found in task description — add 'repo: owner/name' to the description"
         await update_vikunja_task(input.task_id, f"coder error: {err}", done=False)
+        task_invocations.labels(agent=_AGENT_NAME, status="error").inc()
         return {"error": err, "task_id": input.task_id}
 
     prompt = (
@@ -58,15 +64,26 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
         f"task {input.task_id} and mark it done."
     )
     agent = _get_agent()
-    result = await agent.run(
-        prompt,
-        usage_limits=UsageLimits(request_limit=50),
-    )
-    langfuse_context.update_current_trace(output=result.output)
-    return {"result": result.output, "task_id": input.task_id}
+    task_active.labels(agent=_AGENT_NAME).inc()
+    t0 = time.monotonic()
+    try:
+        result = await agent.run(
+            prompt,
+            usage_limits=UsageLimits(request_limit=50),
+        )
+        task_invocations.labels(agent=_AGENT_NAME, status="success").inc()
+        langfuse_context.update_current_trace(output=result.output)
+        return {"result": result.output, "task_id": input.task_id}
+    except Exception:
+        task_invocations.labels(agent=_AGENT_NAME, status="error").inc()
+        raise
+    finally:
+        task_active.labels(agent=_AGENT_NAME).dec()
+        task_duration.labels(agent=_AGENT_NAME).observe(time.monotonic() - t0)
 
 
 def main() -> None:
+    start_metrics_server(_AGENT_NAME)
     hatchet = Hatchet()
 
     run_coder = hatchet.task(

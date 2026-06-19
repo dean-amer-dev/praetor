@@ -51,7 +51,7 @@ def _scratch(path: str) -> str:
 
 
 _MAX_TOOL_OUTPUT = 64 * 1024       # 64KB returned to message history
-_MAX_SUBPROCESS_CAPTURE = 4 * 1024 * 1024  # 4MB buffered in memory before truncation
+_MAX_SUBPROCESS_CAPTURE = 512 * 1024  # 512KB buffered before truncation (we truncate to 64KB anyway)
 
 
 def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT) -> str:
