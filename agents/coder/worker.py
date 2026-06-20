@@ -34,7 +34,7 @@ class CoderInput(BaseModel):
 _AGENT_NAME = "coder"
 
 
-@observe()
+@observe(capture_input=False, capture_output=False)
 async def _run_coder(input: CoderInput, context: Context) -> dict:
     langfuse_context.update_current_trace(
         name=f"coder-task-{input.task_id}",

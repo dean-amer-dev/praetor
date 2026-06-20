@@ -164,7 +164,7 @@ def _build_mcp_toolset() -> MCPToolset:
         os.environ["LITELLM_BASE_URL"].replace("/v1", "/mcp"),
     )
     return MCPToolset(
-        url=mcp_url,
+        mcp_url,
         headers={"Authorization": f"Bearer {os.environ['LITELLM_API_KEY']}"},
     )
 
