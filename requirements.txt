@@ -1,6 +1,5 @@
 hatchet-sdk>=0.49.0
 pydantic-ai-slim[openai,mcp]>=1.107.0
-mem0ai>=0.1.50
 httpx>=0.27.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
