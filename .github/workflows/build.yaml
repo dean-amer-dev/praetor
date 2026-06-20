@@ -23,6 +23,22 @@ jobs:
       - name: Run unit and integration tests
         run: pytest tests/unit tests/integration -v
 
+  llm-regression:
+    if: github.event_name != 'pull_request'
+    needs: [test]
+    runs-on: arc-runner-praetor
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install httpx pytest
+      - name: Run LLM tool-calling regression tests
+        env:
+          SMOKE_TESTS: "1"
+        run: pytest tests/smoke/test_llm_tool_calling.py -v
+
   set-tag:
     if: github.event_name != 'pull_request'
     runs-on: arc-runner-praetor
