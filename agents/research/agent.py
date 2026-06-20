@@ -2,8 +2,8 @@
 import os
 import httpx
 from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPServerHTTP
-from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.mcp import MCPServerStreamableHTTP
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from common.memory_tools import add_memory, search_memory
@@ -19,8 +19,8 @@ Be thorough but concise. Prefer primary sources. Cite URLs where relevant.
 After completing research, call update_vikunja_task to mark the task done with your summary."""
 
 
-def _build_model() -> OpenAIModel:
-    return OpenAIModel(
+def _build_model() -> OpenAIChatModel:
+    return OpenAIChatModel(
         model_name=os.environ.get("LLM_MODEL", "qwen3-35b"),
         provider=OpenAIProvider(
             base_url=os.environ["LITELLM_BASE_URL"],
@@ -29,15 +29,14 @@ def _build_model() -> OpenAIModel:
     )
 
 
-def _build_mcp_server() -> MCPServerHTTP:
+def _build_mcp_server() -> MCPServerStreamableHTTP:
     mcp_url = os.environ.get(
         "LITELLM_MCP_URL",
         os.environ["LITELLM_BASE_URL"].replace("/v1", "/mcp"),
     )
-    return MCPServerHTTP(
+    return MCPServerStreamableHTTP(
         url=mcp_url,
         headers={"Authorization": f"Bearer {os.environ['LITELLM_API_KEY']}"},
-        read_timeout=60,
     )
 
 
