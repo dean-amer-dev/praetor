@@ -6,8 +6,8 @@ from pathlib import Path
 
 import httpx
 from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPServerHTTP
-from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.mcp import MCPServerStreamableHTTP
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import UsageLimits
 
@@ -158,20 +158,19 @@ async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> 
     return "task updated"
 
 
-def _build_mcp_server() -> MCPServerHTTP:
+def _build_mcp_server() -> MCPServerStreamableHTTP:
     mcp_url = os.environ.get(
         "LITELLM_MCP_URL",
         os.environ["LITELLM_BASE_URL"].replace("/v1", "/mcp"),
     )
-    return MCPServerHTTP(
+    return MCPServerStreamableHTTP(
         url=mcp_url,
         headers={"Authorization": f"Bearer {os.environ['LITELLM_API_KEY']}"},
-        read_timeout=60,
     )
 
 
 def build_agent() -> Agent:
-    model = OpenAIModel(
+    model = OpenAIChatModel(
         model_name=os.environ.get("LLM_MODEL", "coder"),
         provider=OpenAIProvider(
             base_url=os.environ["LITELLM_BASE_URL"],

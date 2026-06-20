@@ -3,7 +3,7 @@ import os
 
 import httpx
 from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 SYSTEM_PROMPT = """You are a QA agent. Given a staging deployment URL, you:
@@ -52,7 +52,7 @@ def post_qa_result(repo: str, pr_number: int | None, summary: str, passed: bool)
 
 
 def build_agent() -> Agent:
-    model = OpenAIModel(
+    model = OpenAIChatModel(
         model_name=os.environ.get("LLM_MODEL", "qwen3-35b"),
         provider=OpenAIProvider(
             base_url=os.environ["LITELLM_BASE_URL"],
