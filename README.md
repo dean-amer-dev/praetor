@@ -152,6 +152,6 @@ tests/
 | 18 | Kubernetes MCP (deploy `mcp-server-kubernetes` via Phase 17 pipeline) | ✅ Complete |
 | 19 | Voice Dispatch | ⬜ Next |
 | 20 | Control Plane UI | ⬜ Pending |
-| 21 | Mem0 Integration + Pre-PR Review Loop | ⬜ Pending |
+| 21 | Mem0 Integration + Pre-PR Review Loop | ✅ Complete |
 
 See `docs/status.md` for full notes. See `docs/phase-N.md` for each phase's design and ready conditions.
