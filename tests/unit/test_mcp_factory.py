@@ -35,7 +35,7 @@ def _auth(key: str = API_KEY) -> dict:
 
 
 def _minimal_reg(**kwargs) -> dict:
-    return {"name": "test-mcp", "image": "example/test-mcp:latest", **kwargs}
+    return {"name": "test-mcp", "image": "example/test-mcp:latest", "skip_pre_review": True, **kwargs}
 
 
 # ---------------------------------------------------------------------------
@@ -341,3 +341,177 @@ class TestDeleteEndpoint:
         assert resp.json()["deleted"] == "old-mcp"
         saved = save_mock.call_args[0][0]
         assert "old-mcp" not in saved
+
+
+# ---------------------------------------------------------------------------
+# Pre-review loop — unit tests for the pure functions
+# ---------------------------------------------------------------------------
+
+class TestPreReviewLoopUnit:
+    async def test_approved_immediately_returns_no_warning(self):
+        from webhooks.mcp_factory import _pre_review_loop, McpRegistration
+        reg = McpRegistration(name="foo", image="img:1")
+        manifests = {"deployment.yaml": "original content"}
+        with patch("webhooks.mcp_factory._call_review_llm", new=AsyncMock(return_value=(True, [], {}))):
+            result, warning = await _pre_review_loop(manifests, reg)
+        assert warning is None
+        assert result == manifests
+
+    async def test_fixes_applied_between_iterations(self):
+        from webhooks.mcp_factory import _pre_review_loop, McpRegistration
+        reg = McpRegistration(name="foo", image="img:1")
+        manifests = {"deployment.yaml": "original"}
+        with patch(
+            "webhooks.mcp_factory._call_review_llm",
+            new=AsyncMock(side_effect=[
+                (False, ["probe type mismatch"], {"deployment.yaml": "fixed"}),
+                (True, [], {}),
+            ]),
+        ):
+            result, warning = await _pre_review_loop(manifests, reg)
+        assert warning is None
+        assert result["deployment.yaml"] == "fixed"
+
+    async def test_max_iterations_yields_warning(self):
+        from webhooks.mcp_factory import _pre_review_loop, _MAX_REVIEW_ITERATIONS, McpRegistration
+        reg = McpRegistration(name="foo", image="img:1")
+        manifests = {"deployment.yaml": "content"}
+        with patch(
+            "webhooks.mcp_factory._call_review_llm",
+            new=AsyncMock(return_value=(False, ["persistent probe issue"], {})),
+        ):
+            result, warning = await _pre_review_loop(manifests, reg)
+        assert warning is not None
+        assert "persistent probe issue" in warning
+        assert str(_MAX_REVIEW_ITERATIONS) in warning
+
+    async def test_only_calls_llm_once_when_approved_first_iteration(self):
+        from webhooks.mcp_factory import _pre_review_loop, McpRegistration
+        reg = McpRegistration(name="foo", image="img:1")
+        mock = AsyncMock(return_value=(True, [], {}))
+        with patch("webhooks.mcp_factory._call_review_llm", new=mock):
+            await _pre_review_loop({"deployment.yaml": "x"}, reg)
+        assert mock.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Pre-review loop — integration via route handler
+# ---------------------------------------------------------------------------
+
+class TestPreReviewViaRoute:
+    _GH_PATCHES = {
+        "webhooks.mcp_factory._load_registry": lambda: AsyncMock(return_value={}),
+        "webhooks.mcp_factory._save_registry": lambda: AsyncMock(),
+        "webhooks.mcp_factory.get_installation_token": lambda: MagicMock(return_value="gh-token"),
+        "webhooks.mcp_factory._get_main_sha": lambda: AsyncMock(return_value="abc123"),
+        "webhooks.mcp_factory._create_branch": lambda: AsyncMock(),
+        "webhooks.mcp_factory._create_file": lambda: AsyncMock(),
+        "webhooks.mcp_factory._get_file": lambda: AsyncMock(return_value=("content\n", "sha1")),
+        "webhooks.mcp_factory._update_file": lambda: AsyncMock(),
+    }
+
+    def _gh_ctx(self, extra: dict | None = None):
+        patches = {k: patch(k, new=v()) for k, v in self._GH_PATCHES.items()}
+        if extra:
+            patches.update(extra)
+        return patches
+
+    def test_skip_pre_review_bypasses_llm(self, client):
+        review_mock = AsyncMock()
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc123")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+            patch("webhooks.mcp_factory._call_review_llm", new=review_mock),
+        ):
+            resp = client.post("/api/v1/mcp/register", json=_minimal_reg(), headers=_auth())
+        assert resp.status_code == 200
+        review_mock.assert_not_called()
+
+    def test_approved_review_no_warning_in_pr_body(self, client):
+        create_pr_mock = AsyncMock(return_value="https://github.com/pr/1")
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc123")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_pr", new=create_pr_mock),
+            patch("webhooks.mcp_factory._call_review_llm", new=AsyncMock(return_value=(True, [], {}))),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register",
+                json={**_minimal_reg(), "skip_pre_review": False},
+                headers=_auth(),
+            )
+        assert resp.status_code == 200
+        pr_body = create_pr_mock.call_args.args[3]
+        assert "warning" not in pr_body.lower()
+        assert "pre-review" not in pr_body.lower()
+
+    def test_exhausted_review_adds_warning_to_pr_body(self, client):
+        create_pr_mock = AsyncMock(return_value="https://github.com/pr/1")
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc123")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_pr", new=create_pr_mock),
+            patch(
+                "webhooks.mcp_factory._call_review_llm",
+                new=AsyncMock(return_value=(False, ["probe type wrong"], {})),
+            ),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register",
+                json={**_minimal_reg(), "skip_pre_review": False},
+                headers=_auth(),
+            )
+        assert resp.status_code == 200
+        pr_body = create_pr_mock.call_args.args[3]
+        assert "pre-review warning" in pr_body.lower()
+        assert "probe type wrong" in pr_body
+
+    def test_review_fixes_applied_to_pushed_manifests(self, client):
+        create_file_mock = AsyncMock()
+        fixed_deployment = "apiVersion: apps/v1\nkind: Deployment\n# fixed by reviewer"
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc123")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=create_file_mock),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+            patch(
+                "webhooks.mcp_factory._call_review_llm",
+                new=AsyncMock(side_effect=[
+                    (False, ["probe mismatch"], {"deployment.yaml": fixed_deployment}),
+                    (True, [], {}),
+                ]),
+            ),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register",
+                json={**_minimal_reg(), "skip_pre_review": False},
+                headers=_auth(),
+            )
+        assert resp.status_code == 200
+        # args: (gh_client, token, path, content, message, branch)
+        pushed = {call.args[2]: call.args[3] for call in create_file_mock.await_args_list}
+        assert pushed.get("apps/mcp/test-mcp/deployment.yaml") == fixed_deployment
