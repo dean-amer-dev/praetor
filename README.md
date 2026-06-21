@@ -30,9 +30,9 @@ All workers are stateless Hatchet workers. Each listens for specific event types
 
 | Worker | Hatchet Event | What It Does |
 |--------|--------------|--------------|
-| **research-worker** | `agent:research` | Web search + synthesis. Calls LiteLLM MCP tools (`lm_web_search`, `lm_web_read_url`). Posts findings to Vikunja. |
-| **coder-worker** | `agent:code` | Clones repo, implements task, opens draft PR via praetor-coder GitHub App. |
-| **reviewer-worker** | `agent:review` | Reviews GitHub PRs, posts review comments via amerenda-reviewer GitHub App. |
+| **research-worker** | `agent:research` | Checks mem0 first, then web search + synthesis via LiteLLM MCP tools (`lm_web_search`, `lm_web_read_url`). Writes new findings to mem0 (`agent_id="research"`). Posts summary to Vikunja. |
+| **coder-worker** | `agent:code` | Checks mem0 for repo-specific patterns first (`agent_id="coder-{owner}/{repo}"`), then clones repo, implements task, opens draft PR via praetor-coder GitHub App. Writes key decisions to mem0. |
+| **reviewer-worker** | `agent:review` | Checks mem0 for known issue patterns (`agent_id="reviewer-{repo}"`), reviews PR diff, posts structured comment via amerenda-reviewer GitHub App. Writes new issue patterns to mem0 only if none were already found (check-before-write). |
 | **qa-worker** | `agent:qa` | Runs Playwright browser tests against UAT deployments. |
 | **pipeline-worker** | `agent:pipeline` | Orchestrates multi-agent DAGs (e.g., research → code → review). Uses PydanticAI `Graph`. |
 | **scaffold-worker** | `agent:scaffold` | Generates MCP server code and opens PRs on dean-mcp. Used by the MCP factory. |
@@ -133,7 +133,7 @@ webhooks/
   github_webhook.py  — GitHub PR event handler
   vikunja_webhook.py — Vikunja task label handler
   app_factory.py     — POST /api/v1/app/create pipeline
-  mcp_factory.py     — POST /api/v1/mcp/register pipeline
+  mcp_factory.py     — POST /api/v1/mcp/register pipeline (generates YAML → inline LLM review loop → GitOps PR)
 
 tests/
   unit/      — fast, no live services
