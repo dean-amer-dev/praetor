@@ -1,4 +1,4 @@
-# Phase 20 — Control Plane UI
+# Phase 25 — Control Plane UI
 
 **Goal:** A purpose-built React dashboard at `praetor.amer.dev` for platform operations — trigger agents, monitor runs, edit prompts, run benchmarks, manage MCPs, and scaffold new components. Replaces tab-switching between Hatchet, Langfuse, and claw.amer.dev for routine platform tasks.
 

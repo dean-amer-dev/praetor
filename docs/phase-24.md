@@ -1,4 +1,4 @@
-# Phase 19 — Voice Dispatch
+# Phase 24 — Voice Dispatch
 
 **Goal:** Speak a command to Home Assistant → Praetor agent runs → HA announces the result via TTS. Voice is a first-class dispatch interface, identical in capability to claw.amer.dev or opencode.
 

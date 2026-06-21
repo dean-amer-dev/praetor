@@ -150,10 +150,10 @@ tests/
 | 0–16 | Foundation through Full App Pipeline | ✅ Complete |
 | 17 | Intelligent MCP Agent (`/api/v1/mcp/request`, research → register pipeline) | ✅ Complete |
 | 18 | Kubernetes MCP (deploy `mcp-server-kubernetes` via Phase 17 pipeline) | ✅ Complete |
-| 19 | Voice Dispatch | ⬜ Pending |
-| 20 | Control Plane UI | ⬜ Pending |
 | 21 | Mem0 Integration + Pre-PR Review Loop | ✅ Complete |
 | 22 | Coder Re-Dispatch Loop (reviewer REQUEST_CHANGES → re-dispatch coder, cap 2) | ⬜ Next |
 | 23 | Inline Arbitration (loop exhausted → focused LLM call, decision memo to mem0 + PR) | ⬜ Pending |
+| 24 | Voice Dispatch | ⬜ Pending |
+| 25 | Control Plane UI | ⬜ Pending |
 
-See `docs/status.md` for full notes. See `docs/phase-N.md` for each phase's design and ready conditions.
+See `docs/status.md` for full notes. See `docs/phase-N.md` for each phase's design and ready conditions. Note: phases 19 and 20 were renumbered to 24 and 25 to reflect actual execution order.
