@@ -53,7 +53,7 @@ class McpRegistration(BaseModel):
     args: list[str] = []
     service_account_name: str | None = None  # mounts this SA in the pod
     cluster_role: str | None = None          # creates SA + ClusterRoleBinding when set
-    health_path: str = "/health"             # readiness/liveness probe path
+    health_path: str | None = None           # if set, use httpGet probe; otherwise tcpSocket
 
 
 class McpStatusEntry(BaseModel):
@@ -245,6 +245,39 @@ def _deployment_yaml(reg: McpRegistration) -> str:
 
     sa_block = f"      serviceAccountName: {reg.service_account_name}\n" if reg.service_account_name else ""
 
+    if reg.health_path:
+        probe_ready = (
+            f"          readinessProbe:\n"
+            f"            httpGet:\n"
+            f"              path: {reg.health_path}\n"
+            f"              port: {reg.port}\n"
+            f"            initialDelaySeconds: 5\n"
+            f"            periodSeconds: 10\n"
+        )
+        probe_live = (
+            f"          livenessProbe:\n"
+            f"            httpGet:\n"
+            f"              path: {reg.health_path}\n"
+            f"              port: {reg.port}\n"
+            f"            initialDelaySeconds: 10\n"
+            f"            periodSeconds: 30\n"
+        )
+    else:
+        probe_ready = (
+            f"          readinessProbe:\n"
+            f"            tcpSocket:\n"
+            f"              port: {reg.port}\n"
+            f"            initialDelaySeconds: 5\n"
+            f"            periodSeconds: 10\n"
+        )
+        probe_live = (
+            f"          livenessProbe:\n"
+            f"            tcpSocket:\n"
+            f"              port: {reg.port}\n"
+            f"            initialDelaySeconds: 10\n"
+            f"            periodSeconds: 30\n"
+        )
+
     return (
         f"apiVersion: apps/v1\n"
         f"kind: Deployment\n"
@@ -275,18 +308,8 @@ def _deployment_yaml(reg: McpRegistration) -> str:
         f"            - containerPort: {reg.port}\n"
         f"{env_block}"
         f"{args_block}"
-        f"          readinessProbe:\n"
-        f"            httpGet:\n"
-        f"              path: {reg.health_path}\n"
-        f"              port: {reg.port}\n"
-        f"            initialDelaySeconds: 5\n"
-        f"            periodSeconds: 10\n"
-        f"          livenessProbe:\n"
-        f"            httpGet:\n"
-        f"              path: {reg.health_path}\n"
-        f"              port: {reg.port}\n"
-        f"            initialDelaySeconds: 10\n"
-        f"            periodSeconds: 30\n"
+        f"{probe_ready}"
+        f"{probe_live}"
         f"          resources:\n"
         f"            requests:\n"
         f"              cpu: 10m\n"

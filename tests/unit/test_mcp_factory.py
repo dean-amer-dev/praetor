@@ -82,16 +82,19 @@ class TestDeploymentYaml:
         yaml = _deployment_yaml(reg)
         assert "serviceAccountName" not in yaml
 
-    def test_custom_health_path(self):
-        reg = McpRegistration(name="mcp", image="img:1", health_path="/mcp")
+    def test_custom_health_path_uses_httpget(self):
+        reg = McpRegistration(name="mcp", image="img:1", health_path="/healthz")
         yaml = _deployment_yaml(reg)
-        assert "path: /mcp" in yaml
-        assert "path: /health" not in yaml
+        assert "httpGet:" in yaml
+        assert "path: /healthz" in yaml
+        assert "tcpSocket:" not in yaml
 
-    def test_default_health_path(self):
+    def test_default_probe_is_tcp_socket(self):
         reg = McpRegistration(name="mcp", image="img:1")
         yaml = _deployment_yaml(reg)
-        assert "path: /health" in yaml
+        assert "tcpSocket:" in yaml
+        assert "httpGet:" not in yaml
+        assert "path:" not in yaml
 
 
 class TestServiceAccountYaml:
