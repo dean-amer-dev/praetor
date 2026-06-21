@@ -41,7 +41,8 @@ async def _run_research(input: ResearchInput, context: Context) -> dict:
         prompt += f"\n\nDescription: {input.task_description}"
     prompt += (
         f"\n\nResearch this topic thoroughly. "
-        f"Store key findings in memory under agent_id='task-{input.task_id}'. "
+        f"Follow your system instructions to search and store findings under agent_id='research'. "
+        f"Also write a brief summary to add_memory under agent_id='task-{input.task_id}' (required for status tracking). "
         f"When done, call update_vikunja_task with task_id={input.task_id} and your summary."
     )
     agent = _get_agent()
