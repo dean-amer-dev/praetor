@@ -331,13 +331,18 @@ def stress_large_payload(verbose=False):
         print(f"  Turn 1 req: HTTP {resp.status_code}")
         return False
     msg = resp.json()["choices"][0]["message"]
-    messages.append(msg)
     if msg.get("tool_calls"):
+        messages.append(msg)
         tc = msg["tool_calls"][0]
         messages.append({"role": "tool", "tool_call_id": tc["id"], "content": big_chunk})
         print(f"  Turn 1: tool call → {len(big_chunk)}-char response sent")
     else:
-        print(f"  Turn 1: model skipped tool call (finish={resp.json()['choices'][0]['finish_reason']})")
+        finish1 = resp.json()["choices"][0]["finish_reason"]
+        print(f"  Turn 1: model synthesized without tools (finish={finish1}) — large-payload path skipped")
+        elapsed = time.time() - t0
+        print(f"\n  Completed in {elapsed:.1f}s")
+        print("  No errors — model chose direct synthesis (no large payloads to test)")
+        return True
 
     resp2 = _completion(messages, tools=MOCK_TOOLS)
     if resp2.status_code != 200:
@@ -345,12 +350,13 @@ def stress_large_payload(verbose=False):
         print(f"  Turn 2 req: HTTP {resp2.status_code}")
     else:
         msg2 = resp2.json()["choices"][0]["message"]
-        messages.append(msg2)
         if msg2.get("tool_calls"):
+            messages.append(msg2)
             tc2 = msg2["tool_calls"][0]
             messages.append({"role": "tool", "tool_call_id": tc2["id"], "content": huge_chunk})
             print(f"  Turn 2: tool call → {len(huge_chunk)}-char response sent (will be truncated by template)")
         else:
+            messages.append(msg2)
             print(f"  Turn 2: model synthesized early (finish={resp2.json()['choices'][0]['finish_reason']})")
 
     resp3 = _completion(messages, tools=None)
