@@ -63,8 +63,8 @@ def _find_installation_id(app_id: str, private_key: str, owner_repo: str) -> str
         page += 1
 
     raise ValueError(
-        f"amerenda-coder GitHub App is not installed on '{owner}'. "
-        f"Install it at https://github.com/apps/amerenda-coder and grant access to {owner_repo}."
+        f"praetor-coder GitHub App is not installed on '{owner}'. "
+        f"Install it at https://github.com/apps/praetor-coder and grant access to {owner_repo}."
     )
 
 

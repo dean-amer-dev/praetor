@@ -24,9 +24,9 @@ _CODER_SYSTEM_PROMPT_FALLBACK = """You are a coder agent. Given a task title, de
 2. Clone the repo directly into SCRATCH_DIR (the dot clones into the current directory):
    git clone https://x-access-token:{TOKEN}@github.com/{repo}.git .
    SCRATCH_DIR is already clean — do NOT create a subdirectory.
-3. Create a branch named amerenda-coder/task-{task_id}
+3. Create a branch named praetor-coder/task-{task_id}
 4. Implement the requested change using read_file, write_file, and run_shell
-5. Commit the changes as: git -c user.name="scriptor[bot]" -c user.email="amerenda-coder[bot]@users.noreply.github.com" commit -m "..."
+5. Commit the changes as: git -c user.name="scriptor[bot]" -c user.email="praetor-coder[bot]@users.noreply.github.com" commit -m "..."
 6. Push the branch
 7. Open a draft PR using the GitHub REST API (POST /repos/{owner}/{repo}/pulls with draft=true)
    - Include the Vikunja task ID in the PR description
@@ -134,7 +134,7 @@ def get_github_token(repo: str | None = None) -> str:
     """Retrieve a short-lived GitHub App installation token for API calls.
 
     Pass repo='owner/repo' to get a token scoped to any org or user account
-    where the amerenda-coder app is installed. Omit to use the default installation.
+    where the praetor-coder app is installed. Omit to use the default installation.
     """
     return get_installation_token(repo=repo)
 

@@ -73,7 +73,7 @@ For type=mcp:
   - Add a stub entry to the LiteLLM MCP gateway configmap
 
 In both cases:
-  - Branch: amerenda-coder/scaffold-{name}
+  - Branch: praetor-coder/scaffold-{name}
   - PR is a draft — human reviews before merging
   - PR description explains what was created and what still needs to be filled in
 ```

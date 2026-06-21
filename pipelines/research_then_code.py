@@ -72,7 +72,7 @@ class CoderNode:
             f"Description: {state.task_description}\n\n"
             f"Research context from the research phase:\n{research_context}\n\n"
             f"Implement this task on the referenced repo. "
-            f"Create branch amerenda-coder/task-{state.task_id}, implement, commit, push, open a draft PR. "
+            f"Create branch praetor-coder/task-{state.task_id}, implement, commit, push, open a draft PR. "
             f"Incorporate the research findings into your implementation. "
             f"Store key decisions in memory under agent_id='task-{state.task_id}'. "
             f"When done, post the PR URL as a Vikunja comment on task {state.task_id} and mark it done."
