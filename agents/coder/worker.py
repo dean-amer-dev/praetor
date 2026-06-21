@@ -59,9 +59,11 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
         f"Task #{input.task_id}: {input.task_title}\n\n"
         f"Description: {input.task_description}\n\n"
         f"Implement this task on the referenced repo. Create branch praetor-coder/task-{input.task_id}, "
-        f"implement, commit, push, open a draft PR. Store key decisions in memory under "
-        f"agent_id='task-{input.task_id}'. When done, post the PR URL as a Vikunja comment on "
-        f"task {input.task_id} and mark it done."
+        f"implement, commit, push, open a draft PR. "
+        f"When done: "
+        f"(1) follow your system instructions to store key decisions under agent_id='coder-{{owner}}/{{repo}}' (replace with the actual repo path), "
+        f"(2) also write a brief completion note to add_memory under agent_id='task-{input.task_id}' with the PR URL and what was done (this is required for status tracking), "
+        f"(3) post the PR URL as a Vikunja comment on task {input.task_id} and mark it done."
     )
     agent = _get_agent()
     task_active.labels(agent=_AGENT_NAME).inc()
