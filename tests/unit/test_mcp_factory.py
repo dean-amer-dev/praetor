@@ -10,9 +10,11 @@ from fastapi.testclient import TestClient
 from webhooks.mcp_factory import (
     McpRegistration,
     _argocd_application_yaml,
+    _cluster_role_binding_yaml,
     _deployment_yaml,
     _externalsecret_yaml,
     _litellm_mcp_entry,
+    _service_account_yaml,
     _service_yaml,
 )
 
@@ -69,6 +71,51 @@ class TestDeploymentYaml:
         reg = McpRegistration(name="clean", image="img:1")
         yaml = _deployment_yaml(reg)
         assert "secretKeyRef" not in yaml
+
+    def test_service_account_name_injected(self):
+        reg = McpRegistration(name="k8s", image="img:1", service_account_name="k8s-sa")
+        yaml = _deployment_yaml(reg)
+        assert "serviceAccountName: k8s-sa" in yaml
+
+    def test_no_service_account_when_not_set(self):
+        reg = McpRegistration(name="nosvc", image="img:1")
+        yaml = _deployment_yaml(reg)
+        assert "serviceAccountName" not in yaml
+
+    def test_custom_health_path(self):
+        reg = McpRegistration(name="mcp", image="img:1", health_path="/mcp")
+        yaml = _deployment_yaml(reg)
+        assert "path: /mcp" in yaml
+        assert "path: /health" not in yaml
+
+    def test_default_health_path(self):
+        reg = McpRegistration(name="mcp", image="img:1")
+        yaml = _deployment_yaml(reg)
+        assert "path: /health" in yaml
+
+
+class TestServiceAccountYaml:
+    def test_basic_structure(self):
+        reg = McpRegistration(name="k8s-ro", image="img:1", service_account_name="k8s-ro-sa")
+        yaml = _service_account_yaml(reg)
+        assert "kind: ServiceAccount" in yaml
+        assert "name: k8s-ro-sa" in yaml
+        assert "namespace: mcp-k8s-ro" in yaml
+
+
+class TestClusterRoleBindingYaml:
+    def test_basic_structure(self):
+        reg = McpRegistration(
+            name="k8s-ro", image="img:1",
+            service_account_name="k8s-ro-sa",
+            cluster_role="view",
+        )
+        yaml = _cluster_role_binding_yaml(reg)
+        assert "kind: ClusterRoleBinding" in yaml
+        assert "name: k8s-ro-view-binding" in yaml
+        assert "name: view" in yaml
+        assert "name: k8s-ro-sa" in yaml
+        assert "namespace: mcp-k8s-ro" in yaml
 
 
 class TestServiceYaml:
@@ -180,6 +227,48 @@ class TestRegisterEndpoint:
         assert resp.status_code == 200
         paths = [call.args[2] for call in create_file_mock.await_args_list]
         assert any("externalsecret" in p for p in paths)
+
+    def test_rbac_files_created_when_cluster_role_set(self, client):
+        create_file_mock = AsyncMock()
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc123")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=create_file_mock),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register",
+                json=_minimal_reg(service_account_name="test-mcp-sa", cluster_role="view"),
+                headers=_auth(),
+            )
+        assert resp.status_code == 200
+        paths = [call.args[2] for call in create_file_mock.await_args_list]
+        assert any("serviceaccount" in p for p in paths)
+        assert any("clusterrolebinding" in p for p in paths)
+
+    def test_no_rbac_files_without_cluster_role(self, client):
+        create_file_mock = AsyncMock()
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc123")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=create_file_mock),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+        ):
+            resp = client.post("/api/v1/mcp/register", json=_minimal_reg(), headers=_auth())
+        assert resp.status_code == 200
+        paths = [call.args[2] for call in create_file_mock.await_args_list]
+        assert not any("serviceaccount" in p for p in paths)
+        assert not any("clusterrolebinding" in p for p in paths)
 
 
 class TestListEndpoint:
