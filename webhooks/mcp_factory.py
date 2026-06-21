@@ -50,6 +50,7 @@ class McpRegistration(BaseModel):
     port: int = 8000
     transport: str = "http"
     env_secrets: dict[str, str] = {}
+    env_vars: dict[str, str] = {}           # non-secret env vars (e.g. HOST, feature flags)
     args: list[str] = []
     service_account_name: str | None = None  # mounts this SA in the pod
     cluster_role: str | None = None          # creates SA + ClusterRoleBinding when set
@@ -227,8 +228,13 @@ async def _create_pr(
 
 def _deployment_yaml(reg: McpRegistration) -> str:
     env_block = ""
-    if reg.env_secrets:
+    if reg.env_vars or reg.env_secrets:
         lines = ["          env:"]
+        for key, val in reg.env_vars.items():
+            lines += [
+                f"            - name: {key}",
+                f"              value: {val!r}",
+            ]
         for env_var in reg.env_secrets:
             lines += [
                 f"            - name: {env_var}",

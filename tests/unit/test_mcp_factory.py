@@ -71,6 +71,26 @@ class TestDeploymentYaml:
         reg = McpRegistration(name="clean", image="img:1")
         yaml = _deployment_yaml(reg)
         assert "secretKeyRef" not in yaml
+        assert "env:" not in yaml
+
+    def test_env_vars_rendered_as_plain_values(self):
+        reg = McpRegistration(name="k8s", image="img:1", env_vars={"HOST": "0.0.0.0", "FLAG": "true"})
+        yaml = _deployment_yaml(reg)
+        assert "name: HOST" in yaml
+        assert "value: '0.0.0.0'" in yaml
+        assert "name: FLAG" in yaml
+        assert "secretKeyRef" not in yaml
+
+    def test_env_vars_and_secrets_combined(self):
+        reg = McpRegistration(
+            name="combo", image="img:1",
+            env_vars={"HOST": "0.0.0.0"},
+            env_secrets={"API_KEY": "bws-secret"},
+        )
+        yaml = _deployment_yaml(reg)
+        assert "name: HOST" in yaml
+        assert "name: API_KEY" in yaml
+        assert "secretKeyRef" in yaml
 
     def test_service_account_name_injected(self):
         reg = McpRegistration(name="k8s", image="img:1", service_account_name="k8s-sa")
