@@ -402,9 +402,9 @@ def test_request_mcp_kubernetes_includes_rbac(client):
     k8s_result = McpResearchResult(
         found=True,
         confidence=0.95,
-        image="ghcr.io/flux159/mcp-server-kubernetes:latest",
+        image="flux159/mcp-server-kubernetes:latest",
         name="kubernetes-readonly",
-        notes="mcp-server-kubernetes found on ghcr.io/flux159. Actively maintained.",
+        notes="mcp-server-kubernetes found on Docker Hub (flux159). Actively maintained.",
         port=3000,
         requires_k8s_sa=True,
     )
