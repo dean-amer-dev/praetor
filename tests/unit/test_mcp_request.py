@@ -407,6 +407,7 @@ def test_request_mcp_kubernetes_includes_rbac(client):
         notes="mcp-server-kubernetes found on Docker Hub (flux159). Actively maintained.",
         port=3000,
         requires_k8s_sa=True,
+        env_vars={"HOST": "0.0.0.0", "ENABLE_UNSAFE_STREAMABLE_HTTP_TRANSPORT": "true", "ALLOW_ONLY_READONLY_TOOLS": "true"},
     )
     pr_url = "https://github.com/amerenda/k3s-dean-gitops/pull/900"
 
@@ -440,6 +441,8 @@ def test_request_mcp_kubernetes_includes_rbac(client):
     assert captured_body["port"] == 3000
     assert captured_body["service_account_name"] == "kubernetes-readonly-sa"
     assert captured_body["cluster_role"] == "view"
+    assert captured_body["env_vars"]["HOST"] == "0.0.0.0"
+    assert captured_body["env_vars"]["ALLOW_ONLY_READONLY_TOOLS"] == "true"
 
 
 def test_request_mcp_no_k8s_sa_when_not_required(client):
