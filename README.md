@@ -2,7 +2,7 @@
 
 Multi-agent platform that runs on a local k3s cluster. Agents are triggered from a conversation in OpenWebUI, dispatch through Hatchet, execute via PydanticAI workers, and share memory through Mem0. All inference goes through LiteLLM.
 
-**Current phase:** Phase 19 — Voice Dispatch
+**Current phase:** Phase 22 — Coder Re-Dispatch Loop
 
 **No LangChain.** The agent harness is PydanticAI. LangChain is not installed, not imported, not referenced anywhere in the codebase.
 
@@ -150,8 +150,10 @@ tests/
 | 0–16 | Foundation through Full App Pipeline | ✅ Complete |
 | 17 | Intelligent MCP Agent (`/api/v1/mcp/request`, research → register pipeline) | ✅ Complete |
 | 18 | Kubernetes MCP (deploy `mcp-server-kubernetes` via Phase 17 pipeline) | ✅ Complete |
-| 19 | Voice Dispatch | ⬜ Next |
+| 19 | Voice Dispatch | ⬜ Pending |
 | 20 | Control Plane UI | ⬜ Pending |
 | 21 | Mem0 Integration + Pre-PR Review Loop | ✅ Complete |
+| 22 | Coder Re-Dispatch Loop (reviewer REQUEST_CHANGES → re-dispatch coder, cap 2) | ⬜ Next |
+| 23 | Inline Arbitration (loop exhausted → focused LLM call, decision memo to mem0 + PR) | ⬜ Pending |
 
 See `docs/status.md` for full notes. See `docs/phase-N.md` for each phase's design and ready conditions.
