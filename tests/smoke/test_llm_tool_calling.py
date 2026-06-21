@@ -225,6 +225,81 @@ class TestLLMToolCalling:
         )
         assert text and len(text) >= 100, f"synthesis too short ({len(text)} chars)"
 
+    def test_complex_synthesis_non_empty(self):
+        """
+        Regression for reasoning-budget exhaustion on synthesis turns.
+
+        Root cause: --reasoning-budget 1500 was too small for complex research
+        prompts. When the model needs > 1500 thinking tokens, llama.cpp forces
+        </think> and then stops generation, producing an empty response that
+        OWU displays as a blank message.
+
+        This test uses a complex multi-topic prompt (similar to real OWU usage),
+        runs through 8 tool calls to gather context, then sends a DIRECT synthesis
+        request (no tools, enable_thinking=true) and asserts the response is
+        non-empty and substantive.
+
+        Fails if reasoning-budget is too small (empty synthesis) or if budget
+        exhaustion during tool turns causes 400 errors.
+        """
+        if not LITELLM_API_KEY:
+            pytest.skip("LITELLM_API_KEY not available")
+
+        # Build a realistic multi-tool session similar to a planning research prompt
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful technical assistant with access to search tools. "
+                    "Use tools to gather information, then write a detailed technical plan."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "I want to deploy a Kubernetes MCP server with two access modes: "
+                    "read-only and read-write. Research the best available image, "
+                    "how others implement access control, and give me a detailed plan."
+                ),
+            },
+        ]
+
+        tool_call_count = 0
+        for _ in range(_FORCE_SYNTHESIS_AFTER):
+            resp = _completion(messages, tools=MOCK_TOOLS)
+            assert resp.status_code == 200, f"tool turn HTTP {resp.status_code}: {resp.text[:200]}"
+            choice = resp.json()["choices"][0]
+            msg    = choice["message"]
+            finish = choice["finish_reason"]
+            messages.append(msg)
+
+            if finish in ("stop", "length"):
+                break
+            if finish == "tool_calls":
+                for tc in (msg.get("tool_calls") or []):
+                    fn     = tc["function"]["name"]
+                    args   = tc["function"].get("arguments", "{}")
+                    result = _execute_mock_tool(fn, args, call_number=tool_call_count)
+                    tool_call_count += 1
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc["id"], "content": result,
+                    })
+
+        # Synthesis turn: no tools, thinking is ON (this is the path that was broken)
+        resp = _completion(messages, tools=None, max_tokens=4096)
+        assert resp.status_code == 200, f"synthesis HTTP {resp.status_code}: {resp.text[:300]}"
+
+        choice  = resp.json()["choices"][0]
+        content = choice["message"].get("content") or ""
+        finish  = choice["finish_reason"]
+
+        assert len(content) >= 200, (
+            f"Synthesis response was empty or too short ({len(content)} chars, finish={finish}). "
+            "This indicates reasoning-budget exhaustion on the synthesis turn: the model's "
+            "<think> block was force-terminated and no content was generated after </think>. "
+            "Check --reasoning-budget in llm/entrypoint.sh."
+        )
+
     def test_no_thinking_with_tools(self):
         """
         Thinking must NOT activate during tool turns.
