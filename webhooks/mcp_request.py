@@ -114,7 +114,7 @@ Search your knowledge of:
 
 KNOWN PRODUCTION-READY MCP SERVERS — use these exact values:
 - Kubernetes cluster management (get pods/deployments/logs/events, scale, apply):
-  image="ghcr.io/flux159/mcp-server-kubernetes:latest", port=3000, requires_k8s_sa=true
+  image="flux159/mcp-server-kubernetes:latest", port=3000, requires_k8s_sa=true
 - GitHub repository operations:
   image="ghcr.io/github/github-mcp-server:latest", port=8080
 - Web search (SearXNG): internal deployment only, do not suggest a public image
