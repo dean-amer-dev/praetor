@@ -37,7 +37,7 @@ OpenWebUI conversation
 POST /api/v1/app/create
     │
     ├─► Create GitHub repo from app-template (GitHub API)
-    │   (amerenda-coder app, org-level repo creation)
+    │   (praetor-coder app, org-level repo creation)
     │
     ├─► infra-mcp scaffold_app → k3s manifests for UAT + prod
     │   infra-mcp open_deploy_pr → ArgoCD ready for UAT
@@ -82,7 +82,7 @@ class AppPlan(BaseModel):
 
 ### 19b — Repo Creation
 
-Use the GitHub API with the amerenda-coder GitHub App installation token to create a new repo from `app-template`:
+Use the GitHub API with the praetor-coder GitHub App installation token to create a new repo from `app-template`:
 
 ```
 POST /repos/amerenda/app-template/generate
@@ -94,7 +94,7 @@ POST /repos/amerenda/app-template/generate
 }
 ```
 
-The `amerenda-coder` GitHub App needs `administration:write` permission at org level for this. Check and grant if not already set.
+The `praetor-coder` GitHub App needs `administration:write` permission at org level for this. Check and grant if not already set.
 
 ### 19c — Runner Provisioning
 
@@ -111,7 +111,7 @@ The coder agent currently receives `task_title` and `task_description`. For a ne
 ```
 App: <name>
 Repo: https://github.com/amerenda/<name>
-Branch: amerenda-coder/initial-implementation
+Branch: praetor-coder/initial-implementation
 Purpose: <description>
 Port: <port>
 Secrets needed: <env_secrets>

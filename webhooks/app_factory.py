@@ -123,7 +123,7 @@ def _build_coder_description(plan: AppPlan) -> str:
     return (
         f"App: {plan.name}\n"
         f"Repo: amerenda/{plan.name}\n"
-        f"Branch: amerenda-coder/initial-implementation\n"
+        f"Branch: praetor-coder/initial-implementation\n"
         f"Purpose: {plan.description}\n"
         f"Port: {plan.port}\n"
         f"UAT URL: {uat_url}\n"
@@ -198,14 +198,14 @@ async def create_app(plan: AppPlan, background_tasks: BackgroundTasks) -> AppCre
 
     Synchronous steps (returns after these complete):
     - Validate AppPlan
-    - Create GitHub repo from app-template via amerenda-coder GitHub App
+    - Create GitHub repo from app-template via praetor-coder GitHub App
 
     Background steps (tracked via Hatchet at task_id):
     - scaffold_app + provision_app + open_deploy_pr (infra-mcp)
     - add_mac_mini_runner for CI (infra-mcp)
     - Dispatch coder agent to write initial implementation
 
-    The amerenda-coder GitHub App requires administration:write at the org level.
+    The praetor-coder GitHub App requires administration:write at the org level.
     """
     task_id = int(time.time())
     repo_url = await _create_github_repo(plan)

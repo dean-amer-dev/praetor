@@ -115,7 +115,7 @@ def test_coder_description_env_secrets():
 def test_coder_description_branch():
     plan = AppPlan(name="my-app", description="Does X")
     desc = _build_coder_description(plan)
-    assert "amerenda-coder/initial-implementation" in desc
+    assert "praetor-coder/initial-implementation" in desc
 
 
 def test_coder_description_app_name_replacement_instruction():

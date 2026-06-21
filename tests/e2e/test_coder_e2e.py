@@ -92,7 +92,7 @@ class TestCoderAgentE2E:
         resp = httpx.post(f"{PRAETOR_BASE}/webhooks/vikunja", content=body, headers=headers, timeout=10)
         assert resp.status_code == 200
 
-        # Poll GitHub for a PR opened by dean-coder[bot] with branch amerenda-coder/task-{task_id}
+        # Poll GitHub for a PR opened by dean-coder[bot] with branch praetor-coder/task-{task_id}
         gh_token = os.environ.get("GITHUB_TOKEN", "")
         gh_headers = {"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"}
 
@@ -101,7 +101,7 @@ class TestCoderAgentE2E:
                 return False
             resp2 = httpx.get(
                 "https://api.github.com/repos/amerenda/praetor/pulls",
-                params={"state": "open", "head": f"amerenda:amerenda-coder/task-{task_id}"},
+                params={"state": "open", "head": f"amerenda:praetor-coder/task-{task_id}"},
                 headers=gh_headers,
                 timeout=10,
             )

@@ -114,4 +114,4 @@ class TestCoderNode:
                 node = CoderNode()
                 await node.run(state, {"summary": ""})
         prompt = mock_agent.run.call_args[0][0]
-        assert "amerenda-coder/task-77" in prompt
+        assert "praetor-coder/task-77" in prompt
