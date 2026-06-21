@@ -391,3 +391,96 @@ def test_request_mcp_register_conflict_propagated(client):
             json={"capability": "query Grafana alerts from the Grafana HTTP API"},
         )
     assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Kubernetes MCP — requires_k8s_sa causes RBAC fields in registration
+# ---------------------------------------------------------------------------
+
+def test_request_mcp_kubernetes_includes_rbac(client):
+    """k8s MCP research (requires_k8s_sa=True) → registration body has SA + cluster_role."""
+    k8s_result = McpResearchResult(
+        found=True,
+        confidence=0.95,
+        image="ghcr.io/flux159/mcp-server-kubernetes:latest",
+        name="kubernetes-readonly",
+        notes="mcp-server-kubernetes found on ghcr.io/flux159. Actively maintained.",
+        port=3000,
+        requires_k8s_sa=True,
+    )
+    pr_url = "https://github.com/amerenda/k3s-dean-gitops/pull/900"
+
+    captured_body: dict = {}
+
+    mock_cm = AsyncMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"name": "kubernetes-readonly", "pr_url": pr_url, "message": "ok"}
+
+    async def capture_post(url, *, json=None, headers=None):
+        captured_body.update(json or {})
+        return ok_resp
+
+    mock_cm.post = capture_post
+
+    with (
+        patch("webhooks.mcp_request._load_registry", new=AsyncMock(return_value={})),
+        patch("webhooks.mcp_request._research_mcp", new=AsyncMock(return_value=k8s_result)),
+        patch("webhooks.mcp_request.httpx.AsyncClient", return_value=mock_cm),
+    ):
+        resp = client.post(
+            "/api/v1/mcp/request",
+            headers=AUTH,
+            json={"capability": "query and manage Kubernetes cluster pods and deployments"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["decision"] == "use_existing"
+    assert captured_body["port"] == 3000
+    assert captured_body["service_account_name"] == "kubernetes-readonly-sa"
+    assert captured_body["cluster_role"] == "view"
+
+
+def test_request_mcp_no_k8s_sa_when_not_required(client):
+    """Non-k8s MCP → no service_account_name or cluster_role in registration body."""
+    non_k8s_result = McpResearchResult(
+        found=True,
+        confidence=0.92,
+        image="ghcr.io/org/mcp-grafana:latest",
+        name="mcp-grafana",
+        notes="Found on Smithery.",
+        port=8080,
+        requires_k8s_sa=False,
+    )
+    pr_url = "https://github.com/amerenda/k3s-dean-gitops/pull/901"
+
+    captured_body: dict = {}
+
+    mock_cm = AsyncMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"name": "mcp-grafana", "pr_url": pr_url, "message": "ok"}
+
+    async def capture_post(url, *, json=None, headers=None):
+        captured_body.update(json or {})
+        return ok_resp
+
+    mock_cm.post = capture_post
+
+    with (
+        patch("webhooks.mcp_request._load_registry", new=AsyncMock(return_value={})),
+        patch("webhooks.mcp_request._research_mcp", new=AsyncMock(return_value=non_k8s_result)),
+        patch("webhooks.mcp_request.httpx.AsyncClient", return_value=mock_cm),
+    ):
+        resp = client.post(
+            "/api/v1/mcp/request",
+            headers=AUTH,
+            json={"capability": "query Grafana alerts from the Grafana HTTP API"},
+        )
+    assert resp.status_code == 200
+    assert captured_body.get("service_account_name") is None
+    assert captured_body.get("cluster_role") is None
+    assert captured_body["port"] == 8080

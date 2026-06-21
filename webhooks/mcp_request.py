@@ -62,6 +62,8 @@ class McpResearchResult(BaseModel):
     image: str | None = None
     name: str | None = None
     notes: str
+    port: int | None = None          # container port (if known)
+    requires_k8s_sa: bool = False    # needs in-cluster Kubernetes service account
 
 
 class McpRequestResponse(BaseModel):
@@ -110,14 +112,27 @@ Search your knowledge of:
 3. ModelContextProtocol GitHub org — reference implementations
 4. Popular MCP servers on GitHub (mcp-server-* repos)
 
-Return ONLY a JSON object with these fields:
+KNOWN PRODUCTION-READY MCP SERVERS — use these exact values:
+- Kubernetes cluster management (get pods/deployments/logs/events, scale, apply):
+  image="ghcr.io/flux159/mcp-server-kubernetes:latest", port=3000, requires_k8s_sa=true
+- GitHub repository operations:
+  image="ghcr.io/github/github-mcp-server:latest", port=8080
+- Web search (SearXNG): internal deployment only, do not suggest a public image
+
+Return ONLY a JSON object with these exact fields:
 {
   "found": <true|false>,
   "confidence": <0.0 to 1.0>,
   "image": "<docker-image:tag or null>",
   "name": "<canonical-mcp-name or null>",
-  "notes": "<2-3 sentence summary of what you found or why nothing matched>"
+  "notes": "<2-3 sentence summary of what you found or why nothing matched>",
+  "port": <container port as integer, or null if unknown>,
+  "requires_k8s_sa": <true if MCP needs in-cluster Kubernetes API access, otherwise false>
 }
+
+IMPORTANT: Only return images you are certain exist on public container registries. \
+Do NOT guess or hallucinate image names — return null if you are not confident. \
+If unsure about the image, set confidence below 0.85.
 
 Confidence guidance:
 - 0.9+: well-known server, Docker image on public registry, actively maintained
@@ -167,6 +182,8 @@ async def _research_mcp(capability: str) -> McpResearchResult:
             image=data.get("image") or None,
             name=data.get("name") or None,
             notes=str(data.get("notes", "")),
+            port=int(data["port"]) if data.get("port") else None,
+            requires_k8s_sa=bool(data.get("requires_k8s_sa", False)),
         )
     except Exception as exc:
         logger.error("failed to parse LLM research response: %s", exc)
@@ -183,7 +200,16 @@ async def _register_existing(research: McpResearchResult, req: McpRequest, api_k
     if not name:
         raise HTTPException(status_code=422, detail="could not determine MCP name from research results")
 
-    registration = McpRegistration(name=name, image=research.image, port=8000)
+    sa_name = f"{name}-sa" if research.requires_k8s_sa else None
+    cluster_role = "view" if research.requires_k8s_sa else None
+
+    registration = McpRegistration(
+        name=name,
+        image=research.image,
+        port=research.port or 8000,
+        service_account_name=sa_name,
+        cluster_role=cluster_role,
+    )
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{_PRAETOR_BASE}/api/v1/mcp/register",

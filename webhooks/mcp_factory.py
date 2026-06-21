@@ -51,6 +51,9 @@ class McpRegistration(BaseModel):
     transport: str = "http"
     env_secrets: dict[str, str] = {}
     args: list[str] = []
+    service_account_name: str | None = None  # mounts this SA in the pod
+    cluster_role: str | None = None          # creates SA + ClusterRoleBinding when set
+    health_path: str = "/health"             # readiness/liveness probe path
 
 
 class McpStatusEntry(BaseModel):
@@ -60,6 +63,8 @@ class McpStatusEntry(BaseModel):
     transport: str
     pr_url: str | None = None
     status: str = "pending"
+    service_account_name: str | None = None
+    cluster_role: str | None = None
 
 
 class McpRegisterResponse(BaseModel):
@@ -238,6 +243,8 @@ def _deployment_yaml(reg: McpRegistration) -> str:
     if reg.args:
         args_block = "          args:\n" + "".join(f"            - {a!r}\n" for a in reg.args)
 
+    sa_block = f"      serviceAccountName: {reg.service_account_name}\n" if reg.service_account_name else ""
+
     return (
         f"apiVersion: apps/v1\n"
         f"kind: Deployment\n"
@@ -259,6 +266,7 @@ def _deployment_yaml(reg: McpRegistration) -> str:
         f"      labels:\n"
         f"        app: {reg.name}-server\n"
         f"    spec:\n"
+        f"{sa_block}"
         f"      containers:\n"
         f"        - name: server\n"
         f"          image: {reg.image}\n"
@@ -269,13 +277,13 @@ def _deployment_yaml(reg: McpRegistration) -> str:
         f"{args_block}"
         f"          readinessProbe:\n"
         f"            httpGet:\n"
-        f"              path: /health\n"
+        f"              path: {reg.health_path}\n"
         f"              port: {reg.port}\n"
         f"            initialDelaySeconds: 5\n"
         f"            periodSeconds: 10\n"
         f"          livenessProbe:\n"
         f"            httpGet:\n"
-        f"              path: /health\n"
+        f"              path: {reg.health_path}\n"
         f"              port: {reg.port}\n"
         f"            initialDelaySeconds: 10\n"
         f"            periodSeconds: 30\n"
@@ -286,6 +294,34 @@ def _deployment_yaml(reg: McpRegistration) -> str:
         f"            limits:\n"
         f"              cpu: 100m\n"
         f"              memory: 128Mi\n"
+    )
+
+
+def _service_account_yaml(reg: McpRegistration) -> str:
+    return (
+        f"apiVersion: v1\n"
+        f"kind: ServiceAccount\n"
+        f"metadata:\n"
+        f"  name: {reg.service_account_name}\n"
+        f"  namespace: mcp-{reg.name}\n"
+    )
+
+
+def _cluster_role_binding_yaml(reg: McpRegistration) -> str:
+    binding_name = f"{reg.name}-{reg.cluster_role}-binding"
+    return (
+        f"apiVersion: rbac.authorization.k8s.io/v1\n"
+        f"kind: ClusterRoleBinding\n"
+        f"metadata:\n"
+        f"  name: {binding_name}\n"
+        f"roleRef:\n"
+        f"  apiGroup: rbac.authorization.k8s.io\n"
+        f"  kind: ClusterRole\n"
+        f"  name: {reg.cluster_role}\n"
+        f"subjects:\n"
+        f"  - kind: ServiceAccount\n"
+        f"    name: {reg.service_account_name}\n"
+        f"    namespace: mcp-{reg.name}\n"
     )
 
 
@@ -419,6 +455,21 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
                 f"feat(mcp-factory): add {reg.name} MCP external secret",
                 branch,
             )
+        if reg.service_account_name and reg.cluster_role:
+            await _create_file(
+                gh, token,
+                f"apps/mcp/{reg.name}/serviceaccount.yaml",
+                _service_account_yaml(reg),
+                f"feat(mcp-factory): add {reg.name} service account",
+                branch,
+            )
+            await _create_file(
+                gh, token,
+                f"apps/mcp/{reg.name}/clusterrolebinding.yaml",
+                _cluster_role_binding_yaml(reg),
+                f"feat(mcp-factory): add {reg.name} cluster role binding",
+                branch,
+            )
 
         root_app, root_sha = await _get_file(gh, token, "root-app.yaml", branch)
         await _update_file(
@@ -457,6 +508,8 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
         "transport": reg.transport,
         "pr_url": pr_url,
         "status": "pending",
+        "service_account_name": reg.service_account_name,
+        "cluster_role": reg.cluster_role,
     }
     try:
         await _save_registry(registry)
