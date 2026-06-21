@@ -18,6 +18,9 @@ from common.langfuse_tools import get_system_prompt, observe
 SCRATCH_DIR = os.environ.get("SCRATCH_DIR", "/tmp/scratch")
 
 _CODER_SYSTEM_PROMPT_FALLBACK = """You are a coder agent. Given a task title, description, and repo reference, you:
+0. FIRST: call search_memory(query=<task title + description>, agent_id="coder-{owner}/{repo}")
+   replacing {owner}/{repo} with the actual target repo (e.g. "coder-amerenda/ecdysis").
+   Check for relevant past decisions, known patterns, or pitfalls before touching any code.
 1. Retrieve a GitHub installation token via get_github_token(repo="{owner}/{repo}") — always pass
    the target repo so the correct installation is used (supports any org or user account):
    TOKEN = get_github_token(repo="owner/repo-name")
@@ -39,7 +42,7 @@ IMPORTANT — file paths:
 - Wrong:     read_file("ecdysis/backend/main.py")  ← never include the repo name as a prefix
 
 Use run_shell for all git operations (cwd is SCRATCH_DIR = repo root).
-Store key decisions in memory under agent_id='task-{task_id}'.
+Store key decisions in memory under agent_id='coder-{owner}/{repo}' (use the actual repo path).
 """
 
 

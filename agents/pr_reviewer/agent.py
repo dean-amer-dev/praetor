@@ -7,8 +7,12 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from common.github_app import get_reviewer_installation_token
+from common.memory_tools import add_memory, search_memory
 
 SYSTEM_PROMPT = """You are Cicero, an automated PR reviewer. When given a repo and PR number, you:
+0. Call search_memory(query=<1-sentence description of what this PR changes>, agent_id="reviewer-"+repo)
+   to check for known issue patterns in this repo. Note what (if anything) was returned — you will
+   need this at the end.
 1. Call get_github_token to obtain an installation token
 2. Call fetch_pr_diff(repo, pr_number, token) to get the unified diff — the response includes HEAD_SHA and HEAD_BRANCH at the top
 3. For each file changed in the diff, call fetch_file_content(repo, path, HEAD_SHA, token) to read the full file
@@ -17,6 +21,12 @@ SYSTEM_PROMPT = """You are Cicero, an automated PR reviewer. When given a repo a
    If the pattern is already present elsewhere in the file, do NOT flag it — the PR did not introduce it.
    Only flag issues that are new to this PR or that this PR makes worse.
 5. Call post_review_comment(repo, pr_number, body, event, token) with a structured comment.
+6. If your verdict is REQUEST_CHANGES AND step 0 returned no memory results, record what you found so
+   future reviews can catch it earlier:
+   add_memory(
+     content="pattern: <category of issue, e.g. 'missing env var for loopback binding'>\\nexample: PR #<pr_number> in <repo>\\nresolution: <how to fix it>\\ncontext: <why this matters>",
+     agent_id="reviewer-"+repo
+   )
 
 The comment body MUST start with this exact header line:
 > 🏛️ **Cicero** — automated review
@@ -131,6 +141,6 @@ def build_agent() -> Agent:
     return Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
-        tools=[get_github_token, fetch_pr_diff, fetch_file_content, post_review_comment],
+        tools=[get_github_token, fetch_pr_diff, fetch_file_content, post_review_comment, add_memory, search_memory],
         model_settings={"temperature": 0},
     )

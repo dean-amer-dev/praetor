@@ -13,6 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from common.github_app import get_installation_token
+from common.langfuse_tools import get_system_prompt
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -25,6 +26,36 @@ REGISTRY_NS = "praetor"
 K8S_API = "https://kubernetes.default.svc"
 _K8S_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 _K8S_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+_LITELLM_BASE = os.environ.get("LITELLM_BASE_URL", "http://litellm.praetor.svc.cluster.local/v1")
+_LITELLM_KEY = os.environ.get("LITELLM_API_KEY", "")
+_MAX_REVIEW_ITERATIONS = 3
+
+_PRE_REVIEW_SYSTEM_FALLBACK = """\
+You are a Kubernetes YAML reviewer for MCP server deployments in a GitOps pipeline. \
+Review the provided manifests for correctness before they are pushed to the gitops repo.
+
+Check for these common issues:
+1. Probe type: if health_path is None (no /health endpoint), probes MUST use tcpSocket, not httpGet
+2. Env completeness: required env vars are present (e.g. HOST=0.0.0.0 for servers that default to \
+   loopback binding — without it the container is unreachable)
+3. Service port matches container port
+4. ServiceAccount correctly referenced in the Deployment if RBAC manifests are present
+5. Image registry correctness (e.g. flux159/mcp-server-kubernetes is on Docker Hub, not ghcr.io)
+6. Container port matches the actual listening port for the image
+
+Return ONLY a JSON object with these exact fields:
+{
+  "approved": <true if all manifests are correct, false if any issues found>,
+  "issues": ["<description of each issue>"],
+  "fixes": {
+    "<filename>": "<complete corrected yaml content>"
+  }
+}
+
+If approved, set "issues": [] and "fixes": {}.
+Only include files in "fixes" that need changes. Preserve all valid yaml fields.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +86,7 @@ class McpRegistration(BaseModel):
     service_account_name: str | None = None  # mounts this SA in the pod
     cluster_role: str | None = None          # creates SA + ClusterRoleBinding when set
     health_path: str | None = None           # if set, use httpGet probe; otherwise tcpSocket
+    skip_pre_review: bool = False            # bypass inline LLM review loop (e.g. for idempotent re-runs)
 
 
 class McpStatusEntry(BaseModel):
@@ -446,6 +478,91 @@ def _litellm_mcp_entry(reg: McpRegistration) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Pre-PR inline review loop
+# ---------------------------------------------------------------------------
+
+def _build_manifests(reg: McpRegistration) -> dict[str, str]:
+    """Generate all k8s manifests for an MCP registration into an in-memory dict."""
+    manifests: dict[str, str] = {
+        "deployment.yaml": _deployment_yaml(reg),
+        "service.yaml": _service_yaml(reg),
+    }
+    if reg.env_secrets:
+        manifests["externalsecret.yaml"] = _externalsecret_yaml(reg)
+    if reg.service_account_name and reg.cluster_role:
+        manifests["serviceaccount.yaml"] = _service_account_yaml(reg)
+        manifests["clusterrolebinding.yaml"] = _cluster_role_binding_yaml(reg)
+    return manifests
+
+
+async def _call_review_llm(
+    manifests: dict[str, str], reg: McpRegistration
+) -> tuple[bool, list[str], dict[str, str]]:
+    """Ask the LLM to review manifests. Returns (approved, issues, fixes).
+    On any failure, returns (True, [], {}) so the pipeline continues unblocked.
+    """
+    manifest_text = "\n\n".join(f"# {name}\n{content}" for name, content in manifests.items())
+    reg_ctx = f"name={reg.name} image={reg.image} port={reg.port} health_path={reg.health_path}"
+    payload = {
+        "model": os.environ.get("LLM_MODEL", "qwen3-35b"),
+        "messages": [
+            {"role": "system", "content": get_system_prompt("mcp-pre-review-system", fallback=_PRE_REVIEW_SYSTEM_FALLBACK)},
+            {"role": "user", "content": f"Registration: {reg_ctx}\n\nManifests:\n{manifest_text}"},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0,
+        "max_tokens": 2048,
+    }
+    headers = {"Authorization": f"Bearer {_LITELLM_KEY}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(f"{_LITELLM_BASE}/chat/completions", headers=headers, json=payload)
+        if resp.status_code != 200:
+            logger.warning("mcp-factory: pre-review LLM call failed (%s) — skipping", resp.status_code)
+            return True, [], {}
+        content = resp.json()["choices"][0]["message"]["content"] or ""
+        content = content.strip()
+        if content.startswith("```"):
+            parts = content.split("```", 2)
+            content = parts[1].lstrip("json").strip() if len(parts) > 1 else content
+        data = json.loads(content)
+        return (
+            bool(data.get("approved", True)),
+            [str(i) for i in data.get("issues", [])],
+            {k: str(v) for k, v in data.get("fixes", {}).items()},
+        )
+    except Exception as exc:
+        logger.warning("mcp-factory: pre-review failed (%s) — proceeding without review", exc)
+        return True, [], {}
+
+
+async def _pre_review_loop(
+    manifests: dict[str, str], reg: McpRegistration
+) -> tuple[dict[str, str], str | None]:
+    """Run up to _MAX_REVIEW_ITERATIONS review-and-fix cycles in memory.
+
+    Returns (final_manifests, warning_or_None). Warning is set if manifests
+    were never approved after all iterations — PR is still opened with a note.
+    """
+    last_issues: list[str] = []
+    for i in range(_MAX_REVIEW_ITERATIONS):
+        approved, issues, fixes = await _call_review_llm(manifests, reg)
+        if approved:
+            logger.info("mcp-factory: pre-review approved on iteration %d", i + 1)
+            return manifests, None
+        last_issues = issues
+        logger.info("mcp-factory: pre-review iteration %d issues: %s", i + 1, issues)
+        if fixes:
+            manifests = {**manifests, **fixes}
+    warning = (
+        f"Pre-review did not approve after {_MAX_REVIEW_ITERATIONS} iterations. "
+        f"Last issues: {'; '.join(last_issues[:3])}"
+    )
+    logger.warning("mcp-factory: %s", warning)
+    return manifests, warning
+
+
+# ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
 
@@ -455,6 +572,12 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
     if reg.name in registry:
         raise HTTPException(status_code=409, detail=f"MCP '{reg.name}' is already registered")
 
+    # Generate manifests in memory, optionally run review loop before any GitHub writes
+    manifests = _build_manifests(reg)
+    review_warning: str | None = None
+    if not reg.skip_pre_review:
+        manifests, review_warning = await _pre_review_loop(manifests, reg)
+
     token = get_installation_token()
     branch = f"feat/mcp-register-{reg.name}"
 
@@ -462,41 +585,12 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
         main_sha = await _get_main_sha(gh, token)
         await _create_branch(gh, token, branch, main_sha)
 
-        await _create_file(
-            gh, token,
-            f"apps/mcp/{reg.name}/deployment.yaml",
-            _deployment_yaml(reg),
-            f"feat(mcp-factory): add {reg.name} MCP deployment",
-            branch,
-        )
-        await _create_file(
-            gh, token,
-            f"apps/mcp/{reg.name}/service.yaml",
-            _service_yaml(reg),
-            f"feat(mcp-factory): add {reg.name} MCP service",
-            branch,
-        )
-        if reg.env_secrets:
+        for filename, content in manifests.items():
             await _create_file(
                 gh, token,
-                f"apps/mcp/{reg.name}/externalsecret.yaml",
-                _externalsecret_yaml(reg),
-                f"feat(mcp-factory): add {reg.name} MCP external secret",
-                branch,
-            )
-        if reg.service_account_name and reg.cluster_role:
-            await _create_file(
-                gh, token,
-                f"apps/mcp/{reg.name}/serviceaccount.yaml",
-                _service_account_yaml(reg),
-                f"feat(mcp-factory): add {reg.name} service account",
-                branch,
-            )
-            await _create_file(
-                gh, token,
-                f"apps/mcp/{reg.name}/clusterrolebinding.yaml",
-                _cluster_role_binding_yaml(reg),
-                f"feat(mcp-factory): add {reg.name} cluster role binding",
+                f"apps/mcp/{reg.name}/{filename}",
+                content,
+                f"feat(mcp-factory): add {reg.name} MCP {filename}",
                 branch,
             )
 
@@ -517,16 +611,20 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
             branch, cm_sha,
         )
 
+        pr_body = (
+            f"Auto-generated by praetor MCP factory.\n\n"
+            f"Registers `{reg.name}` MCP:\n"
+            f"- Image: `{reg.image}`\n"
+            f"- Port: `{reg.port}`\n"
+            f"- Transport: `{reg.transport}`\n"
+        )
+        if review_warning:
+            pr_body += f"\n---\n⚠️ **Pre-review warning:** {review_warning}\n"
+
         pr_url = await _create_pr(
             gh, token,
             f"feat(mcp-factory): register {reg.name} MCP",
-            (
-                f"Auto-generated by praetor MCP factory.\n\n"
-                f"Registers `{reg.name}` MCP:\n"
-                f"- Image: `{reg.image}`\n"
-                f"- Port: `{reg.port}`\n"
-                f"- Transport: `{reg.transport}`\n"
-            ),
+            pr_body,
             branch,
         )
 
