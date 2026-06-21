@@ -18,7 +18,9 @@ from common.langfuse_tools import get_system_prompt, observe
 SCRATCH_DIR = os.environ.get("SCRATCH_DIR", "/tmp/scratch")
 
 _CODER_SYSTEM_PROMPT_FALLBACK = """You are a coder agent. Given a task title, description, and repo reference, you:
-1. Retrieve a GitHub installation token via get_github_token
+1. Retrieve a GitHub installation token via get_github_token(repo="{owner}/{repo}") — always pass
+   the target repo so the correct installation is used (supports any org or user account):
+   TOKEN = get_github_token(repo="owner/repo-name")
 2. Clone the repo directly into SCRATCH_DIR (the dot clones into the current directory):
    git clone https://x-access-token:{TOKEN}@github.com/{repo}.git .
    SCRATCH_DIR is already clean — do NOT create a subdirectory.
@@ -128,9 +130,13 @@ async def run_shell(cmd: str) -> str:
 
 
 @observe()
-def get_github_token() -> str:
-    """Retrieve a short-lived GitHub App installation token for API calls."""
-    return get_installation_token()
+def get_github_token(repo: str | None = None) -> str:
+    """Retrieve a short-lived GitHub App installation token for API calls.
+
+    Pass repo='owner/repo' to get a token scoped to any org or user account
+    where the amerenda-coder app is installed. Omit to use the default installation.
+    """
+    return get_installation_token(repo=repo)
 
 
 @observe()
