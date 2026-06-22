@@ -2,7 +2,7 @@
 
 Multi-agent platform that runs on a local k3s cluster. Agents are triggered from a conversation in OpenWebUI, dispatch through Hatchet, execute via PydanticAI workers, and share memory through Mem0. All inference goes through LiteLLM.
 
-**Current phase:** Phase 22 — Coder Re-Dispatch Loop
+**Current phase:** Phase 22 — Coder Full GitHub API + OWU-Only Dispatch
 
 **No LangChain.** The agent harness is PydanticAI. LangChain is not installed, not imported, not referenced anywhere in the codebase.
 
@@ -30,8 +30,8 @@ All workers are stateless Hatchet workers. Each listens for specific event types
 
 | Worker | Hatchet Event | What It Does |
 |--------|--------------|--------------|
-| **research-worker** | `agent:research` | Checks mem0 first, then web search + synthesis via LiteLLM MCP tools (`lm_web_search`, `lm_web_read_url`). Writes new findings to mem0 (`agent_id="research"`). Posts summary to Vikunja. |
-| **coder-worker** | `agent:code` | Checks mem0 for repo-specific patterns first (`agent_id="coder-{owner}/{repo}"`), then clones repo, implements task, opens draft PR via praetor-coder GitHub App. Writes key decisions to mem0. |
+| **research-worker** | `agent:research` | Checks mem0 first, then web search + synthesis via LiteLLM MCP tools (`lm_web_search`, `lm_web_read_url`). Writes new findings to mem0 (`agent_id="research"`). Posts summary back to the dispatcher. |
+| **coder-worker** | `agent:code` | Checks mem0 for repo-specific patterns first (`agent_id="coder-{owner}/{repo}"`), then clones repo, implements task, opens draft PR via praetor-coder GitHub App. Supports create, edit, and comment on PRs via `github_api`. Writes key decisions to mem0. |
 | **reviewer-worker** | `agent:review` | Checks mem0 for known issue patterns (`agent_id="reviewer-{repo}"`), reviews PR diff, posts structured comment via amerenda-reviewer GitHub App. Writes new issue patterns to mem0 only if none were already found (check-before-write). |
 | **qa-worker** | `agent:qa` | Runs Playwright browser tests against UAT deployments. |
 | **pipeline-worker** | `agent:pipeline` | Orchestrates multi-agent DAGs (e.g., research → code → review). Uses PydanticAI `Graph`. |
@@ -68,6 +68,10 @@ LiteLLM aggregates these at `/mcp`. All tools get the `lm_` prefix when exposed 
 
 ## How It Fits Together
 
+All agent dispatch goes through OpenWebUI. The model calls `lm_praetor_dispatch` which hits
+`POST /api/v1/dispatch` on the webhook-adapter. GitHub PR webhooks trigger the reviewer
+automatically. Vikunja todo triggers are not yet active (outstanding).
+
 ```
 OpenWebUI (bot.amer.dev)
   qwen3-35b-think + praetor_mcp tools
@@ -86,15 +90,15 @@ Hatchet ── fires agent:research / agent:code / agent:pipeline events
          ▼
 PydanticAI workers
   ├── call LiteLLM /v1/chat/completions (qwen3-35b-think)
-  ├── call LiteLLM /mcp tools (web search, infra, BWS, mem0)
+  ├── call LiteLLM /mcp tools (web search, infra, BWS, mem0, github)
   ├── read/write memory via mem0
   └── trace everything to Langfuse
 
-Secondary triggers
+Automatic trigger
   GitHub PR opened  →  pubhooks.amer.dev/praetor/webhooks/github
                      →  webhook-adapter  →  Hatchet agent:review
-  Vikunja task label ai-go  →  webhook-adapter  →  agent:code
-  Vikunja task label ai-research  →  webhook-adapter  →  agent:research
+
+Vikunja todo triggers: outstanding (not yet active)
 ```
 
 ---
@@ -174,10 +178,11 @@ tests/
 | 17 | Intelligent MCP Agent (`/api/v1/mcp/request`, research → register pipeline) | ✅ Complete |
 | 18 | Kubernetes MCP (deploy `mcp-server-kubernetes` via Phase 17 pipeline) | ✅ Complete |
 | 21 | Mem0 Integration + Pre-PR Review Loop | ✅ Complete |
-| 22 | Coder Re-Dispatch Loop (reviewer REQUEST_CHANGES → re-dispatch coder, cap 2) | 🔄 Next |
-| 23 | Agent Factory (`POST /api/v1/agent/create` → scaffold → deploy → smoke test in one call) | ⬜ Pending |
-| 24 | Inline Arbitration (loop exhausted → focused LLM call, decision memo to mem0 + PR) | ⬜ Pending |
-| 25 | Voice Dispatch | ⬜ Pending |
-| 26 | Control Plane UI | ⬜ Pending |
+| 22 | Coder Full GitHub API + OWU-Only Dispatch (`github_api` tool; edit/comment/close PRs; github-mcp in LiteLLM; Vikunja trigger removed as primary) | 🔄 In Progress |
+| 23 | Coder Re-Dispatch Loop (reviewer REQUEST_CHANGES → re-dispatch coder, cap 2) | ⬜ Pending |
+| 24 | Agent Factory (`POST /api/v1/agent/create` → scaffold → deploy → smoke test in one call) | ⬜ Pending |
+| 25 | Inline Arbitration (loop exhausted → focused LLM call, decision memo to mem0 + PR) | ⬜ Pending |
+| 26 | Voice Dispatch | ⬜ Pending |
+| 27 | Control Plane UI | ⬜ Pending |
 
 See `docs/status.md` for full notes. See `docs/phase-N.md` for each phase's design and ready conditions.

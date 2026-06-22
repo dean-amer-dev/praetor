@@ -151,6 +151,47 @@ def get_github_token(repo: str | None = None) -> str:
 
 
 @observe()
+async def github_api(
+    method: str,
+    path: str,
+    body: dict | None = None,
+    repo: str | None = None,
+) -> dict:
+    """Call the GitHub REST API authenticated as praetor-coder.
+
+    method: HTTP verb — "GET", "POST", "PATCH", "PUT", "DELETE"
+    path:   API path starting with /, e.g. "/repos/amerenda/k3s-dean-gitops/pulls"
+    body:   JSON body for POST/PATCH/PUT (omit for GET/DELETE)
+    repo:   "owner/repo" used to scope the installation token — required for writes
+
+    Returns the parsed JSON response, or {"status": "ok"} for 204 responses,
+    or {"error": "HTTP N", "body": "..."} on failure.
+    """
+    token = get_installation_token(repo=repo)
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    async def _call() -> dict:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.request(
+                method.upper(),
+                f"https://api.github.com{path}",
+                headers=headers,
+                json=body,
+            )
+            if not resp.is_success:
+                return {"error": f"HTTP {resp.status_code}", "body": resp.text[:2000]}
+            if resp.status_code == 204:
+                return {"status": "ok"}
+            return resp.json()
+
+    return await _call()
+
+
+@observe()
 async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> str:
     """Update a Vikunja task: post a comment and optionally mark it done."""
     base = os.environ.get("VIKUNJA_BASE_URL", "https://todo.amer.dev")
@@ -194,6 +235,7 @@ def build_agent() -> Agent:
             write_file,
             run_shell,
             get_github_token,
+            github_api,
             add_memory,
             search_memory,
             update_vikunja_task,

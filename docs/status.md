@@ -7,8 +7,8 @@
 | 2 | Storage | ✅ Complete | Qdrant on Mac Mini via Komodo |
 | 3 | Dispatch | ✅ Complete | Hatchet Lite on k3s, stub worker |
 | 4 | Memory | ✅ Complete | mem0 arm64 image healthy; smoke + E2E verified (Phase 12a) |
-| 5 | Research Agent | ✅ Complete | Vikunja ai-research label → research worker |
-| 6 | Coder Agent | ✅ Complete | Vikunja ai-go label → coder worker, PRs via dean-coder[bot] |
+| 5 | Research Agent | ✅ Complete | OWU dispatch → research worker (Vikunja trigger: outstanding) |
+| 6 | Coder Agent | ✅ Complete | OWU dispatch → coder worker, PRs via praetor-coder[bot] (Vikunja trigger: outstanding) |
 | 7 | PR Reviewer + QA | ✅ Complete | End-to-end verified via test PR #36; amerenda-reviewer[bot] posts reviews |
 | 8 | Multi-Agent Pipeline | ✅ Complete | Dual-label tasks → pipeline:research_code DAG; pipeline-worker deployed |
 | 9 | Observability + Prompts | ✅ Complete | Langfuse deployed; @observe() on all tools; eval scores wired; coder-system v4 prompt live; real Hatchet run traced with tool call spans (trace 7c8cb711) |
@@ -19,10 +19,14 @@
 | 14 | Agent Benchmarking & Eval | ✅ Complete | benchmark-worker deployed; baseline run `baseline-1781706219` complete (10/10); research-eval mean=1.000, reviewer-eval mean=0.846 recorded in eval-baselines.md |
 | 15 | Self-Service MCP Factory | ✅ Complete | POST /api/v1/mcp/register → GitOps PR on k3s-dean-gitops (deployment + service + ArgoCD app + LiteLLM mcp_servers); GET /api/v1/mcp lists from k8s ConfigMap registry; 19 unit tests |
 | 16 | Full App Pipeline | ✅ Complete | POST /api/v1/app/create; GitHub repo from template + infra-mcp provision + coder dispatch; 34 unit tests |
-| 17 | Intelligent MCP Agent | 🔄 In progress | POST /api/v1/mcp/request + request_mcp MCP tool; registry dedup + LLM research + use_existing/scaffold_new routing; 22 unit tests |
-| 18 | Kubernetes MCP | ⬜ Not started | Requires Phase 17; first real test of intelligent MCP pipeline |
-| 19 | Voice Dispatch | ⬜ Not started | Requires Phase 15 |
-| 20 | Control Plane UI | ⬜ Not started | Requires Phase 19; includes MCP Registry panel |
+| 17 | Intelligent MCP Agent | ✅ Complete | POST /api/v1/mcp/request + request_mcp MCP tool; registry dedup + LLM research + use_existing/scaffold_new routing; 22 unit tests |
+| 18 | Kubernetes MCP | ✅ Complete | mcp-server-kubernetes deployed via Phase 17; github-mcp registered in LiteLLM |
+| 22 | Coder Full GitHub API + OWU-Only Dispatch | 🔄 In Progress | `github_api` tool added; github-mcp → LiteLLM; Vikunja removed as primary trigger; OWU only |
+| 23 | Coder Re-Dispatch Loop | ⬜ Not started | reviewer REQUEST_CHANGES → re-dispatch coder, cap 2 |
+| 24 | Agent Factory | ⬜ Not started | POST /api/v1/agent/create → scaffold → deploy → smoke test in one call |
+| 25 | Inline Arbitration | ⬜ Not started | loop exhausted → focused LLM call, decision memo to mem0 + PR |
+| 26 | Voice Dispatch | ⬜ Not started | |
+| 27 | Control Plane UI | ⬜ Not started | |
 
 ## OpenWebUI (bot.amer.dev)
 
@@ -37,10 +41,11 @@ Admin credentials reset on 2026-06-13. Login with:
 
 ### Conversational Dispatch (completed prior to Phase 12 renumbering)
 - `POST /api/v1/dispatch` and `GET /api/v1/status/{task_id}` live on praetor webhook-adapter
-- `praetor-mcp` code in dean-mcp (PR #18); deploy pending Phase 13 merge
-- OpenWebUI dispatch tool registered at bot.amer.dev
-- `common/dispatch.py` shared dispatch function; vikunja.py refactored to use it
+- `praetor-mcp` in dean-mcp exposes `lm_praetor_dispatch` to OpenWebUI — primary trigger
+- OpenWebUI dispatch tool registered at bot.amer.dev (all agent invocations go through OWU)
+- `common/dispatch.py` shared dispatch function used by all trigger paths
 - PRs merged: praetor#35, dean-mcp#17, k3s-dean-gitops#800
+- Vikunja webhook trigger code exists but is not active — outstanding for future use
 
 ### Phase 7 — Webhook Setup
 The `amerenda-reviewer` GitHub App is installed on all repos in the org and delivers
