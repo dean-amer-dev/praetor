@@ -5,6 +5,7 @@ The MemoryClient SDK sends Authorization: Token which the self-hosted server rej
 """
 import os
 import httpx
+from common.langfuse_tools import observe
 
 _client: httpx.Client | None = None
 
@@ -22,6 +23,7 @@ def _get_client() -> httpx.Client:
     return _client
 
 
+@observe()
 def add_memory(content: str, agent_id: str) -> str:
     client = _get_client()
     resp = client.post(
@@ -36,6 +38,7 @@ def add_memory(content: str, agent_id: str) -> str:
     return "stored"
 
 
+@observe()
 def search_memory(query: str, agent_id: str) -> list[str]:
     client = _get_client()
     resp = client.post(

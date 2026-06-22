@@ -1,4 +1,5 @@
 """Hatchet worker: handles agent:code events (Hatchet SDK v1.x)."""
+import asyncio
 import os
 import re
 import shutil
@@ -13,6 +14,7 @@ from pydantic_ai.usage import UsageLimits
 
 from .agent import build_agent, update_vikunja_task
 from common.langfuse_tools import langfuse_context, observe
+from common.memory_tools import add_memory, search_memory
 from common.metrics import start_metrics_server, task_invocations, task_active, task_duration
 
 _agent = None
@@ -55,18 +57,26 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
         task_invocations.labels(agent=_AGENT_NAME, status="error").inc()
         return {"error": err, "task_id": input.task_id}
 
+    repo = repo_match.group(1)
+    memory_agent_id = f"coder-{repo}"
+
+    # Phase 21 condition 6: search_memory is ALWAYS the first operation.
+    # Called here (before agent.run) so it appears first in the Langfuse trace.
+    # Results are injected into the prompt so the agent benefits even if it skips the call.
+    loop = asyncio.get_event_loop()
+    prior = await loop.run_in_executor(
+        None, search_memory, f"{input.task_title} {input.task_description}", memory_agent_id
+    )
+    prior_context = "\n".join(prior) if prior else "No prior memory found for this repo."
+
     prompt = (
         f"Task #{input.task_id}: {input.task_title}\n\n"
+        f"Prior memory context for {repo}:\n{prior_context}\n\n"
         f"Description: {input.task_description}\n\n"
-        f"Complete the following steps IN ORDER — do not skip any step:\n"
-        f"1. Call search_memory to check prior decisions for this repo.\n"
-        f"2. Clone the repo, create branch praetor-coder/task-{input.task_id}, implement the change, commit, push.\n"
-        f"3. IMMEDIATELY after the push (before opening the PR): call add_memory with agent_id='coder-{{owner}}/{{repo}}' "
-        f"(replace with the actual repo path, e.g. 'coder-amerenda/praetor') to record key decisions.\n"
-        f"4. Open a draft PR via the GitHub REST API.\n"
-        f"5. Call add_memory with agent_id='task-{input.task_id}' containing the PR URL and a summary of what was done.\n"
-        f"6. Call update_vikunja_task with task_id={input.task_id} and the PR URL to mark the task done.\n"
-        f"Steps 3 and 5 are REQUIRED — do not skip them even if other steps fail."
+        f"Implement this task on the referenced repo. Create branch praetor-coder/task-{input.task_id}, "
+        f"implement, commit, push, then open a draft PR. "
+        f"After completing, call add_memory(agent_id='{memory_agent_id}') with key decisions, "
+        f"and update_vikunja_task(task_id={input.task_id}) with the PR URL."
     )
     agent = _get_agent()
     task_active.labels(agent=_AGENT_NAME).inc()
@@ -78,6 +88,18 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
         )
         task_invocations.labels(agent=_AGENT_NAME, status="success").inc()
         langfuse_context.update_current_trace(output=result.output)
+
+        # Phase 21 condition 6: always store a memory after the task, even if the model skipped it.
+        await loop.run_in_executor(
+            None, add_memory,
+            f"Task #{input.task_id} ({input.task_title}): {result.output}",
+            memory_agent_id,
+        )
+        await loop.run_in_executor(
+            None, add_memory,
+            f"coder completed task #{input.task_id}: {input.task_title}. result: {str(result.output)[:500]}",
+            f"task-{input.task_id}",
+        )
         return {"result": result.output, "task_id": input.task_id}
     except Exception:
         task_invocations.labels(agent=_AGENT_NAME, status="error").inc()
