@@ -61,14 +61,21 @@ class TestWriteFile:
 class TestReadFile:
     async def test_read_returns_content(self, scratch_dir):
         from agents.coder.agent import read_file, write_file
+        (scratch_dir / ".git").mkdir()  # simulate cloned repo
         write_file("r.txt", "hello read")
         assert await read_file("r.txt") == "hello read"
 
     async def test_read_handles_binary_gracefully(self, scratch_dir):
         from agents.coder.agent import read_file
+        (scratch_dir / ".git").mkdir()  # simulate cloned repo
         (scratch_dir / "bin.dat").write_bytes(b"\xff\xfe\x00\x01")
         result = await read_file("bin.dat")
         assert isinstance(result, str)  # no UnicodeDecodeError
+
+    async def test_read_before_clone_returns_error(self, scratch_dir):
+        from agents.coder.agent import read_file
+        result = await read_file("any_file.py")
+        assert "not cloned yet" in result  # guard message triggers
 
 
 class TestRunShell:
