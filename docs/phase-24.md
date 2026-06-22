@@ -1,84 +1,77 @@
-# Phase 24 — Inline Arbitration
+# Phase 21 — Coder Re-Dispatch Loop (Historical Planning Doc)
 
-**Goal:** When the Phase 22 coder re-dispatch loop exhausts its attempts (2 failed tries, reviewer still `REQUEST_CHANGES`), fire a focused inline LLM call that reads both sides, does a targeted web search on the specific dispute, and writes a decision memo to mem0 and the PR. No new agent process — inline, like the pre-PR review loop in Phase 21.
+> **Note:** This was the planning document written when re-dispatch was Phase 22.
+> The feature was implemented as Phase 21 (PR #118). See `phase-21.md` for status.
+
+**Goal:** Close the coder→reviewer feedback loop. When the reviewer posts `REQUEST_CHANGES`, automatically re-dispatch the coder with the review feedback attached. Cap at 2 coder attempts before leaving the PR open for human review.
 
 ---
 
 ## Pre-conditions
 
-- Phase 22 complete (coder re-dispatch loop live, attempt counter in place)
-- The dispute scenario exists in the wild (loop has been seen exhausting in practice)
+- Phase 21 complete (mem0 active, reviewer writes structured memories)
+- Reviewer worker live (`amerenda-reviewer` GitHub App posting reviews)
+- Coder worker live (praetor-coder GitHub App opening draft PRs)
 
 ---
 
 ## What Gets Built
 
-### Trigger
+### Trigger: reviewer REQUEST_CHANGES → re-dispatch coder
 
-Fires from `github_webhook.py` when:
-1. `pull_request_review` event with `state == "REQUEST_CHANGES"`
-2. Attempt counter == 2 (loop exhausted — this is the third reviewer rejection)
-
-### Inline arbitration call
-
-A single LiteLLM call (same pattern as `_call_review_llm` in `mcp_factory.py`, not a full agent dispatch). Takes:
-- The PR diff
-- The reviewer's last `REQUEST_CHANGES` comment (the specific issues raised)
-- The coder's last commit message + changed files
-
-System prompt instructs the LLM to:
-1. Identify the specific technical dispute (e.g. "reviewer wants ConfigMap, coder used Secret")
-2. Do a targeted web search via LiteLLM MCP tools (`lm_web_search`) on the dispute
-3. Return a structured decision: `recommended_approach`, `rationale`, `relevant_links`
-
-This is NOT a full research agent run — it's one focused call with a tight budget (max 3 tool calls).
-
-### Outputs
-
-**PR comment** (posted via `amerenda-reviewer` app):
+Currently:
 ```
-> 🏛️ **Cicero Arbiter** — loop exhausted after 2 attempts
-
-## Dispute
-<what the reviewer and coder disagreed on>
-
-## Recommendation
-<recommended_approach + rationale + links>
-
-## Decision memo
-Stored in mem0 under `reviewer-{repo}` so future runs don't repeat this dispute.
-Human review required to merge.
+coder opens draft PR → reviewer posts review → human decides
 ```
 
-**mem0 write** — structured entry scoped to `reviewer-{repo}`:
+After Phase 22:
 ```
-pattern: <dispute type>
-example: <repo> PR #<number>
-resolution: <recommended_approach>
-context: <rationale summary>
+coder opens draft PR
+  → reviewer posts review
+    → if REQUEST_CHANGES and attempt < 2: re-dispatch coder with review feedback
+    → if APPROVE or attempt >= 2: leave for human review
 ```
 
-### What the arbitration does NOT do
+### Implementation
 
-- Does not re-dispatch coder again — the PR stays open for human review after arbitration
-- Does not override the reviewer's verdict — the PR still has `REQUEST_CHANGES`
-- Does not run the full research pipeline — one LLM call, capped tool budget
-- Does not auto-merge even if the recommendation is clear
+**`webhooks/github_webhook.py`** — add handler for `pull_request_review` events:
+- If `action == "submitted"` and `state == "REQUEST_CHANGES"`
+- Extract repo, PR number, review body, reviewer comments
+- Check attempt counter (stored in PR description or a Vikunja task comment)
+- If attempt < 2: dispatch `agent:code` with the original task context + review feedback appended
+- If attempt >= 2: post a PR comment noting the loop is exhausted, leave for human
+
+**`agents/coder/agent.py`** — system prompt already does `search_memory` first (Phase 21). Add:
+- Accept `review_feedback: str | None` in the dispatch payload
+- If present, append it to the task description so the LLM sees what the reviewer said
+
+**Attempt counter:** Simplest approach — store in the PR description as a hidden HTML comment `<!-- praetor-attempt: 1 -->`. The webhook handler reads it, increments, and writes it back on re-dispatch. No new state store needed.
+
+### What "re-dispatch" means
+
+The coder agent pushes a new commit to the same branch (not a new PR). The reviewer will re-review the updated diff via a new `pull_request` → `synchronize` event (already wired in `github_webhook.py`).
 
 ---
 
 ## Ready Conditions
 
-- Arbitration fires after attempt 2 exhaustion, not before
-- PR comment identifies the dispute and gives a recommendation with sources
-- Decision written to mem0 so the next coder run on a similar task finds it immediately
-- Human still has final say — the PR stays in `REQUEST_CHANGES` state
+- Reviewer `REQUEST_CHANGES` on a praetor-coder draft PR triggers automatic coder re-dispatch
+- Coder reads the reviewer feedback and mem0 context before making the fix
+- After 2 failed attempts, PR stays open with a note — no infinite loop
+- `APPROVE` on first review skips the loop entirely
+
+---
+
+## What NOT to Build
+
+- No moderator agent yet (Phase 24)
+- No changes to the reviewer — it reviews the same way regardless of attempt number
+- No changes to how PRs are opened or merged
 
 ---
 
 ## Notes
 
-- The goal is to break the coder-reviewer loop with *information*, not with authority. The arbitration adds context the coder didn't have; it doesn't force an outcome.
-- If arbitration repeatedly recommends the same thing but the coder keeps ignoring it, that's a prompt quality problem, not an architecture problem.
-- Prefer repo-specific preferences (gitops, containers, stateless, mac-mini-m4 for DB, version pinning) as standing context in the arbitration system prompt so recommendations stay consistent with the platform.
-- The Langfuse prompt name for the arbitration system prompt: `arbitration-system`.
+- The attempt counter in the PR description is intentionally low-tech. It avoids needing a new DB table or ConfigMap for transient loop state.
+- mem0 is the long-term fix for repeated disputes: if the reviewer writes a memory on attempt 1, the coder reads it on attempt 2 and should apply it correctly.
+- The cap of 2 is deliberate. 3+ attempts without resolution almost always means the original task is underspecified, not that the coder needs another try.

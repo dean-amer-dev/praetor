@@ -24,13 +24,13 @@
 | 19 | GitHub Write MCP | ⬜ Pending | New MCP server in dean-mcp wrapping GitHub write ops: create_pr, update_pr, comment_pr, close_pr, push_branch. Removes github_api() from agent.py into a centralized MCP tool any agent can use. Deploy via mcp-factory. |
 | 20 | Mem0 Integration + Pre-PR Review Loop | ✅ Complete | search_memory before every task; add_memory after key decisions; reviewer check-before-write pattern |
 | 21 | Coder Re-Dispatch Loop | 🔁 PR open | PR #118 (phase-21-redispatch). pr:/branch:/attempt: parsing in coder worker done. Mode B prompt built. Reviewer re-dispatch on REQUEST_CHANGES done (cap attempt<1). Webhook handles synchronize on praetor-coder/ branches. Dedup block removed from reviewer agent. 8 new unit tests, all 256 pass. Merge when ready. |
-| 22 | Skills System | ⬜ Pending | Dynamic per-agent prompt-only skills. Storage: PostgreSQL (praetor_skills + praetor_agent_skills tables on existing mac-mini DB) — no pod restarts, instant updates. Workers query at task-start and assemble final prompt = base + active skill snippets. Skill text lives in Langfuse as skill-{name}. API: CRUD for skills + per-agent assignments. |
-| 23 | Agent Factory | ⬜ Pending | POST /api/v1/agent/create → scaffold → wire Hatchet event → CI/deploy → smoke test in one call. Phase 11 scaffold-worker does the PR; this wraps the full pipeline. |
-| 24 | Inline Arbitration | ⬜ Pending | Re-dispatch loop exhausted → focused LLM call → decision memo written to mem0 + PR comment |
-| 25 | Voice Dispatch | ⬜ Pending | Voice input → OWU → lm_praetor_dispatch pipeline |
-| 26 | Control Plane UI | ⬜ Pending | Praetor "single pane of glass": agent matrix (skills × agents toggle), MCP registry panel, task log viewer, skill prompt editor. Requires Phase 22 (skills API). NOT Ecdysis. |
-| 27 | Spec Layer + Planning Conversation | ⬜ Pending | OWU planning agent produces structured TOML spec before dispatch; Mem0-seeded pre-fill; user approves before agent runs; coder reads spec for unambiguous requirements. See phase-27.md. **Priority: high — should precede 22-26.** |
-| 28 | Coder Context Management + Feature Decomposition | ⬜ Pending | Three-layer fix for coder OOM: (28a) truncate tool outputs at source; (28b) Mem0 progress checkpoints every 8 actions for crash recovery; (28c) multi-feature specs dispatch pipeline:feature_decompose — sequential inline coder runs, one feature per clean context, idempotent Mem0 resume. See phase-28.md. Requires Phase 27 spec layer. |
+| 22 | Spec Layer + Planning Conversation | ⬜ Pending | OWU planning agent produces structured TOML spec before dispatch; Mem0-seeded pre-fill; user approves before agent runs; coder reads spec for unambiguous requirements. See phase-22.md. |
+| 23 | Coder Context Management + Feature Decomposition | ⬜ Pending | Three-layer fix for coder OOM: (23a) truncate tool outputs at source; (23b) Mem0 progress checkpoints every 8 actions for crash recovery; (23c) multi-feature specs dispatch pipeline:feature_decompose — sequential inline coder runs, one feature per clean context, idempotent Mem0 resume. See phase-23.md. Requires Phase 22 spec layer. |
+| 24 | Skills System | ⬜ Pending | Dynamic per-agent prompt-only skills. Storage: PostgreSQL (praetor_skills + praetor_agent_skills tables on existing mac-mini DB) — no pod restarts, instant updates. Workers query at task-start and assemble final prompt = base + active skill snippets. Skill text lives in Langfuse as skill-{name}. API: CRUD for skills + per-agent assignments. |
+| 25 | Agent Factory | ⬜ Pending | POST /api/v1/agent/create → scaffold → wire Hatchet event → CI/deploy → smoke test in one call. Phase 11 scaffold-worker does the PR; this wraps the full pipeline. |
+| 26 | Inline Arbitration | ⬜ Pending | Re-dispatch loop exhausted → focused LLM call → decision memo written to mem0 + PR comment |
+| 27 | Voice Dispatch | ⬜ Pending | Voice input → OWU → lm_praetor_dispatch pipeline |
+| 28 | Control Plane UI | ⬜ Pending | Praetor "single pane of glass": agent matrix (skills × agents toggle), MCP registry panel, task log viewer, skill prompt editor. Requires Phase 24 (skills API). NOT Ecdysis. |
 
 ---
 
@@ -41,7 +41,7 @@
 Every agent (coder, reviewer, research, QA, scaffold, and any future agents) MUST:
 1. Call `search_memory` at the start of every task (before the agent runs)
 2. Call `add_memory` at the end of every task (after the agent completes)
-3. Write a summary to both the agent-scoped namespace (`"<agent>-<repo>"`) AND the shared `"planner-global"` namespace (Phase 27+)
+3. Write a summary to both the agent-scoped namespace (`"<agent>-<repo>"`) AND the shared `"planner-global"` namespace (Phase 22+)
 
 No exceptions. This is not optional per-agent — it is a system requirement.
 The `planner-global` namespace is what enables the OWU planning conversation to answer
@@ -65,7 +65,7 @@ Secondary triggers (GitHub PR webhook → reviewer) are active. Vikunja label tr
 
 ---
 
-## Skills System Design (Phase 22)
+## Skills System Design (Phase 24)
 
 ### Why PostgreSQL, not ConfigMap
 
