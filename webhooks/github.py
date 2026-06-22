@@ -1,5 +1,4 @@
 """FastAPI router: receives GitHub pull_request webhooks, dispatches Hatchet events."""
-import asyncio
 import hashlib
 import hmac
 import logging
@@ -32,10 +31,18 @@ def _verify_signature(body: bytes, header: str | None) -> None:
         raise HTTPException(status_code=401, detail="invalid signature")
 
 
-def _dispatch_pr_event(repo: str, pr_number: str, pr_url: str, diff_url: str, author: str) -> None:
+def _dispatch_pr_event(repo: str, pr_number: str, pr_url: str, diff_url: str, author: str, head_branch: str = "", attempt: int = 0) -> None:
     _get_hatchet().event.push(
         "github:pr_opened",
-        {"repo": repo, "pr_number": pr_number, "pr_url": pr_url, "diff_url": diff_url, "author": author},
+        {
+            "repo": repo,
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "diff_url": diff_url,
+            "author": author,
+            "head_branch": head_branch,
+            "attempt": attempt,
+        },
         additional_metadata={"pr_url": pr_url},
     )
     logger.info("dispatched github:pr_opened for %s#%s", repo, pr_number)
@@ -54,8 +61,6 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
 
     payload = await request.json()
     action = payload.get("action", "")
-    if action != "opened":
-        return {"status": "ignored", "action": action}
 
     pr = payload.get("pull_request", {})
     repo = payload.get("repository", {}).get("full_name", "")
@@ -63,7 +68,15 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
     pr_url = pr.get("html_url", "")
     diff_url = pr.get("diff_url", "")
     author = pr.get("user", {}).get("login", "")
+    head_branch = pr.get("head", {}).get("ref", "")
+
+    if action == "opened":
+        attempt = 0
+    elif action == "synchronize" and head_branch.startswith("praetor-coder/"):
+        attempt = 1
+    else:
+        return {"status": "ignored", "action": action}
 
     # Push to Hatchet in the background so GitHub gets a fast 200 and stops retrying.
-    background_tasks.add_task(_dispatch_pr_event, repo, pr_number, pr_url, diff_url, author)
-    return {"status": "ok", "dispatched": "github:pr_opened"}
+    background_tasks.add_task(_dispatch_pr_event, repo, pr_number, pr_url, diff_url, author, head_branch, attempt)
+    return {"status": "ok", "dispatched": "github:pr_opened", "attempt": attempt}
