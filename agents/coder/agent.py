@@ -164,6 +164,8 @@ async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> 
         )
         if comment_resp.status_code == 401:
             return "error: Vikunja token expired — coder complete but task not updated"
+        if comment_resp.status_code == 404:
+            return "note: Vikunja task not found — coder complete, task tracking skipped"
         comment_resp.raise_for_status()
         if done:
             done_resp = await client.post(
@@ -171,7 +173,8 @@ async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> 
                 json={"done": True},
                 headers=headers,
             )
-            done_resp.raise_for_status()
+            if done_resp.status_code not in (200, 404):
+                done_resp.raise_for_status()
     return "task updated"
 
 
