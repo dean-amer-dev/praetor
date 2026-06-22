@@ -27,13 +27,15 @@ class OpenHandsInput(BaseModel):
 
 async def _create_conversation(task_text: str) -> str:
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{_OPENHANDS_BASE}/api/conversations",
-            json={"initial_message": task_text},
-        )
+        resp = await client.post(f"{_OPENHANDS_BASE}/api/conversations", json={})
         resp.raise_for_status()
-        data = resp.json()
-        return data["conversation_id"]
+        conversation_id = resp.json()["conversation_id"]
+        msg = await client.post(
+            f"{_OPENHANDS_BASE}/api/conversations/{conversation_id}/message",
+            json={"message": task_text},
+        )
+        msg.raise_for_status()
+        return conversation_id
 
 
 async def _poll_until_done(conversation_id: str) -> dict:
