@@ -22,17 +22,21 @@ async def main() -> None:
     prompt = f"Task #{task_id}: {task_title}"
     if task_description:
         prompt += f"\n\nDescription: {task_description}"
+    # Always start with search_memory per Phase 21 condition 7.
+    # Prior context is included as a hint, but the agent must still call search_memory explicitly.
     if prior_context:
-        prompt += f"\n\nPrior memory context (search_memory already called):\n{prior_context}"
         prompt += (
-            f"\n\nBuild on these prior findings. Search the web only for gaps or new developments. "
+            f"\n\nNote: preliminary search_memory found these prior findings:\n{prior_context}"
+            f"\n\nCall search_memory(query='{task_title}', agent_id='research') to confirm, "
+            f"then search the web for gaps or new developments. "
             f"Store new findings under agent_id='research'. "
             f"Call add_memory with agent_id='task-{task_id}' with a brief completion note. "
             f"Call update_vikunja_task when done."
         )
     else:
         prompt += (
-            f"\n\nResearch this topic thoroughly. "
+            f"\n\nCall search_memory(query='{task_title}', agent_id='research') first. "
+            f"Research this topic thoroughly. "
             f"Store findings under agent_id='research'. "
             f"Call add_memory with agent_id='task-{task_id}' with a brief completion note. "
             f"Call update_vikunja_task when done."
