@@ -63,14 +63,15 @@ jobs:
         run: |
           STATIC_COMPONENTS=(coder research pipeline webhook qa reviewer benchmark)
 
-          # Discover factory-created agents (agents/*/Dockerfile not in static list)
+          # Discover factory-created agents (agents/*/Dockerfile, depth=1 only)
           FACTORY_AGENTS=()
-          while IFS= read -r df_path; do
+          for df_path in agents/*/Dockerfile; do
+            [[ -f "$df_path" ]] || continue
             agent=$(basename "$(dirname "$df_path")")
             skip=false
             for sc in "${STATIC_COMPONENTS[@]}"; do [[ "$agent" == "$sc" ]] && skip=true && break; done
             "$skip" || FACTORY_AGENTS+=("$agent")
-          done < <(find agents -maxdepth 2 -name Dockerfile 2>/dev/null)
+          done
 
           ALL_COMPONENTS=("${STATIC_COMPONENTS[@]}" "${FACTORY_AGENTS[@]}")
 
@@ -113,24 +114,7 @@ jobs:
           echo "rebuild=$JSON" >> "$GITHUB_OUTPUT"
 
           # Full matrix JSON for build-amd64 — static + discovered factory agents
-          MATRIX=$(python3 -c "
-import sys,json,glob,os
-c=json.loads(sys.argv[1])
-M={
-  'coder':    {'component':'coder',    'image':'amerenda/praetor-coder',    'dockerfile':'Dockerfile.coder-worker'},
-  'pipeline': {'component':'pipeline', 'image':'amerenda/praetor-pipeline', 'dockerfile':'Dockerfile.pipeline-worker'},
-  'research': {'component':'research', 'image':'amerenda/praetor-research', 'dockerfile':'Dockerfile.research-worker'},
-  'webhook':  {'component':'webhook',  'image':'amerenda/praetor-webhook',  'dockerfile':'Dockerfile.webhook-adapter'},
-  'qa':       {'component':'qa',       'image':'amerenda/praetor-qa',       'dockerfile':'Dockerfile.qa-worker'},
-  'reviewer': {'component':'reviewer', 'image':'amerenda/praetor-reviewer', 'dockerfile':'Dockerfile.reviewer-worker'},
-  'benchmark':{'component':'benchmark','image':'amerenda/praetor-benchmark','dockerfile':'Dockerfile.benchmark-worker'},
-}
-for df in glob.glob('agents/*/Dockerfile'):
-  name=os.path.basename(os.path.dirname(df))
-  if name not in M:
-    M[name]={'component':name,'image':f'amerenda/praetor-{name}','dockerfile':df}
-print(json.dumps({'include':[M[x] for x in c if x in M]}))
-" "$JSON")
+          MATRIX=$(python3 scripts/gen_matrix.py "$JSON")
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "Components to rebuild: $JSON"
 
