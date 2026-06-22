@@ -151,12 +151,22 @@ All new prompts (pre-PR review, reviewer memory instructions) are stored in Lang
 
 ## Phase 21 Ready Conditions
 
-1. `POST /api/v1/mcp/register` — pre-review loop runs before any GitHub write; Langfuse trace shows review iterations
-2. A manifest with a known bad pattern (e.g., `httpGet /health` on a server with no `/health`) is caught and fixed before the PR opens
-3. After 3 failed iterations, PR opens with `⚠️ auto-review: N issues unresolved` in the description
-4. Reviewer agent: on a second PR with the same issue type, the review comment references the prior memory
-5. Reviewer agent: does not write a duplicate memory when the issue is already stored
-6. Coder agent: Langfuse trace shows `search_memory` call as the first tool call on every run
-7. Research agent: on a repeated topic, Langfuse trace shows `search_memory` hit before any web search
-8. All agent memories are scoped by `agent_id` — no cross-contamination between repos or agent types
-9. Pre-review prompt is editable in Langfuse (`mcp-pre-review-system`) without a redeploy
+| # | Condition | Status |
+|---|-----------|--------|
+| 1 | `POST /api/v1/mcp/register` — pre-review loop runs before any GitHub write; Langfuse trace shows review iterations | ✅ |
+| 2 | A manifest with a known bad pattern (e.g., `httpGet /health` on a server with no `/health`) is caught and fixed before the PR opens | ✅ |
+| 3 | After 3 failed iterations, PR opens with `⚠️ auto-review: N issues unresolved` in the description | ✅ |
+| 4 | Reviewer agent: on a second PR with the same issue type, the review comment references the prior memory | ✅ |
+| 5 | Reviewer agent: does not write a duplicate memory when the issue is already stored | ✅ |
+| 6 | Coder agent: Langfuse trace shows `search_memory` call as the first tool call on every run | ✅ |
+| 7 | Research agent: on a repeated topic, Langfuse trace shows `search_memory` hit before any web search | ✅ |
+| 8 | All agent memories are scoped by `agent_id` — no cross-contamination between repos or agent types | ✅ |
+| 9 | Pre-review prompt is editable in Langfuse (`mcp-pre-review-system`) without a redeploy | ✅ |
+
+**Phase 21 completed 2026-06-22.** PRs shipped: #107 (coder prompt + research 403 fix), #108 (worker pre/post-call memory guarantees), #109 (Vikunja 404 + SSL error handling), #110 (async `search_memory`/`add_memory` for correct Langfuse span propagation).
+
+### Implementation notes
+
+- **Coder memory**: `search_memory` is called by the worker before `agent.run()` and its result injected into the prompt. Worker also post-calls `add_memory` after each run to guarantee storage even if the model skips it. Memory scoped to `coder-{owner}/{repo}`.
+- **Research memory**: same pre/post-call pattern. Subprocess receives `prior_context` in stdin and is instructed to confirm via an explicit `search_memory` call. Worker's pre-call appears as the first child span in Langfuse.
+- **Langfuse span propagation**: `search_memory` and `add_memory` are `async def` functions wrapping blocking HTTP via `asyncio.to_thread()`. Awaiting them directly (not via `run_in_executor`) keeps them in the async trace context, so `@observe()` creates proper child spans visible in every agent trace.
