@@ -17,17 +17,26 @@ async def main() -> None:
     task_id: int = data["task_id"]
     task_title: str = data["task_title"]
     task_description: str = data.get("task_description", "")
+    prior_context: str = data.get("prior_context", "")
 
     prompt = f"Task #{task_id}: {task_title}"
     if task_description:
         prompt += f"\n\nDescription: {task_description}"
-    prompt += (
-        f"\n\nResearch this topic thoroughly. "
-        f"Follow your system instructions to search and store findings under agent_id='research'. "
-        f"Also write a brief summary to add_memory under agent_id='task-{task_id}' "
-        f"(required for status tracking). "
-        f"When done, call update_vikunja_task with task_id={task_id} and your summary."
-    )
+    if prior_context:
+        prompt += f"\n\nPrior memory context (search_memory already called):\n{prior_context}"
+        prompt += (
+            f"\n\nBuild on these prior findings. Search the web only for gaps or new developments. "
+            f"Store new findings under agent_id='research'. "
+            f"Call add_memory with agent_id='task-{task_id}' with a brief completion note. "
+            f"Call update_vikunja_task when done."
+        )
+    else:
+        prompt += (
+            f"\n\nResearch this topic thoroughly. "
+            f"Store findings under agent_id='research'. "
+            f"Call add_memory with agent_id='task-{task_id}' with a brief completion note. "
+            f"Call update_vikunja_task when done."
+        )
 
     from agents.research.agent import build_agent
 

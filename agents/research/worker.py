@@ -11,6 +11,7 @@ from hatchet_sdk.types.concurrency import ConcurrencyExpression, ConcurrencyLimi
 from pydantic import BaseModel
 
 from common.langfuse_tools import langfuse_context, observe
+from common.memory_tools import add_memory, search_memory
 from common.metrics import start_metrics_server, task_invocations, task_active, task_duration
 
 
@@ -35,6 +36,15 @@ async def _run_research(input: ResearchInput, context: Context) -> dict:
     task_active.labels(agent=_AGENT_NAME).inc()
     t0 = time.monotonic()
     try:
+        # Phase 21 condition 7: search_memory is ALWAYS the first operation in the trace.
+        # Called here (before subprocess) so it appears first, and results are passed to the
+        # subprocess so the agent benefits even if it skips calling it directly.
+        loop = asyncio.get_event_loop()
+        prior = await loop.run_in_executor(
+            None, search_memory, input.task_title, "research"
+        )
+        prior_context = "\n".join(prior) if prior else ""
+
         # Run the agent in an isolated subprocess to prevent Hatchet SDK memory accumulation
         # from leaking into the worker process. Each task gets a clean Python heap.
         proc = await asyncio.create_subprocess_exec(
@@ -44,7 +54,8 @@ async def _run_research(input: ResearchInput, context: Context) -> dict:
             stderr=asyncio.subprocess.PIPE,
             env=os.environ.copy(),
         )
-        stdin_data = json.dumps(input.model_dump()).encode()
+        payload = {**input.model_dump(), "prior_context": prior_context}
+        stdin_data = json.dumps(payload).encode()
 
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -63,6 +74,15 @@ async def _run_research(input: ResearchInput, context: Context) -> dict:
         result = json.loads(stdout.decode())
         task_invocations.labels(agent=_AGENT_NAME, status="success").inc()
         langfuse_context.update_current_trace(output=result.get("summary", ""))
+
+        # Phase 21: always store completion note so task status is trackable.
+        summary = result.get("summary", "")
+        if summary:
+            await loop.run_in_executor(
+                None, add_memory,
+                f"research task #{input.task_id} ({input.task_title}) completed: {summary[:500]}",
+                f"task-{input.task_id}",
+            )
         return result
     except Exception:
         task_invocations.labels(agent=_AGENT_NAME, status="error").inc()
