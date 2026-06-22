@@ -30,6 +30,7 @@
 | 25 | Voice Dispatch | ⬜ Pending | Voice input → OWU → lm_praetor_dispatch pipeline |
 | 26 | Control Plane UI | ⬜ Pending | Praetor "single pane of glass": agent matrix (skills × agents toggle), MCP registry panel, task log viewer, skill prompt editor. Requires Phase 22 (skills API). NOT Ecdysis. |
 | 27 | Spec Layer + Planning Conversation | ⬜ Pending | OWU planning agent produces structured TOML spec before dispatch; Mem0-seeded pre-fill; user approves before agent runs; coder reads spec for unambiguous requirements. See phase-27.md. **Priority: high — should precede 22-26.** |
+| 28 | Coder Context Management + Feature Decomposition | ⬜ Pending | Three-layer fix for coder OOM: (28a) truncate tool outputs at source; (28b) Mem0 progress checkpoints every 8 actions for crash recovery; (28c) multi-feature specs dispatch pipeline:feature_decompose — sequential inline coder runs, one feature per clean context, idempotent Mem0 resume. See phase-28.md. Requires Phase 27 spec layer. |
 
 ---
 
