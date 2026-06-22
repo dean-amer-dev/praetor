@@ -5,6 +5,7 @@ from datetime import timedelta
 from hatchet_sdk import Context, Hatchet
 from hatchet_sdk.types.concurrency import ConcurrencyExpression, ConcurrencyLimitStrategy
 from pydantic import BaseModel
+from pydantic_ai.usage import UsageLimits
 
 from .agent import build_agent
 from common.langfuse_tools import langfuse_context, observe
@@ -49,7 +50,7 @@ async def _run_research(input: ResearchInput, context: Context) -> dict:
     task_active.labels(agent=_AGENT_NAME).inc()
     t0 = time.monotonic()
     try:
-        result = await agent.run(prompt)
+        result = await agent.run(prompt, usage_limits=UsageLimits(request_limit=30))
         task_invocations.labels(agent=_AGENT_NAME, status="success").inc()
         langfuse_context.update_current_trace(output=result.output)
         return {"summary": result.output, "task_id": input.task_id}
