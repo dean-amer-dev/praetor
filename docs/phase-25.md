@@ -1,173 +1,196 @@
-# Phase 25 — Control Plane UI
+# Phase 25 — Voice Dispatch
 
-**Goal:** A purpose-built React dashboard at `praetor.amer.dev` for platform operations — trigger agents, monitor runs, edit prompts, run benchmarks, manage MCPs, and scaffold new components. Replaces tab-switching between Hatchet, Langfuse, and claw.amer.dev for routine platform tasks.
+**Goal:** Speak a command to Home Assistant → Praetor agent runs → HA announces the result via TTS. Voice is a first-class dispatch interface, identical in capability to claw.amer.dev or opencode.
 
 ## Pre-conditions
 
-- Phase 19 complete (voice dispatch working — all dispatch paths confirmed stable)
-- `POST /api/v1/dispatch` and `GET /api/v1/status/{task_id}` live
-- Benchmark runner from Phase 14 working (UI wraps existing backend)
-- Scaffold worker from Phase 11 working (UI wraps existing `agent:scaffold` event)
-- MCP factory from Phase 15 working (UI wraps `POST /api/v1/mcp/register`)
-- Phase 12 health check passing (platform must be fully verified before adding UI complexity)
+- Phase 15 complete (MCP factory stable — platform fully instrumented)
+- Phase 14 complete (quality baselines established — voice must hit known-good agents)
+- `POST /api/v1/dispatch` live (Phase 11)
+- `GET /api/v1/status/{task_id}` live (status polling endpoint)
+- Piper TTS running (already in `llm-agents` stack on mac-mini-m4)
+- Home Assistant at `https://ha.amer.dev` with `$HA_TOKEN` available
 
-## Design Principles
-
-This is a **control plane**, not a chat interface. OpenWebUI (`claw.amer.dev`) stays for conversation. Praetor UI (`praetor.amer.dev`) is for platform operations only.
-
-Do not re-implement what Hatchet or Langfuse already do well. Link out to them for deep drill-downs.
-
-## Stack
-
-| Layer | Choice | Why |
-|-------|--------|-----|
-| Frontend | React + Vite | Already in stack (ecdysis uses React) |
-| Backend | FastAPI | Already in `praetor/webhooks/app.py` — extend with new router |
-| Auth | Existing amer.dev SSO | No new auth infra |
-
-New code lives in:
-- `praetor/ui/` — React app (built by CI → nginx serves static assets)
-- `praetor/webhooks/ui_api.py` — new FastAPI router for UI-specific endpoints, mounted on existing app
-
-## Feature Areas
-
-### Panel 1: Run Dashboard
-
-Unified view of recent agent runs across Hatchet + Langfuse.
+## Architecture
 
 ```
-Last 20 runs
-┌──────────┬──────────┬──────────┬──────────┬──────────┐
-│ Agent    │ Task     │ Status   │ Duration │ Trace    │
-├──────────┼──────────┼──────────┼──────────┼──────────┤
-│ research │ #1234    │ ✓ Done   │ 3m 12s   │ [View]   │
-│ coder    │ #1233    │ ✓ Done   │ 8m 45s   │ [View]   │
-│ reviewer │ PR #88   │ ✗ Failed │ 1m 02s   │ [View]   │
-└──────────┴──────────┴──────────┴──────────┴──────────┘
+"Hey, research Tailscale exit nodes"
+          │
+          ▼
+  Home Assistant
+  (voice command intent: praetor_dispatch)
+          │
+          ▼
+  HA → REST API → POST /api/v1/dispatch
+          │
+          ▼
+  Hatchet dispatches agent
+          │
+          ▼
+  HA polls GET /api/v1/status/{task_id} (every 30s, up to 20 min)
+          │
+          ▼
+  done=true → HA calls piper TTS with mem0_summary
+          │
+          ▼
+  HA announces result via media player
 ```
 
-Backend: `GET /api/ui/runs` — pulls from Hatchet API, merges with Langfuse trace IDs. No re-implementation of Hatchet's full UI. "View" links go to `hatchet.amer.dev` or `langfuse.amer.dev`.
+No new infrastructure. Voice uses the same dispatch API as every other interface.
 
-Auto-refreshes every 10s.
+## What Gets Built
 
----
+### 16a — HA Intent Script (`praetor_dispatch`)
 
-### Panel 2: Trigger Panel
+A Home Assistant script that calls the Praetor dispatch API and polls for results.
 
-Dispatch any agent without opening Vikunja or crafting a curl command.
+Add to `ha.amer.dev` config (via `docker exec homeassistant` → `/config/scripts.yaml` or UI):
 
-```
-Agent type: [ research ▾ ]
-Title:      [ Research Tailscale exit node ACL interaction ]
-[ Trigger → ]
-```
+```yaml
+praetor_dispatch:
+  alias: "Dispatch Praetor Agent"
+  description: "Send a task to the Praetor platform and announce the result."
+  fields:
+    task_title:
+      description: "The task to run"
+      example: "Research Tailscale exit nodes"
+    task_type:
+      description: "research | code | pipeline"
+      default: "research"
+  sequence:
+    - service: rest_command.praetor_dispatch
+      data:
+        title: "{{ task_title }}"
+        type: "{{ task_type }}"
+      response_variable: dispatch_response
 
-Posts to `POST /api/v1/dispatch`. Response shows task_id and links to Hatchet run. New run appears in Run Dashboard within 10s.
+    - variables:
+        task_id: "{{ dispatch_response.content | from_json | attr('task_id') }}"
 
----
+    - service: tts.speak
+      data:
+        message: "Got it. Running {{ task_type }} task. I'll let you know when it's done."
+        media_player_entity_id: media_player.living_room
 
-### Panel 3: Prompt Quick-Edit
-
-Lists current production prompts from Langfuse. Click to open the prompt editor.
-
-```
-Prompts
-┌─────────────────────┬─────────┬────────────────┐
-│ Name                │ Version │ Last modified  │
-├─────────────────────┼─────────┼────────────────┤
-│ coder-system        │ v4      │ 2026-06-15     │
-│ research-system     │ v3      │ 2026-06-10     │
-│ reviewer-system     │ v2      │ 2026-06-01     │
-│ scaffold-system     │ v1      │ 2026-06-18     │
-└─────────────────────┴─────────┴────────────────┘
-[ Open in Langfuse ↗ ]
-```
-
-Backend: `GET /api/ui/prompts` proxies `GET /api/public/prompts` from Langfuse API.
-
----
-
-### Panel 4: Benchmark Runner
-
-Run eval datasets from the UI without the CLI script (Phase 14 backend is reused).
-
-```
-Dataset:  [ research-eval ▾ ]    (5 items)
-Model:    [ qwen3-35b ▾ ]
-Prompt:   [ research-system:v3 ▾ ]
-[ Run Benchmark → ]
-
-Running... [3/5] ██████░░░░ 60%
-
-Results:
-  Mean score: 0.87
-  Min score:  0.72
-  [ View in Langfuse ↗ ]
+    - repeat:
+        count: 40  # max 20 minutes (30s × 40)
+        sequence:
+          - delay: "00:00:30"
+          - service: rest_command.praetor_status
+            data:
+              task_id: "{{ task_id }}"
+            response_variable: status_response
+          - if:
+              - condition: template
+                value_template: >
+                  {{ (status_response.content | from_json).done == true }}
+            then:
+              - service: tts.speak
+                data:
+                  message: >
+                    Praetor result: {{ (status_response.content | from_json).tts_summary }}
+                  media_player_entity_id: media_player.living_room
+              - stop: "Task complete"
 ```
 
-Backend: `POST /api/ui/benchmark` — dispatches N `agent:benchmark` Hatchet events, streams progress via SSE.
+### 16b — HA REST Commands
 
----
+Add to `/config/configuration.yaml`:
 
-### Panel 5: Scaffold Form
+```yaml
+rest_command:
+  praetor_dispatch:
+    url: "https://praetor.amer.dev/api/v1/dispatch"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ states('input_text.praetor_api_key') }}"
+      Content-Type: application/json
+    payload: '{"title": "{{ title }}", "type": "{{ type }}"}'
 
-Form-based version of the OpenWebUI scaffold conversation.
-
-```
-Type:  [ Agent ▾ ]
-Name:  [ grafana-monitor ]
-Description:
-  ┌─────────────────────────────────────────┐
-  │ Monitors Grafana alerts and creates     │
-  │ Vikunja tasks when alerts fire.         │
-  └─────────────────────────────────────────┘
-[ Scaffold → ]
-```
-
-Backend: `POST /api/ui/scaffold` — calls `POST /api/v1/dispatch` with `type=scaffold`.
-
----
-
-### Panel 6: MCP Registry
-
-View and manage registered MCPs (Phase 15 backend).
-
-```
-Registered MCPs
-┌──────────────────────┬──────────┬──────────┬───────────┐
-│ Name                 │ Status   │ Tools    │ Actions   │
-├──────────────────────┼──────────┼──────────┼───────────┤
-│ mcp-searxng          │ ✓ Healthy│ 3        │ [Remove]  │
-│ github-mcp           │ ✓ Healthy│ 12       │ [Remove]  │
-│ kubernetes-readonly  │ ✓ Healthy│ 8        │ [Remove]  │
-│ kubernetes-rw        │ ✓ Healthy│ 12       │ [Remove]  │
-└──────────────────────┴──────────┴──────────┴───────────┘
-[ + Register MCP ]
+  praetor_status:
+    url: "https://praetor.amer.dev/api/v1/status/{{ task_id }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ states('input_text.praetor_api_key') }}"
 ```
 
-Backend: `GET /api/v1/mcp` (Phase 15 endpoint). Register form posts to `POST /api/v1/mcp/register`.
+`input_text.praetor_api_key` — a helper that stores the `PRAETOR_API_KEY` value. Set it once in the HA UI; never hardcode in YAML.
 
----
+### 16c — Voice Intent Registration
 
-## Deployment
+Register a custom intent in HA's conversation integration so the local voice assistant parses "research X" and "code X in repo Y" into structured calls.
 
-New component in `praetor` repo: `praetor-ui`.
+```yaml
+# /config/custom_sentences/en/praetor.yaml
+language: "en"
+intents:
+  PraetorResearch:
+    data:
+      - sentences:
+          - "research {topic}"
+          - "look up {topic}"
+          - "find information about {topic}"
+  PraetorCode:
+    data:
+      - sentences:
+          - "code {task} in {repo}"
+          - "implement {task} in repo {repo}"
+          - "write code for {task}"
+```
 
-CI adds a build step for the `praetor-ui` image (nginx serving React static assets).
+Intent handlers in `/config/intent_script.yaml`:
 
-**k3s manifests:** Add `praetor-ui` Deployment + Service via app-factory. Existing `praetor.amer.dev` ingress routes:
-- `/` → praetor-ui (nginx)
-- `/api/` → webhook-adapter (FastAPI)
-- `/webhooks/` → webhook-adapter (FastAPI, existing)
+```yaml
+PraetorResearch:
+  action:
+    service: script.praetor_dispatch
+    data:
+      task_title: "Research: {{ topic }}"
+      task_type: research
+  speech:
+    text: "Starting research on {{ topic }}."
 
-## Phase 20 Ready Conditions
+PraetorCode:
+  action:
+    service: script.praetor_dispatch
+    data:
+      task_title: "{{ task }}"
+      task_type: code
+  speech:
+    text: "Got it. I'll start coding {{ task }}."
+```
 
-1. `https://praetor.amer.dev` loads the control plane UI (requires auth)
-2. Run Dashboard shows last 20 runs auto-refreshing every 10s
-3. Trigger Panel: dispatch `type=research` → run appears in dashboard within 10s
-4. Prompt Quick-Edit: lists all Langfuse prompts with correct versions
-5. Benchmark Runner: 5-item eval suite completes and shows mean score inline
-6. Scaffold Form: submit agent scaffold → draft PR opens on `amerenda/praetor` within 3 minutes
-7. MCP Registry: lists all registered MCPs with tool counts and health status
-8. All existing webhook paths (`/webhooks/vikunja`, `/webhooks/github`, `/api/v1/dispatch`) still work
-9. `praetor-ui` pod Running, multi-arch image built by CI
+### 16d — TTS Response Length Handling
+
+Agent research results can be long. The TTS output must be trimmed to something speakable.
+
+Add `tts_summary` field to the `/api/v1/status` response:
+
+```python
+# In webhooks/dispatch_api.py status endpoint
+mem0_summary = memories[0]["memory"] if memories else None
+tts_summary = None
+if mem0_summary:
+    # First 2 sentences only for TTS — full summary still in mem0_summary
+    sentences = mem0_summary.split(". ")
+    tts_summary = ". ".join(sentences[:2]) + "."
+
+return {
+    "task_id": task_id,
+    "done": bool(mem0_summary),
+    "mem0_summary": mem0_summary,
+    "tts_summary": tts_summary,
+}
+```
+
+HA reads `tts_summary` instead of `mem0_summary` for the spoken result.
+
+## Phase 19 Ready Conditions
+
+1. "Hey assistant, research Tailscale exit nodes" → `agent:research` Hatchet run starts within 15s
+2. HA announces "Got it. Running research task." immediately after dispatch
+3. HA polls status and announces the TTS summary when `done=true` (within 20 minutes)
+4. `PraetorCode` intent: "code add /healthz to ecdysis" → coder agent starts, HA confirms
+5. `input_text.praetor_api_key` helper holds the key — no hardcoded secrets in HA YAML
+6. TTS summary is ≤3 sentences (not raw dump of full research output)
+7. Works from both living room and bedroom media players

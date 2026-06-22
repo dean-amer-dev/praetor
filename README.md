@@ -108,6 +108,29 @@ Secondary triggers
 
 ---
 
+## Creating a New Agent
+
+Agents follow a standard structure: a PydanticAI `Agent` in `agent.py`, a Hatchet worker in `worker.py`, and a `Dockerfile.{name}-worker`. Adding an agent currently involves these steps:
+
+**1. Scaffold** — dispatch `agent:scaffold` (Phase 11 scaffold-worker) or `POST /api/v1/agent/create` (Phase 23, coming). The scaffold-worker opens a draft PR on this repo with:
+- `agents/{name}/agent.py` — PydanticAI agent skeleton with shared tools wired (`search_memory`, `add_memory`, any domain tools)
+- `agents/{name}/worker.py` — Hatchet worker listening on `agent:{name}`, concurrency=1, retries=1
+- `Dockerfile.{name}-worker` — same base image as other workers
+
+**2. Fill in tools** — edit the scaffolded `agent.py` to add the actual tool implementations. The skeleton wires the harness; the domain logic is still written by the coder agent or a human.
+
+**3. Wire the Hatchet event** — add `agent:{name}` to the event routing in `webhooks/github_webhook.py` and `webhooks/vikunja_webhook.py` if Vikunja label dispatch is needed.
+
+**4. CI + deploy** — merge the PR → `detect-changes` in CI builds `Dockerfile.{name}-worker` → publishes `amerenda/praetor-{name}:sha-*` → creates a deploy PR on `k3s-dean-gitops` → merge that PR → ArgoCD rolls out the pod.
+
+**5. System prompt** — create `{name}-system` in Langfuse. The worker calls `get_system_prompt("{name}-system", fallback=...)` at startup; edit the prompt in the UI anytime without a redeploy.
+
+**6. Smoke test** — dispatch a canary task to `agent:{name}` via Hatchet and verify the worker picks it up.
+
+Phase 23 (Agent Factory) automates steps 2–6 into a single `POST /api/v1/agent/create` call.
+
+---
+
 ## Code Layout
 
 ```
@@ -151,9 +174,10 @@ tests/
 | 17 | Intelligent MCP Agent (`/api/v1/mcp/request`, research → register pipeline) | ✅ Complete |
 | 18 | Kubernetes MCP (deploy `mcp-server-kubernetes` via Phase 17 pipeline) | ✅ Complete |
 | 21 | Mem0 Integration + Pre-PR Review Loop | ✅ Complete |
-| 22 | Coder Re-Dispatch Loop (reviewer REQUEST_CHANGES → re-dispatch coder, cap 2) | ⬜ Next |
-| 23 | Inline Arbitration (loop exhausted → focused LLM call, decision memo to mem0 + PR) | ⬜ Pending |
-| 24 | Voice Dispatch | ⬜ Pending |
-| 25 | Control Plane UI | ⬜ Pending |
+| 22 | Coder Re-Dispatch Loop (reviewer REQUEST_CHANGES → re-dispatch coder, cap 2) | 🔄 Next |
+| 23 | Agent Factory (`POST /api/v1/agent/create` → scaffold → deploy → smoke test in one call) | ⬜ Pending |
+| 24 | Inline Arbitration (loop exhausted → focused LLM call, decision memo to mem0 + PR) | ⬜ Pending |
+| 25 | Voice Dispatch | ⬜ Pending |
+| 26 | Control Plane UI | ⬜ Pending |
 
-See `docs/status.md` for full notes. See `docs/phase-N.md` for each phase's design and ready conditions. Note: phases 19 and 20 were renumbered to 24 and 25 to reflect actual execution order.
+See `docs/status.md` for full notes. See `docs/phase-N.md` for each phase's design and ready conditions.

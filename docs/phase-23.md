@@ -1,84 +1,150 @@
-# Phase 23 — Inline Arbitration
+# Phase 23 — Agent Factory
 
-**Goal:** When the Phase 22 coder re-dispatch loop exhausts its attempts (2 failed tries, reviewer still `REQUEST_CHANGES`), fire a focused inline LLM call that reads both sides, does a targeted web search on the specific dispute, and writes a decision memo to mem0 and the PR. No new agent process — inline, like the pre-PR review loop in Phase 21.
+**Goal:** Go from "I want a new agent that does X" to a running, smoke-tested Hatchet worker with a Langfuse system prompt — in one API call or one conversation turn in OpenWebUI. Phase 11 (Scaffold Worker) opens the PR. Phase 23 closes the loop: merge, build, deploy, wire the event, create the prompt, verify it works.
 
 ---
 
 ## Pre-conditions
 
-- Phase 22 complete (coder re-dispatch loop live, attempt counter in place)
-- The dispute scenario exists in the wild (loop has been seen exhausting in practice)
+- Phase 22 complete
+- Phase 11 complete (scaffold-worker live, `agent:scaffold` event working, Jinja templates in `praetor/templates/agent/`)
+- Phase 16 complete (deploy PR pipeline proven — CI creates k3s-dean-gitops PR after image build)
+- Langfuse API accessible for programmatic prompt creation
 
 ---
 
 ## What Gets Built
 
-### Trigger
+### New endpoint: `POST /api/v1/agent/create`
 
-Fires from `github_webhook.py` when:
-1. `pull_request_review` event with `state == "REQUEST_CHANGES"`
-2. Attempt counter == 2 (loop exhausted — this is the third reviewer rejection)
-
-### Inline arbitration call
-
-A single LiteLLM call (same pattern as `_call_review_llm` in `mcp_factory.py`, not a full agent dispatch). Takes:
-- The PR diff
-- The reviewer's last `REQUEST_CHANGES` comment (the specific issues raised)
-- The coder's last commit message + changed files
-
-System prompt instructs the LLM to:
-1. Identify the specific technical dispute (e.g. "reviewer wants ConfigMap, coder used Secret")
-2. Do a targeted web search via LiteLLM MCP tools (`lm_web_search`) on the dispute
-3. Return a structured decision: `recommended_approach`, `rationale`, `relevant_links`
-
-This is NOT a full research agent run — it's one focused call with a tight budget (max 3 tool calls).
-
-### Outputs
-
-**PR comment** (posted via `amerenda-reviewer` app):
-```
-> 🏛️ **Cicero Arbiter** — loop exhausted after 2 attempts
-
-## Dispute
-<what the reviewer and coder disagreed on>
-
-## Recommendation
-<recommended_approach + rationale + links>
-
-## Decision memo
-Stored in mem0 under `reviewer-{repo}` so future runs don't repeat this dispute.
-Human review required to merge.
+```python
+class AgentCreateRequest(BaseModel):
+    name: str           # kebab-case, e.g. "grafana-monitor"
+    description: str    # natural language: what it does, what it has access to
+    event: str          # Hatchet event name, e.g. "agent:grafana-monitor"
+    tools: list[str] = []   # optional: hint which shared tools to wire (e.g. "search_memory", "web_search")
 ```
 
-**mem0 write** — structured entry scoped to `reviewer-{repo}`:
+The endpoint orchestrates the full lifecycle — it does not return until the agent is running (or it times out with a status URL).
+
+### Lifecycle
+
 ```
-pattern: <dispute type>
-example: <repo> PR #<number>
-resolution: <recommended_approach>
-context: <rationale summary>
+POST /api/v1/agent/create
+    │
+    ├─ 1. Dispatch agent:scaffold → scaffold-worker opens draft PR on amerenda/praetor
+    │       PR includes: agents/{name}/agent.py, agents/{name}/worker.py, Dockerfile.{name}-worker
+    │       PR also patches: webhook-adapter event routing to include the new event name
+    │       PR also patches: CI detect-changes matrix to include the new component
+    │
+    ├─ 2. Merge the scaffold PR (auto-merge since it's a known-good skeleton)
+    │
+    ├─ 3. CI builds image → creates deploy PR on k3s-dean-gitops (existing pipeline)
+    │
+    ├─ 4. Auto-merge the deploy PR → ArgoCD rolls out the new worker pod
+    │
+    ├─ 5. Create Langfuse system prompt
+    │       Name: {name}-system
+    │       Initial content: generated from description + standard agent template
+    │       (editable from UI immediately — the worker fetches it at startup)
+    │
+    ├─ 6. Smoke test
+    │       Dispatch a test task to agent:{name} with a canary payload
+    │       Poll Hatchet for up to 60s — verify the run completes (not errors)
+    │
+    └─ 7. Return status: { "agent": name, "event": event, "pod": ..., "langfuse_prompt": ..., "smoke_test": "passed" }
 ```
 
-### What the arbitration does NOT do
+### Auto-merge policy
 
-- Does not re-dispatch coder again — the PR stays open for human review after arbitration
-- Does not override the reviewer's verdict — the PR still has `REQUEST_CHANGES`
-- Does not run the full research pipeline — one LLM call, capped tool budget
-- Does not auto-merge even if the recommendation is clear
+Steps 2 and 4 auto-merge because the scaffold output is deterministic (Jinja template) and the deploy PR contains only image tag changes — both are structurally safe to merge without human review. This matches the reasoning behind Phase 16's app pipeline.
+
+If auto-merge is disabled or either PR fails CI, the endpoint returns a partial status with the PR URLs for manual completion.
+
+### Scaffold PR content (what the scaffold-worker generates)
+
+```
+agents/{name}/
+├── __init__.py
+├── agent.py          ← PydanticAI Agent, tools wired from `tools` param
+└── worker.py         ← Hatchet worker, event={event}, concurrency=1, retries=1
+
+Dockerfile.{name}-worker   ← copies from Dockerfile.coder-worker pattern
+
+# Patches to existing files:
+webhook-adapter/router.py      ← adds event → worker mapping
+.github/workflows/ci.yml       ← adds {name} to detect-changes component matrix
+k3s/apps/praetor/{name}/       ← deployment + service manifests (new dir in scaffold PR)
+```
+
+### Langfuse prompt creation
+
+Uses the Langfuse API to create a new prompt version:
+
+```python
+langfuse.create_prompt(
+    name=f"{name}-system",
+    prompt=render_template("system_prompt.jinja", name=name, description=description, tools=tools),
+    labels=["production"],
+)
+```
+
+The template produces a prompt in the same style as `coder-system` and `research-system` — it's immediately editable in the Langfuse UI without a redeploy.
+
+### Smoke test
+
+The smoke test dispatches:
+```python
+{"title": f"smoke-test-{name}", "description": "Verify the agent is reachable. Respond with OK.", "type": name}
+```
+to `agent:{name}` via Hatchet. A pass means the worker picked it up and returned a result within 60 seconds without erroring. The agent doesn't need to produce meaningful output — it just needs to not crash.
+
+---
+
+## OpenWebUI flow (via praetor-mcp)
+
+```
+User: "I need an agent that monitors Grafana alerts and creates Vikunja tasks"
+
+Model: calls lm_praetor_create_agent({
+    "name": "grafana-monitor",
+    "description": "Monitors Grafana webhook alerts. On alert: searches mem0 for known remediation, creates a Vikunja task with severity + runbook link.",
+    "event": "agent:grafana-monitor",
+    "tools": ["search_memory", "add_memory"]
+})
+
+Model: "Agent grafana-monitor is live. Hatchet event: agent:grafana-monitor.
+        System prompt at langfuse.amer.dev (grafana-monitor-system) — edit it to add
+        the actual alert logic. Smoke test: passed."
+```
+
+---
+
+## What Gets Added to `praetor-mcp`
+
+New tool exposed at `/mcp`:
+
+```
+lm_praetor_create_agent(name, description, event, tools=[]) → status dict
+```
+
+This makes agent creation available from any OpenWebUI conversation, identical to how `lm_praetor_dispatch` triggers tasks and `lm_praetor_request_mcp` registers MCP servers.
+
+---
+
+## What Does NOT Get Built
+
+- **Tool implementation** — the scaffold produces stubs. The model or human still fills in the actual tool logic. The factory wires the harness; it doesn't write the domain-specific code.
+- **Eval dataset** — Phase 14 pattern (create eval dataset + baseline run) is not automated here. Phase 23 creates the agent and verifies it boots; ongoing quality tracking is a separate concern.
+- **Removing agents** — no `DELETE /api/v1/agent` in this phase. Teardown is a manual k3s + GitHub operation.
 
 ---
 
 ## Ready Conditions
 
-- Arbitration fires after attempt 2 exhaustion, not before
-- PR comment identifies the dispute and gives a recommendation with sources
-- Decision written to mem0 so the next coder run on a similar task finds it immediately
-- Human still has final say — the PR stays in `REQUEST_CHANGES` state
-
----
-
-## Notes
-
-- The goal is to break the coder-reviewer loop with *information*, not with authority. The arbitration adds context the coder didn't have; it doesn't force an outcome.
-- If arbitration repeatedly recommends the same thing but the coder keeps ignoring it, that's a prompt quality problem, not an architecture problem.
-- Prefer repo-specific preferences (gitops, containers, stateless, mac-mini-m4 for DB, version pinning) as standing context in the arbitration system prompt so recommendations stay consistent with the platform.
-- The Langfuse prompt name for the arbitration system prompt: `arbitration-system`.
+1. `POST /api/v1/agent/create` with a valid name + description returns within 5 minutes with a running pod
+2. The new agent's Hatchet event (`agent:{name}`) is routable — dispatching to it reaches the correct worker
+3. Langfuse shows `{name}-system` prompt, editable without a redeploy
+4. Smoke test passes: the agent picks up the canary task and returns a result without crashing
+5. `lm_praetor_create_agent` tool available in OpenWebUI via praetor-mcp — agent creation works from a chat message
+6. A second call with the same `name` is idempotent: detects the existing agent, skips scaffold + deploy, returns current status
