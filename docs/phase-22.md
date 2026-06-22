@@ -61,7 +61,7 @@ The coder agent pushes a new commit to the same branch (not a new PR). The revie
 
 ## What NOT to Build
 
-- No moderator agent yet (Phase 23)
+- No moderator agent yet (Phase 24)
 - No changes to the reviewer — it reviews the same way regardless of attempt number
 - No changes to how PRs are opened or merged
 
