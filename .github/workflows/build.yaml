@@ -15,8 +15,6 @@ jobs:
     runs-on: arc-runner-praetor
     steps:
       - uses: actions/checkout@v6
-      - name: Free disk space
-        run: rm -rf ~/.cache ~/.local/share/Playwright 2>/dev/null || true
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
