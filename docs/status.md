@@ -29,6 +29,22 @@
 | 24 | Inline Arbitration | ⬜ Pending | Re-dispatch loop exhausted → focused LLM call → decision memo written to mem0 + PR comment |
 | 25 | Voice Dispatch | ⬜ Pending | Voice input → OWU → lm_praetor_dispatch pipeline |
 | 26 | Control Plane UI | ⬜ Pending | Praetor "single pane of glass": agent matrix (skills × agents toggle), MCP registry panel, task log viewer, skill prompt editor. Requires Phase 22 (skills API). NOT Ecdysis. |
+| 27 | Spec Layer + Planning Conversation | ⬜ Pending | OWU planning agent produces structured TOML spec before dispatch; Mem0-seeded pre-fill; user approves before agent runs; coder reads spec for unambiguous requirements. See phase-27.md. **Priority: high — should precede 22-26.** |
+
+---
+
+## Platform-Wide Rules
+
+### Mem0 — all agents, always
+
+Every agent (coder, reviewer, research, QA, scaffold, and any future agents) MUST:
+1. Call `search_memory` at the start of every task (before the agent runs)
+2. Call `add_memory` at the end of every task (after the agent completes)
+3. Write a summary to both the agent-scoped namespace (`"<agent>-<repo>"`) AND the shared `"planner-global"` namespace (Phase 27+)
+
+No exceptions. This is not optional per-agent — it is a system requirement.
+The `planner-global` namespace is what enables the OWU planning conversation to answer
+"which blog?" without asking the user.
 
 ---
 
