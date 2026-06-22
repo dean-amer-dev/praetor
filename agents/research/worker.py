@@ -37,12 +37,9 @@ async def _run_research(input: ResearchInput, context: Context) -> dict:
     t0 = time.monotonic()
     try:
         # Phase 21 condition 7: search_memory is ALWAYS the first operation in the trace.
-        # Called here (before subprocess) so it appears first, and results are passed to the
-        # subprocess so the agent benefits even if it skips calling it directly.
-        loop = asyncio.get_event_loop()
-        prior = await loop.run_in_executor(
-            None, search_memory, input.task_title, "research"
-        )
+        # Awaited directly (not via run_in_executor) so @observe() creates a child span
+        # in the current Langfuse trace, making it visible as the first tool call.
+        prior = await search_memory(input.task_title, "research")
         prior_context = "\n".join(prior) if prior else ""
 
         # Run the agent in an isolated subprocess to prevent Hatchet SDK memory accumulation
@@ -78,8 +75,7 @@ async def _run_research(input: ResearchInput, context: Context) -> dict:
         # Phase 21: always store completion note so task status is trackable.
         summary = result.get("summary", "")
         if summary:
-            await loop.run_in_executor(
-                None, add_memory,
+            await add_memory(
                 f"research task #{input.task_id} ({input.task_title}) completed: {summary[:500]}",
                 f"task-{input.task_id}",
             )

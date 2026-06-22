@@ -1,5 +1,4 @@
 """Hatchet worker: handles agent:code events (Hatchet SDK v1.x)."""
-import asyncio
 import os
 import re
 import shutil
@@ -61,12 +60,9 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
     memory_agent_id = f"coder-{repo}"
 
     # Phase 21 condition 6: search_memory is ALWAYS the first operation.
-    # Called here (before agent.run) so it appears first in the Langfuse trace.
-    # Results are injected into the prompt so the agent benefits even if it skips the call.
-    loop = asyncio.get_event_loop()
-    prior = await loop.run_in_executor(
-        None, search_memory, f"{input.task_title} {input.task_description}", memory_agent_id
-    )
+    # Awaited directly (not via run_in_executor) so @observe() creates a child span
+    # in the current Langfuse trace, making it visible as the first tool call.
+    prior = await search_memory(f"{input.task_title} {input.task_description}", memory_agent_id)
     prior_context = "\n".join(prior) if prior else "No prior memory found for this repo."
 
     prompt = (
@@ -90,13 +86,11 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
         langfuse_context.update_current_trace(output=result.output)
 
         # Phase 21 condition 6: always store a memory after the task, even if the model skipped it.
-        await loop.run_in_executor(
-            None, add_memory,
+        await add_memory(
             f"Task #{input.task_id} ({input.task_title}): {result.output}",
             memory_agent_id,
         )
-        await loop.run_in_executor(
-            None, add_memory,
+        await add_memory(
             f"coder completed task #{input.task_id}: {input.task_title}. result: {str(result.output)[:500]}",
             f"task-{input.task_id}",
         )
