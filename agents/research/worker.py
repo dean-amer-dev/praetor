@@ -1,24 +1,17 @@
 """Hatchet worker: handles agent:research events (Hatchet SDK v1.x)."""
+import asyncio
+import json
+import os
+import sys
 import time
 from datetime import timedelta
 
 from hatchet_sdk import Context, Hatchet
 from hatchet_sdk.types.concurrency import ConcurrencyExpression, ConcurrencyLimitStrategy
 from pydantic import BaseModel
-from pydantic_ai.usage import UsageLimits
 
-from .agent import build_agent
 from common.langfuse_tools import langfuse_context, observe
 from common.metrics import start_metrics_server, task_invocations, task_active, task_duration
-
-_agent = None
-
-
-def _get_agent():
-    global _agent
-    if _agent is None:
-        _agent = build_agent()
-    return _agent
 
 
 class ResearchInput(BaseModel):
@@ -28,6 +21,7 @@ class ResearchInput(BaseModel):
 
 
 _AGENT_NAME = "research"
+_SUBPROCESS_TIMEOUT = 600  # 10 minutes
 
 
 @observe()
@@ -37,23 +31,39 @@ async def _run_research(input: ResearchInput, context: Context) -> dict:
         input=input.model_dump(),
         tags=["research", f"task-{input.task_id}"],
     )
-    prompt = f"Task #{input.task_id}: {input.task_title}"
-    if input.task_description:
-        prompt += f"\n\nDescription: {input.task_description}"
-    prompt += (
-        f"\n\nResearch this topic thoroughly. "
-        f"Follow your system instructions to search and store findings under agent_id='research'. "
-        f"Also write a brief summary to add_memory under agent_id='task-{input.task_id}' (required for status tracking). "
-        f"When done, call update_vikunja_task with task_id={input.task_id} and your summary."
-    )
-    agent = _get_agent()
+
     task_active.labels(agent=_AGENT_NAME).inc()
     t0 = time.monotonic()
     try:
-        result = await agent.run(prompt, usage_limits=UsageLimits(request_limit=30))
+        # Run the agent in an isolated subprocess to prevent Hatchet SDK memory accumulation
+        # from leaking into the worker process. Each task gets a clean Python heap.
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "agents.research.run_once",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdin_data = json.dumps(input.model_dump()).encode()
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(stdin_data),
+                timeout=_SUBPROCESS_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError(f"research subprocess timed out after {_SUBPROCESS_TIMEOUT}s")
+
+        if proc.returncode != 0:
+            err = stderr.decode(errors="replace")[-2000:]
+            raise RuntimeError(f"research subprocess failed (exit {proc.returncode}): {err}")
+
+        result = json.loads(stdout.decode())
         task_invocations.labels(agent=_AGENT_NAME, status="success").inc()
-        langfuse_context.update_current_trace(output=result.output)
-        return {"summary": result.output, "task_id": input.task_id}
+        langfuse_context.update_current_trace(output=result.get("summary", ""))
+        return result
     except Exception:
         task_invocations.labels(agent=_AGENT_NAME, status="error").inc()
         raise
