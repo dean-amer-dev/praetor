@@ -86,6 +86,7 @@ def main() -> None:
         resp = client.post(
             "/api/v1/tools/create",
             json={
+                "id": "praetor_dispatch",
                 "name": TOOL_NAME,
                 "description": TOOL_DESCRIPTION,
                 "content": TOOL_CONTENT,
