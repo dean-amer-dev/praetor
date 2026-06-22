@@ -7,49 +7,134 @@
 | 2 | Storage | ✅ Complete | Qdrant on Mac Mini via Komodo |
 | 3 | Dispatch | ✅ Complete | Hatchet Lite on k3s, stub worker |
 | 4 | Memory | ✅ Complete | mem0 arm64 image healthy; smoke + E2E verified (Phase 12a) |
-| 5 | Research Agent | ✅ Complete | OWU dispatch → research worker (Vikunja trigger: outstanding) |
-| 6 | Coder Agent | ✅ Complete | OWU dispatch → coder worker, PRs via praetor-coder[bot] (Vikunja trigger: outstanding) |
+| 5 | Research Agent | ✅ Complete | OWU dispatch → research worker (Vikunja label trigger: outstanding, code exists, not primary) |
+| 6 | Coder Agent | ✅ Complete | OWU dispatch → coder worker, PRs via praetor-coder[bot] (Vikunja label trigger: outstanding) |
 | 7 | PR Reviewer + QA | ✅ Complete | End-to-end verified via test PR #36; amerenda-reviewer[bot] posts reviews |
 | 8 | Multi-Agent Pipeline | ✅ Complete | Dual-label tasks → pipeline:research_code DAG; pipeline-worker deployed |
 | 9 | Observability + Prompts | ✅ Complete | Langfuse deployed; @observe() on all tools; eval scores wired; coder-system v4 prompt live; real Hatchet run traced with tool call spans (trace 7c8cb711) |
 | 10 | MCP Gateway | ✅ Complete | mcp-searxng + LiteLLM gateway live; agents wired; 2 tools verified at /mcp endpoint |
 | 11 | Scaffold Worker | ✅ Complete | agent:scaffold event; Jinja templates; draft PRs on praetor + dean-mcp from OpenWebUI |
 | 12 | Platform Verification | ✅ Complete | All smoke tests pass (18/18); health check green; Phase 4+7 verified; OOM fix + MCP URL fix merged (k3s-dean-gitops #802) |
-| 13 | OpenWebUI Integration | ✅ Complete | mcp-bridge exposes praetor_mcp + infra_mcp tools; system prompt set on qwen3-35b-think; ENABLE_MEMORIES+MEM0 env vars live; native Mem0 provider not in current OWU build (env pre-wired for when it lands) |
+| 13 | OpenWebUI Integration | ✅ Complete | praetor-mcp exposes lm_praetor_dispatch, lm_praetor_status, lm_praetor_request_mcp to OWU; system prompt set on qwen3-35b-think |
 | 14 | Agent Benchmarking & Eval | ✅ Complete | benchmark-worker deployed; baseline run `baseline-1781706219` complete (10/10); research-eval mean=1.000, reviewer-eval mean=0.846 recorded in eval-baselines.md |
-| 15 | Self-Service MCP Factory | ✅ Complete | POST /api/v1/mcp/register → GitOps PR on k3s-dean-gitops (deployment + service + ArgoCD app + LiteLLM mcp_servers); GET /api/v1/mcp lists from k8s ConfigMap registry; 19 unit tests |
+| 15 | Self-Service MCP Factory | ✅ Complete | POST /api/v1/mcp/register → GitOps PR on k3s-dean-gitops; idempotent upsert + skip_manifests mode; 44 unit tests |
 | 16 | Full App Pipeline | ✅ Complete | POST /api/v1/app/create; GitHub repo from template + infra-mcp provision + coder dispatch; 34 unit tests |
-| 17 | Intelligent MCP Agent | ✅ Complete | POST /api/v1/mcp/request + request_mcp MCP tool; registry dedup + LLM research + use_existing/scaffold_new routing; 22 unit tests |
-| 18 | Kubernetes MCP | ✅ Complete | mcp-server-kubernetes deployed via Phase 17; github-mcp registered in LiteLLM |
-| 22 | Coder Full GitHub API + OWU-Only Dispatch | 🔄 In Progress | `github_api` tool added; github-mcp → LiteLLM; Vikunja removed as primary trigger; OWU only |
-| 23 | Coder Re-Dispatch Loop | ⬜ Not started | reviewer REQUEST_CHANGES → re-dispatch coder, cap 2 |
-| 24 | Agent Factory | ⬜ Not started | POST /api/v1/agent/create → scaffold → deploy → smoke test in one call |
-| 25 | Inline Arbitration | ⬜ Not started | loop exhausted → focused LLM call, decision memo to mem0 + PR |
-| 26 | Voice Dispatch | ⬜ Not started | |
-| 27 | Control Plane UI | ⬜ Not started | |
+| 17 | Intelligent MCP Agent | ✅ Complete | POST /api/v1/mcp/request + request_mcp MCP tool; registry dedup + LLM research + use_existing/scaffold_new routing |
+| 18 | Kubernetes MCP | ✅ Complete | mcp-server-kubernetes deployed via Phase 17 pipeline; github-mcp and kubernetes-mcp registered in LiteLLM configmap |
+| 19 | GitHub Write MCP | ⬜ Pending | New MCP server in dean-mcp wrapping GitHub write ops: create_pr, update_pr, comment_pr, close_pr, push_branch. Removes github_api() from agent.py into a centralized MCP tool any agent can use. Deploy via mcp-factory. |
+| 20 | Mem0 Integration + Pre-PR Review Loop | ✅ Complete | search_memory before every task; add_memory after key decisions; reviewer check-before-write pattern |
+| 21 | Coder Re-Dispatch Loop | 🔄 In progress | reviewer REQUEST_CHANGES → re-dispatch coder, cap 2 attempts. Includes Mode B (edit existing PR) — parse pr:/branch: from task description in worker.py. coder-system v10 live in Langfuse with Mode A/B/C. github_api tool wired. TODO: worker _run_coder only parses repo: today; pr:/branch: parsing is pending. |
+| 22 | Skills System | ⬜ Pending | Dynamic per-agent prompt-only skills. Storage: PostgreSQL (praetor_skills + praetor_agent_skills tables on existing mac-mini DB) — no pod restarts, instant updates. Workers query at task-start and assemble final prompt = base + active skill snippets. Skill text lives in Langfuse as skill-{name}. API: CRUD for skills + per-agent assignments. |
+| 23 | Agent Factory | ⬜ Pending | POST /api/v1/agent/create → scaffold → wire Hatchet event → CI/deploy → smoke test in one call. Phase 11 scaffold-worker does the PR; this wraps the full pipeline. |
+| 24 | Inline Arbitration | ⬜ Pending | Re-dispatch loop exhausted → focused LLM call → decision memo written to mem0 + PR comment |
+| 25 | Voice Dispatch | ⬜ Pending | Voice input → OWU → lm_praetor_dispatch pipeline |
+| 26 | Control Plane UI | ⬜ Pending | Praetor "single pane of glass": agent matrix (skills × agents toggle), MCP registry panel, task log viewer, skill prompt editor. Requires Phase 22 (skills API). NOT Ecdysis. |
+
+---
+
+## Dispatch Model
+
+All agent triggering goes through OpenWebUI → `lm_praetor_dispatch` → `POST /api/v1/dispatch` → Hatchet.
+
+Secondary triggers (GitHub PR webhook → reviewer) are active. Vikunja label triggers (ai-go, ai-research) have code in `webhooks/vikunja_webhook.py` but are **not active as primary dispatch** — outstanding, will be wired in a later phase.
+
+---
 
 ## OpenWebUI (bot.amer.dev)
 
-Admin credentials reset on 2026-06-13. Login with:
 - **URL:** https://bot.amer.dev
 - **Email:** `amerenda@proton.me`
 - **Password:** stored in BWS as `openwebui-dean-admin-password`
 
 ---
 
-## Completed Work (Pre-Phase 12)
+## Skills System Design (Phase 22)
 
-### Conversational Dispatch (completed prior to Phase 12 renumbering)
+### Why PostgreSQL, not ConfigMap
+
+ConfigMap changes require pod restarts (even with Stakater Reloader) which disrupts running tasks. The existing PostgreSQL on mac-mini (shared with Hatchet, Mem0, Langfuse) gives instant updates with no pod interaction — workers query at task-start, not pod-startup.
+
+### Storage
+
+Two tables in the existing PostgreSQL on mac-mini:
+
+```sql
+CREATE TABLE praetor_skills (
+    name        TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    prompt      TEXT NOT NULL,          -- snapshot; canonical versioned text lives in Langfuse
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE praetor_agent_skills (
+    agent_name  TEXT NOT NULL,
+    skill_name  TEXT NOT NULL REFERENCES praetor_skills(name) ON DELETE CASCADE,
+    assigned_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (agent_name, skill_name)
+);
+```
+
+### Worker integration
+
+At task-start (not pod-startup — hot-swappable without restart):
+
+```python
+async def _assemble_prompt(agent_name: str, base: str) -> str:
+    assignments = await _load_skill_assignments(agent_name)  # queries DB
+    snippets = [get_system_prompt(f"skill-{name}", fallback="") for name in assignments]
+    return base + "\n\n" + "\n\n".join(s for s in snippets if s)
+```
+
+### API routes (webhook-adapter)
+
+```
+GET    /api/v1/skills                        list all skills
+POST   /api/v1/skills                        create {name, description, prompt}
+GET    /api/v1/skills/{name}                 get skill + current Langfuse version
+PUT    /api/v1/skills/{name}                 update prompt (pushes new Langfuse version)
+DELETE /api/v1/skills/{name}                 delete
+
+GET    /api/v1/agents                        list agents with active skills
+GET    /api/v1/agents/{name}/skills          list active skills for agent
+POST   /api/v1/agents/{name}/skills          assign {skill_name}
+DELETE /api/v1/agents/{name}/skills/{skill}  remove assignment
+```
+
+### What a skill looks like
+
+```json
+{
+  "name":        "edit-pr",
+  "description": "Teaches the agent how to check out an existing PR and push changes",
+  "prompt":      "══ SKILL: Edit existing PR ══\nUse when description contains pr: <number>..."
+}
+```
+
+Nothing executable. Named, versioned prompt text only. Tool grants are separate (MCP tools via LiteLLM).
+
+### Agent skill matrix (example)
+
+```
+              edit-pr  comment-pr  web-research  post-review  request-changes
+coder           ✓          ✓            ✓
+research                              ✓
+reviewer                                              ✓              ✓
+```
+
+---
+
+## Completed Work Notes
+
+### Phase 21 partial (coder-system v10 + github_api)
+- `github_api` Python tool added to `agents/coder/agent.py` — authenticated GitHub REST calls without curl
+- `coder-system` v10 live in Langfuse — Mode A (create PR), Mode B (edit existing PR), Mode C (comment)
+- github-mcp and kubernetes-mcp confirmed registered in LiteLLM configmap (k3s-dean-gitops PRs #904, #905)
+- mcp-factory idempotent upsert fixed — entries now land in mcp_servers block, not litellm_settings
+- TODO: parse `pr:` and `branch:` from worker task description in `_run_coder` to wire Mode B end-to-end
+
+### Conversational Dispatch (completed during Phase 3/13)
 - `POST /api/v1/dispatch` and `GET /api/v1/status/{task_id}` live on praetor webhook-adapter
 - `praetor-mcp` in dean-mcp exposes `lm_praetor_dispatch` to OpenWebUI — primary trigger
-- OpenWebUI dispatch tool registered at bot.amer.dev (all agent invocations go through OWU)
-- `common/dispatch.py` shared dispatch function used by all trigger paths
-- PRs merged: praetor#35, dean-mcp#17, k3s-dean-gitops#800
 - Vikunja webhook trigger code exists but is not active — outstanding for future use
-
-### Phase 7 — Webhook Setup
-The `amerenda-reviewer` GitHub App is installed on all repos in the org and delivers
-`pull_request` events to `https://pubhooks.amer.dev/praetor/webhooks/github` (public
-ingress via Traefik, strips `/praetor` prefix, routes to praetor-webhook-adapter).
-
-No org-level webhook needed. No manual curl. End-to-end flow still needs verification (Phase 12b).
+- PRs: praetor#35, dean-mcp#17, k3s-dean-gitops#800

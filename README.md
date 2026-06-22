@@ -2,7 +2,7 @@
 
 Multi-agent platform that runs on a local k3s cluster. Agents are triggered from a conversation in OpenWebUI, dispatch through Hatchet, execute via PydanticAI workers, and share memory through Mem0. All inference goes through LiteLLM.
 
-**Current phase:** Phase 22 — Coder Full GitHub API + OWU-Only Dispatch
+**Current phase:** Phase 21 — Coder Re-Dispatch Loop
 
 **No LangChain.** The agent harness is PydanticAI. LangChain is not installed, not imported, not referenced anywhere in the codebase.
 
@@ -49,6 +49,8 @@ LiteLLM aggregates these at `/mcp`. All tools get the `lm_` prefix when exposed 
 | **infra-mcp** | `infra-mcp` | `lm_infra_scaffold`, `lm_infra_provision`, `lm_infra_deploy_pr`, `lm_infra_add_runner`, `lm_infra_app_status` |
 | **bws-mcp** | `bws-mcp` | `lm_bws_get_secret`, `lm_bws_list_secret_names` |
 | **mem0-server** | `mem0` | `lm_mem0_add_memory`, `lm_mem0_search_memory` |
+| **github-mcp** | `github-mcp` | `lm_github_*` — read-only GitHub operations |
+| **kubernetes-mcp** | `mcp-kubernetes-mcp` | `lm_kubernetes_*` — cluster introspection |
 | **praetor-mcp** | `praetor-mcp` | `lm_praetor_dispatch`, `lm_praetor_status`, `lm_praetor_request_mcp` — callable from OpenWebUI mid-conversation |
 
 ### Observability
@@ -61,7 +63,7 @@ LiteLLM aggregates these at `/mcp`. All tools get the `lm_` prefix when exposed 
 
 | Service | Port / Path | Purpose |
 |---------|------------|---------|
-| **PostgreSQL** | `10.100.20.18:5432` | Hosts Hatchet's task DB, Mem0's pgvector schema, Langfuse's trace DB |
+| **PostgreSQL** | `10.100.20.18:5432` | Hosts Hatchet's task DB, Mem0's pgvector schema, Langfuse's trace DB, Praetor skills registry |
 | **Qdrant** | `10.100.20.18:6333` | Vector store — available for agents that need direct vector search |
 
 ---
@@ -123,15 +125,17 @@ Agents follow a standard structure: a PydanticAI `Agent` in `agent.py`, a Hatche
 
 **2. Fill in tools** — edit the scaffolded `agent.py` to add the actual tool implementations. The skeleton wires the harness; the domain logic is still written by the coder agent or a human.
 
-**3. Wire the Hatchet event** — add `agent:{name}` to the event routing in `webhooks/github_webhook.py` and `webhooks/vikunja_webhook.py` if Vikunja label dispatch is needed.
+**3. Wire the Hatchet event** — add `agent:{name}` to the event routing in `webhooks/github_webhook.py`.
 
 **4. CI + deploy** — merge the PR → `detect-changes` in CI builds `Dockerfile.{name}-worker` → publishes `amerenda/praetor-{name}:sha-*` → creates a deploy PR on `k3s-dean-gitops` → merge that PR → ArgoCD rolls out the pod.
 
 **5. System prompt** — create `{name}-system` in Langfuse. The worker calls `get_system_prompt("{name}-system", fallback=...)` at startup; edit the prompt in the UI anytime without a redeploy.
 
-**6. Smoke test** — dispatch a canary task to `agent:{name}` via Hatchet and verify the worker picks it up.
+**6. Assign skills** — via `POST /api/v1/agents/{name}/skills` (Phase 22). Skills are prompt-only additions that teach the agent domain-specific behaviors. Changes take effect on the next task run.
 
-Phase 23 (Agent Factory) automates steps 2–6 into a single `POST /api/v1/agent/create` call.
+**7. Smoke test** — dispatch a canary task to `agent:{name}` via Hatchet and verify the worker picks it up.
+
+Phase 23 (Agent Factory) automates steps 1–7 into a single `POST /api/v1/agent/create` call.
 
 ---
 
@@ -156,11 +160,12 @@ pipelines/
   research_then_code.py  — PydanticAI Graph DAG: research → coder → reviewer
 
 webhooks/
-  app.py             — FastAPI routes: /dispatch, /mcp/register, /app/create, /status
+  app.py             — FastAPI routes: /dispatch, /mcp/register, /app/create, /status, /skills, /agents
   github_webhook.py  — GitHub PR event handler
-  vikunja_webhook.py — Vikunja task label handler
+  vikunja_webhook.py — Vikunja task label handler (code exists, not active as primary trigger)
   app_factory.py     — POST /api/v1/app/create pipeline
   mcp_factory.py     — POST /api/v1/mcp/register pipeline (generates YAML → inline LLM review loop → GitOps PR)
+  skill_registry.py  — POST /api/v1/skills, /api/v1/agents/{name}/skills (Phase 22)
 
 tests/
   unit/      — fast, no live services
@@ -174,15 +179,14 @@ tests/
 
 | Phase | Name | Status |
 |-------|------|--------|
-| 0–16 | Foundation through Full App Pipeline | ✅ Complete |
-| 17 | Intelligent MCP Agent (`/api/v1/mcp/request`, research → register pipeline) | ✅ Complete |
-| 18 | Kubernetes MCP (deploy `mcp-server-kubernetes` via Phase 17 pipeline) | ✅ Complete |
-| 21 | Mem0 Integration + Pre-PR Review Loop | ✅ Complete |
-| 22 | Coder Full GitHub API + OWU-Only Dispatch (`github_api` tool; edit/comment/close PRs; github-mcp in LiteLLM; Vikunja trigger removed as primary) | 🔄 In Progress |
-| 23 | Coder Re-Dispatch Loop (reviewer REQUEST_CHANGES → re-dispatch coder, cap 2) | ⬜ Pending |
-| 24 | Agent Factory (`POST /api/v1/agent/create` → scaffold → deploy → smoke test in one call) | ⬜ Pending |
-| 25 | Inline Arbitration (loop exhausted → focused LLM call, decision memo to mem0 + PR) | ⬜ Pending |
-| 26 | Voice Dispatch | ⬜ Pending |
-| 27 | Control Plane UI | ⬜ Pending |
+| 0–18 | Foundation through Kubernetes MCP | ✅ Complete |
+| 19 | GitHub Write MCP (`create_pr`, `update_pr`, `comment_pr` as a centralized MCP server in dean-mcp) | ⬜ Pending |
+| 20 | Mem0 Integration + Pre-PR Review Loop | ✅ Complete |
+| 21 | Coder Re-Dispatch Loop (reviewer REQUEST_CHANGES → re-dispatch coder, cap 2; Mode B pr:/branch: parsing) | 🔄 In progress |
+| 22 | Skills System (per-agent prompt-only skills via PostgreSQL + Langfuse; API CRUD + worker integration) | ⬜ Pending |
+| 23 | Agent Factory (`POST /api/v1/agent/create` → scaffold → deploy → smoke test in one call) | ⬜ Pending |
+| 24 | Inline Arbitration (loop exhausted → focused LLM call, decision memo to mem0 + PR) | ⬜ Pending |
+| 25 | Voice Dispatch | ⬜ Pending |
+| 26 | Control Plane UI (skills matrix, MCP registry panel, task log viewer — Praetor single pane of glass) | ⬜ Pending |
 
-See `docs/status.md` for full notes. See `docs/phase-N.md` for each phase's design and ready conditions.
+See `docs/status.md` for full notes and design details.
