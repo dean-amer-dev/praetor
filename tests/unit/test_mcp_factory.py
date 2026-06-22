@@ -16,6 +16,7 @@ from webhooks.mcp_factory import (
     _litellm_mcp_entry,
     _service_account_yaml,
     _service_yaml,
+    _upsert_litellm_config,
 )
 
 API_KEY = "test-praetor-key"
@@ -187,9 +188,74 @@ class TestLiteLLMMcpEntry:
         assert 'transport: "http"' in entry
 
 
+class TestUpsertLiteLLMConfig:
+    # Realistic configmap snippet with the mcp_servers / litellm_settings structure.
+    _BASE = (
+        "    mcp_servers:\n"
+        "      web:\n"
+        '        url: "http://web-server/mcp"\n'
+        '        transport: "http"\n'
+        "\n"
+        "    litellm_settings:\n"
+        "      callbacks:\n"
+        "        - some_hook\n"
+    )
+
+    def _reg(self, name: str = "foo", port: int = 8000) -> McpRegistration:
+        return McpRegistration(name=name, image="img:1", port=port)
+
+    def test_insert_before_litellm_settings(self):
+        content, changed = _upsert_litellm_config(self._BASE, self._reg("foo"))
+        assert changed
+        assert "      foo:\n" in content
+        # Must be inside mcp_servers, i.e., before litellm_settings
+        foo_pos = content.index("      foo:")
+        settings_pos = content.index("    litellm_settings:")
+        assert foo_pos < settings_pos
+
+    def test_insert_does_not_go_inside_litellm_settings(self):
+        content, _ = _upsert_litellm_config(self._BASE, self._reg("newmcp"))
+        # litellm_settings block should only contain 'callbacks'
+        settings_idx = content.index("    litellm_settings:")
+        after_settings = content[settings_idx:]
+        assert "newmcp" not in after_settings
+
+    def test_idempotent_replace_existing_entry(self):
+        # Add foo once
+        content, _ = _upsert_litellm_config(self._BASE, self._reg("foo", port=8000))
+        # Re-register with updated port — should replace, not duplicate
+        content2, changed2 = _upsert_litellm_config(content, self._reg("foo", port=9999))
+        assert changed2
+        assert content2.count("      foo:") == 1
+        assert "9999" in content2
+
+    def test_unchanged_when_entry_identical(self):
+        content, _ = _upsert_litellm_config(self._BASE, self._reg("foo", port=8000))
+        content2, changed = _upsert_litellm_config(content, self._reg("foo", port=8000))
+        assert not changed
+
+    def test_fallback_appends_when_no_litellm_settings(self):
+        bare = "    mcp_servers:\n      web:\n        url: x\n"
+        content, changed = _upsert_litellm_config(bare, self._reg("foo"))
+        assert changed
+        assert "      foo:" in content
+
+
 # ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
+
+_MOCK_CM = (
+    "    mcp_servers:\n"
+    "      web:\n"
+    '        url: "http://web/mcp"\n'
+    '        transport: "http"\n'
+    "\n"
+    "    litellm_settings:\n"
+    "      callbacks:\n"
+    "        - hook\n"
+)
+
 
 class TestRegisterEndpoint:
     def test_auth_required(self, client):
@@ -200,7 +266,7 @@ class TestRegisterEndpoint:
         resp = client.post("/api/v1/mcp/register", json=_minimal_reg(), headers=_auth("bad"))
         assert resp.status_code == 401
 
-    def test_duplicate_returns_409(self, client):
+    def test_duplicate_without_skip_manifests_returns_409(self, client):
         existing = {"test-mcp": {"name": "test-mcp", "image": "img:1", "port": 8000, "transport": "http"}}
         with (
             patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value=existing)),
@@ -210,6 +276,47 @@ class TestRegisterEndpoint:
         assert resp.status_code == 409
         assert "already registered" in resp.json()["detail"]
 
+    def test_duplicate_with_skip_manifests_succeeds(self, client):
+        existing = {"test-mcp": {"name": "test-mcp", "image": "img:1", "port": 8000, "transport": "http"}}
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value=existing)),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc123")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=(_MOCK_CM, "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=AsyncMock(return_value="https://github.com/amerenda/k3s-dean-gitops/pull/99")),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register",
+                json=_minimal_reg(skip_manifests=True),
+                headers=_auth(),
+            )
+        assert resp.status_code == 200
+        assert "pull/99" in resp.json()["pr_url"]
+
+    def test_skip_manifests_creates_no_files(self, client):
+        create_file_mock = AsyncMock()
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc123")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=create_file_mock),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=(_MOCK_CM, "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register",
+                json=_minimal_reg(skip_manifests=True),
+                headers=_auth(),
+            )
+        assert resp.status_code == 200
+        create_file_mock.assert_not_awaited()
+
     def test_successful_registration_returns_pr_url(self, client):
         with (
             patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
@@ -218,9 +325,9 @@ class TestRegisterEndpoint:
             patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc123")),
             patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
             patch("webhooks.mcp_factory._create_file", new=AsyncMock()),
-            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=(_MOCK_CM, "sha1"))),
             patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
-            patch("webhooks.mcp_factory._create_pr", new=AsyncMock(return_value="https://github.com/amerenda/k3s-dean-gitops/pull/99")),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=AsyncMock(return_value="https://github.com/amerenda/k3s-dean-gitops/pull/99")),
         ):
             resp = client.post("/api/v1/mcp/register", json=_minimal_reg(), headers=_auth())
         assert resp.status_code == 200
@@ -240,7 +347,7 @@ class TestRegisterEndpoint:
             patch("webhooks.mcp_factory._create_file", new=create_file_mock),
             patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
             patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
-            patch("webhooks.mcp_factory._create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
         ):
             resp = client.post(
                 "/api/v1/mcp/register",
@@ -262,7 +369,7 @@ class TestRegisterEndpoint:
             patch("webhooks.mcp_factory._create_file", new=create_file_mock),
             patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
             patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
-            patch("webhooks.mcp_factory._create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
         ):
             resp = client.post(
                 "/api/v1/mcp/register",
@@ -285,7 +392,7 @@ class TestRegisterEndpoint:
             patch("webhooks.mcp_factory._create_file", new=create_file_mock),
             patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
             patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
-            patch("webhooks.mcp_factory._create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
         ):
             resp = client.post("/api/v1/mcp/register", json=_minimal_reg(), headers=_auth())
         assert resp.status_code == 200
@@ -427,7 +534,7 @@ class TestPreReviewViaRoute:
             patch("webhooks.mcp_factory._create_file", new=AsyncMock()),
             patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
             patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
-            patch("webhooks.mcp_factory._create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
             patch("webhooks.mcp_factory._call_review_llm", new=review_mock),
         ):
             resp = client.post("/api/v1/mcp/register", json=_minimal_reg(), headers=_auth())
@@ -445,7 +552,7 @@ class TestPreReviewViaRoute:
             patch("webhooks.mcp_factory._create_file", new=AsyncMock()),
             patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
             patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
-            patch("webhooks.mcp_factory._create_pr", new=create_pr_mock),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=create_pr_mock),
             patch("webhooks.mcp_factory._call_review_llm", new=AsyncMock(return_value=(True, [], {}))),
         ):
             resp = client.post(
@@ -469,7 +576,7 @@ class TestPreReviewViaRoute:
             patch("webhooks.mcp_factory._create_file", new=AsyncMock()),
             patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
             patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
-            patch("webhooks.mcp_factory._create_pr", new=create_pr_mock),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=create_pr_mock),
             patch(
                 "webhooks.mcp_factory._call_review_llm",
                 new=AsyncMock(return_value=(False, ["probe type wrong"], {})),
@@ -497,7 +604,7 @@ class TestPreReviewViaRoute:
             patch("webhooks.mcp_factory._create_file", new=create_file_mock),
             patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
             patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
-            patch("webhooks.mcp_factory._create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
             patch(
                 "webhooks.mcp_factory._call_review_llm",
                 new=AsyncMock(side_effect=[
