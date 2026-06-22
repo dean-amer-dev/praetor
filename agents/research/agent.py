@@ -61,8 +61,8 @@ async def web_read_url(url: str, max_chars: int = 4000) -> str:
         try:
             resp = await client.get(url, headers={"User-Agent": "praetor-research/1.0"})
             resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            return f"ERROR fetching {url}: HTTP {exc.response.status_code} — skip this URL and continue"
+        except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException) as exc:
+            return f"ERROR fetching {url}: {type(exc).__name__} — skip this URL and continue"
         text = resp.text
         text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
@@ -84,6 +84,8 @@ async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> 
         )
         if comment_resp.status_code == 401:
             return "error: Vikunja token expired — research complete but task not updated"
+        if comment_resp.status_code == 404:
+            return "note: Vikunja task not found — research complete, task tracking skipped"
         comment_resp.raise_for_status()
         if done:
             done_resp = await client.post(
@@ -91,7 +93,8 @@ async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> 
                 json={"done": True},
                 headers=headers,
             )
-            done_resp.raise_for_status()
+            if done_resp.status_code not in (200, 404):
+                done_resp.raise_for_status()
     return "task updated"
 
 
