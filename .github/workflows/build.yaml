@@ -61,7 +61,18 @@ jobs:
           fetch-depth: 2
       - id: detect
         run: |
-          ALL_COMPONENTS=(coder research pipeline webhook qa reviewer benchmark)
+          STATIC_COMPONENTS=(coder research pipeline webhook qa reviewer benchmark)
+
+          # Discover factory-created agents (agents/*/Dockerfile not in static list)
+          FACTORY_AGENTS=()
+          while IFS= read -r df_path; do
+            agent=$(basename "$(dirname "$df_path")")
+            skip=false
+            for sc in "${STATIC_COMPONENTS[@]}"; do [[ "$agent" == "$sc" ]] && skip=true && break; done
+            "$skip" || FACTORY_AGENTS+=("$agent")
+          done < <(find agents -maxdepth 2 -name Dockerfile 2>/dev/null)
+
+          ALL_COMPONENTS=("${STATIC_COMPONENTS[@]}" "${FACTORY_AGENTS[@]}")
 
           # workflow_dispatch always rebuilds everything
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -85,6 +96,11 @@ jobs:
               echo "$CHANGED" | grep -qE '^(agents/qa/|Dockerfile\.qa-worker)' && REBUILD+=(qa)
               echo "$CHANGED" | grep -qE '^(agents/pr_reviewer/|Dockerfile\.reviewer-worker)' && REBUILD+=(reviewer)
               echo "$CHANGED" | grep -qE '^(agents/benchmark/|Dockerfile\.benchmark-worker)' && REBUILD+=(benchmark)
+
+              # Factory agents: trigger rebuild when their agents/{name}/ dir changes
+              for agent in "${FACTORY_AGENTS[@]}"; do
+                echo "$CHANGED" | grep -qE "^agents/${agent}/" && REBUILD+=("$agent")
+              done
             fi
 
             # build.yaml change forces full rebuild
@@ -96,13 +112,25 @@ jobs:
           JSON=$(python3 -c "import sys,json; print(json.dumps(sys.argv[1:]))" "${REBUILD[@]}")
           echo "rebuild=$JSON" >> "$GITHUB_OUTPUT"
 
-          # Full matrix JSON for build-amd64 — only include components to rebuild
+          # Full matrix JSON for build-amd64 — static + discovered factory agents
           MATRIX=$(python3 -c "
-          import sys,json
-          c=json.loads(sys.argv[1])
-          M={'coder':{'component':'coder','image':'amerenda/praetor-coder','dockerfile':'Dockerfile.coder-worker'},'pipeline':{'component':'pipeline','image':'amerenda/praetor-pipeline','dockerfile':'Dockerfile.pipeline-worker'},'research':{'component':'research','image':'amerenda/praetor-research','dockerfile':'Dockerfile.research-worker'},'webhook':{'component':'webhook','image':'amerenda/praetor-webhook','dockerfile':'Dockerfile.webhook-adapter'},'qa':{'component':'qa','image':'amerenda/praetor-qa','dockerfile':'Dockerfile.qa-worker'},'reviewer':{'component':'reviewer','image':'amerenda/praetor-reviewer','dockerfile':'Dockerfile.reviewer-worker'},'benchmark':{'component':'benchmark','image':'amerenda/praetor-benchmark','dockerfile':'Dockerfile.benchmark-worker'}}
-          print(json.dumps({'include':[M[x] for x in c if x in M]}))
-          " "$JSON")
+import sys,json,glob,os
+c=json.loads(sys.argv[1])
+M={
+  'coder':    {'component':'coder',    'image':'amerenda/praetor-coder',    'dockerfile':'Dockerfile.coder-worker'},
+  'pipeline': {'component':'pipeline', 'image':'amerenda/praetor-pipeline', 'dockerfile':'Dockerfile.pipeline-worker'},
+  'research': {'component':'research', 'image':'amerenda/praetor-research', 'dockerfile':'Dockerfile.research-worker'},
+  'webhook':  {'component':'webhook',  'image':'amerenda/praetor-webhook',  'dockerfile':'Dockerfile.webhook-adapter'},
+  'qa':       {'component':'qa',       'image':'amerenda/praetor-qa',       'dockerfile':'Dockerfile.qa-worker'},
+  'reviewer': {'component':'reviewer', 'image':'amerenda/praetor-reviewer', 'dockerfile':'Dockerfile.reviewer-worker'},
+  'benchmark':{'component':'benchmark','image':'amerenda/praetor-benchmark','dockerfile':'Dockerfile.benchmark-worker'},
+}
+for df in glob.glob('agents/*/Dockerfile'):
+  name=os.path.basename(os.path.dirname(df))
+  if name not in M:
+    M[name]={'component':name,'image':f'amerenda/praetor-{name}','dockerfile':df}
+print(json.dumps({'include':[M[x] for x in c if x in M]}))
+" "$JSON")
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "Components to rebuild: $JSON"
 
@@ -145,6 +173,8 @@ jobs:
           TAG: ${{ needs.set-tag.outputs.tag }}
           REBUILD: ${{ needs.detect-changes.outputs.rebuild }}
         run: |
+          STATIC_COMPONENTS=(coder research pipeline webhook qa reviewer benchmark)
+
           for entry in \
             "coder:Dockerfile.coder-worker:amerenda/praetor-coder" \
             "pipeline:Dockerfile.pipeline-worker:amerenda/praetor-pipeline" \
@@ -168,6 +198,26 @@ jobs:
             docker rmi "${IMAGE}:${TAG}-arm64" || true
           done
 
+          # Factory-created agents (agents/*/Dockerfile)
+          for df in agents/*/Dockerfile; do
+            [ -f "$df" ] || continue
+            COMPONENT=$(basename "$(dirname "$df")")
+            skip=false
+            for sc in "${STATIC_COMPONENTS[@]}"; do [[ "$COMPONENT" == "$sc" ]] && skip=true && break; done
+            "$skip" && continue
+
+            if ! python3 -c "import sys,json; c=json.loads(sys.argv[1]); sys.exit(0 if sys.argv[2] in c else 1)" "$REBUILD" "$COMPONENT"; then
+              echo "Skipping $COMPONENT (not changed)"
+              continue
+            fi
+
+            IMAGE="amerenda/praetor-${COMPONENT}"
+            echo "Building $COMPONENT arm64..."
+            docker build -t "${IMAGE}:${TAG}-arm64" -f "${df}" .
+            docker push "${IMAGE}:${TAG}-arm64"
+            docker rmi "${IMAGE}:${TAG}-arm64" || true
+          done
+
   manifest:
     needs: [detect-changes, set-tag, build-amd64, build-arm64]
     if: "github.event_name != 'pull_request' && needs.detect-changes.outputs.rebuild != '[]'"
@@ -176,11 +226,15 @@ jobs:
       - name: Login to Docker Hub
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
+      - uses: actions/checkout@v6
+
       - name: Create multi-arch manifests for rebuilt components
         env:
           TAG: ${{ needs.set-tag.outputs.tag }}
           REBUILD: ${{ needs.detect-changes.outputs.rebuild }}
         run: |
+          STATIC_COMPONENTS=(coder pipeline research webhook qa reviewer benchmark)
+
           for IMAGE in praetor-coder praetor-pipeline praetor-research praetor-webhook praetor-qa praetor-reviewer praetor-benchmark; do
             COMPONENT=$(echo "$IMAGE" | sed 's/praetor-//')
 
@@ -195,6 +249,24 @@ jobs:
             docker buildx imagetools create -t "amerenda/${IMAGE}:latest" \
               "amerenda/${IMAGE}:${TAG}-amd64" \
               "amerenda/${IMAGE}:${TAG}-arm64"
+          done
+
+          # Factory-created agents
+          for df in agents/*/Dockerfile; do
+            [ -f "$df" ] || continue
+            COMPONENT=$(basename "$(dirname "$df")")
+            skip=false
+            for sc in "${STATIC_COMPONENTS[@]}"; do [[ "$COMPONENT" == "$sc" ]] && skip=true && break; done
+            "$skip" && continue
+
+            if ! python3 -c "import sys,json; c=json.loads(sys.argv[1]); sys.exit(0 if sys.argv[2] in c else 1)" "$REBUILD" "$COMPONENT"; then
+              echo "Skipping manifest for $COMPONENT (not rebuilt)"
+              continue
+            fi
+
+            IMAGE="amerenda/praetor-${COMPONENT}"
+            docker buildx imagetools create -t "${IMAGE}:${TAG}" "${IMAGE}:${TAG}-amd64" "${IMAGE}:${TAG}-arm64"
+            docker buildx imagetools create -t "${IMAGE}:latest" "${IMAGE}:${TAG}-amd64" "${IMAGE}:${TAG}-arm64"
           done
 
   deploy:
@@ -252,6 +324,8 @@ jobs:
           BRANCH="deploy/praetor-${TAG}"
           git checkout -b "${BRANCH}"
 
+          STATIC_COMPONENTS=(coder research pipeline webhook qa reviewer benchmark)
+
           # Update image tags only for rebuilt components
           for entry in \
             "coder|amerenda/praetor-coder|apps/praetor/coder-worker/deployment.yaml" \
@@ -265,6 +339,22 @@ jobs:
             IMAGE=$(echo "$entry" | cut -d'|' -f2)
             MANIFEST=$(echo "$entry" | cut -d'|' -f3)
             if python3 -c "import sys,json; c=json.loads(sys.argv[1]); sys.exit(0 if sys.argv[2] in c else 1)" "$REBUILD" "$COMPONENT"; then
+              sed -i "s|image: ${IMAGE}:[^ ]*|image: ${IMAGE}:${TAG}|g" "${MANIFEST}"
+              echo "Updated ${COMPONENT} → ${TAG}"
+            fi
+          done
+
+          # Factory-created agents: update deployment.yaml in apps/praetor/{name}-worker/
+          for df in "${GITHUB_WORKSPACE}/agents"/*/Dockerfile; do
+            [ -f "$df" ] || continue
+            COMPONENT=$(basename "$(dirname "$df")")
+            skip=false
+            for sc in "${STATIC_COMPONENTS[@]}"; do [[ "$COMPONENT" == "$sc" ]] && skip=true && break; done
+            "$skip" && continue
+
+            MANIFEST="apps/praetor/${COMPONENT}-worker/deployment.yaml"
+            IMAGE="amerenda/praetor-${COMPONENT}"
+            if python3 -c "import sys,json; c=json.loads(sys.argv[1]); sys.exit(0 if sys.argv[2] in c else 1)" "$REBUILD" "$COMPONENT" && [ -f "$MANIFEST" ]; then
               sed -i "s|image: ${IMAGE}:[^ ]*|image: ${IMAGE}:${TAG}|g" "${MANIFEST}"
               echo "Updated ${COMPONENT} → ${TAG}"
             fi

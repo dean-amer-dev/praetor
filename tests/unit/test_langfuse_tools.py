@@ -53,6 +53,35 @@ class TestDisabledPath:
         lt.langfuse_context.update_current_trace(name="x", input={}, tags=["a"])
 
 
+class TestCreatePrompt:
+    def test_create_prompt_returns_false_when_disabled(self, monkeypatch):
+        for key in ("LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
+            monkeypatch.delenv(key, raising=False)
+        lt = _reload_langfuse_tools()
+        assert lt.create_prompt("test-prompt", "You are a test agent.") is False
+
+    def test_create_prompt_returns_false_on_exception(self, monkeypatch):
+        for key in ("LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
+            monkeypatch.delenv(key, raising=False)
+        lt = _reload_langfuse_tools()
+        mock_client = MagicMock()
+        mock_client.create_prompt.side_effect = RuntimeError("API error")
+        lt._client = mock_client
+        assert lt.create_prompt("test-prompt", "text") is False
+
+    def test_create_prompt_calls_client_with_production_label(self, monkeypatch):
+        for key in ("LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
+            monkeypatch.delenv(key, raising=False)
+        lt = _reload_langfuse_tools()
+        mock_client = MagicMock()
+        lt._client = mock_client
+        result = lt.create_prompt("my-prompt", "prompt text")
+        assert result is True
+        mock_client.create_prompt.assert_called_once_with(
+            name="my-prompt", prompt="prompt text", labels=["production"]
+        )
+
+
 class TestFallbackOnException:
     def test_get_system_prompt_fallback_when_client_raises(self, monkeypatch):
         for key in ("LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
