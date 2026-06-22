@@ -15,11 +15,6 @@ jobs:
     runs-on: arc-runner-praetor
     steps:
       - uses: actions/checkout@v6
-      - name: Free disk space
-        run: rm -rf ~/.cache ~/.local/share/Playwright /opt/hostedtoolcache 2>/dev/null || true
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
       - name: Install dependencies
         run: pip install --no-cache-dir -r requirements.txt pytest pytest-asyncio
       - name: Run unit and integration tests
