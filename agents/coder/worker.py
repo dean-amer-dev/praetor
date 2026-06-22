@@ -58,12 +58,15 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
     prompt = (
         f"Task #{input.task_id}: {input.task_title}\n\n"
         f"Description: {input.task_description}\n\n"
-        f"Implement this task on the referenced repo. Create branch praetor-coder/task-{input.task_id}, "
-        f"implement, commit, push, open a draft PR. "
-        f"When done: "
-        f"(1) follow your system instructions to store key decisions under agent_id='coder-{{owner}}/{{repo}}' (replace with the actual repo path), "
-        f"(2) also write a brief completion note to add_memory under agent_id='task-{input.task_id}' with the PR URL and what was done (this is required for status tracking), "
-        f"(3) post the PR URL as a Vikunja comment on task {input.task_id} and mark it done."
+        f"Complete the following steps IN ORDER — do not skip any step:\n"
+        f"1. Call search_memory to check prior decisions for this repo.\n"
+        f"2. Clone the repo, create branch praetor-coder/task-{input.task_id}, implement the change, commit, push.\n"
+        f"3. IMMEDIATELY after the push (before opening the PR): call add_memory with agent_id='coder-{{owner}}/{{repo}}' "
+        f"(replace with the actual repo path, e.g. 'coder-amerenda/praetor') to record key decisions.\n"
+        f"4. Open a draft PR via the GitHub REST API.\n"
+        f"5. Call add_memory with agent_id='task-{input.task_id}' containing the PR URL and a summary of what was done.\n"
+        f"6. Call update_vikunja_task with task_id={input.task_id} and the PR URL to mark the task done.\n"
+        f"Steps 3 and 5 are REQUIRED — do not skip them even if other steps fail."
     )
     agent = _get_agent()
     task_active.labels(agent=_AGENT_NAME).inc()
