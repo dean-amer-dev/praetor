@@ -1,8 +1,7 @@
-"""PydanticAI research agent with web search via MCP gateway, memory, and Vikunja integration."""
+"""PydanticAI research agent with web search via direct HTTP, memory, and Vikunja integration."""
 import os
 import httpx
 from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -21,6 +20,8 @@ _RESEARCH_SYSTEM_PROMPT_FALLBACK = """You are a research agent. Given a task tit
 Be thorough but concise. Prefer primary sources. Cite URLs where relevant.
 After completing research, call update_vikunja_task to mark the task done with your summary."""
 
+_SEARXNG_URL = os.environ.get("SEARXNG_URL", "https://searxng.amer.dev")
+
 
 def _build_model() -> OpenAIChatModel:
     return OpenAIChatModel(
@@ -32,15 +33,40 @@ def _build_model() -> OpenAIChatModel:
     )
 
 
-def _build_mcp_toolset() -> MCPToolset:
-    mcp_url = os.environ.get(
-        "LITELLM_MCP_URL",
-        os.environ["LITELLM_BASE_URL"].replace("/v1", "/mcp"),
-    )
-    return MCPToolset(
-        mcp_url,
-        headers={"Authorization": f"Bearer {os.environ['LITELLM_API_KEY']}"},
-    )
+async def web_search(query: str, max_results: int = 5) -> str:
+    """Search the web and return scored, deduplicated results as JSON."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{_SEARXNG_URL}/search",
+            params={"q": query, "format": "json", "engines": "google,bing,duckduckgo"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", [])[:max_results]
+        if not results:
+            return "No results found."
+        lines = []
+        for r in results:
+            title = r.get("title", "")
+            url = r.get("url", "")
+            snippet = r.get("content", "")[:300]
+            lines.append(f"**{title}**\n{url}\n{snippet}")
+        return "\n\n".join(lines)
+
+
+async def web_read_url(url: str, max_chars: int = 4000) -> str:
+    """Fetch a URL and return its text content (markdown-converted), capped at max_chars."""
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        resp = await client.get(url, headers={"User-Agent": "praetor-research/1.0"})
+        resp.raise_for_status()
+        text = resp.text
+        # Strip HTML tags simply
+        import re
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:max_chars]
 
 
 async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> str:
@@ -72,6 +98,5 @@ def build_agent() -> Agent:
     return Agent(
         model=model,
         system_prompt=get_system_prompt("research-system", fallback=_RESEARCH_SYSTEM_PROMPT_FALLBACK),
-        mcp_servers=[_build_mcp_toolset()],
-        tools=[add_memory, search_memory, update_vikunja_task],
+        tools=[web_search, web_read_url, add_memory, search_memory, update_vikunja_task],
     )
