@@ -70,9 +70,19 @@ def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT) -> str:
 @observe()
 async def read_file(path: str) -> str:
     """Read a file relative to SCRATCH_DIR."""
+    # Guard: if SCRATCH_DIR has no .git dir, the repo has not been cloned yet.
+    if not (Path(SCRATCH_DIR) / ".git").exists():
+        return (
+            "ERROR: repository not cloned yet. "
+            "You must call run_shell('git clone https://x-access-token:{TOKEN}@github.com/{repo}.git .') "
+            "before reading files. SCRATCH_DIR is currently empty."
+        )
     full = _scratch(path)
     loop = asyncio.get_event_loop()
-    text = await loop.run_in_executor(None, lambda: Path(full).read_text(errors="replace"))
+    try:
+        text = await loop.run_in_executor(None, lambda: Path(full).read_text(errors="replace"))
+    except FileNotFoundError:
+        return f"ERROR: file not found: {path}. Use run_shell('ls') to list available files."
     return _truncate(text)
 
 
