@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 """
-Register the Praetor dispatch tool in OpenWebUI.
+Register the OpenHands dispatch tool in OpenWebUI.
 
 Run once after deployment:
-  OWUI_BASE_URL=https://claw.amer.dev OWUI_API_KEY=<admin-key> python scripts/register_owui_tool.py
+  OWUI_BASE_URL=https://claw.amer.dev OWUI_API_KEY=<admin-key> python scripts/register_openhands_tool.py
 
 The PRAETOR_API_KEY valve must then be set manually in the OpenWebUI admin panel
-(Admin → Tools → Praetor Dispatch → Edit → Valves).
+(Admin → Tools → OpenHands Dispatch → Edit → Valves).
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 
 import httpx
 
-TOOL_NAME = "Praetor Dispatch"
-TOOL_DESCRIPTION = "Dispatch Praetor agent tasks (research, code, pipeline) and check their status."
+TOOL_NAME = "OpenHands Dispatch"
+TOOL_DESCRIPTION = "Dispatch autonomous coding tasks to OpenHands and check their status."
 
-TOOL_CONTENT = '''"""Praetor Agent Dispatch"""
+TOOL_CONTENT = '''"""OpenHands Agent Dispatch"""
 import httpx
 from pydantic import BaseModel
 
@@ -32,26 +31,29 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
 
-    def dispatch_task(self, title: str, description: str, task_type: str) -> str:
+    def dispatch_openhands_task(self, title: str, description: str) -> str:
         """
-        Dispatch a Praetor agent task.
-        task_type: research | code | pipeline | openhands
-        For code/pipeline/openhands tasks, include \'repo: owner/name\' in description.
-        Use openhands to send fully autonomous coding tasks to the OpenHands agent.
-        Returns task_id and confirmation.
+        Dispatch an autonomous coding task to OpenHands.
+        OpenHands will autonomously research, implement, and open a PR.
+        Include \'repo: owner/name\' in the description to scope work to a specific repo.
+        Returns a conversation URL where you can watch progress at hands.amer.dev.
         """
         resp = httpx.post(
             f"{self.valves.PRAETOR_BASE_URL}/api/v1/dispatch",
-            json={"title": title, "description": description, "type": task_type},
+            json={"title": title, "description": description, "type": "openhands"},
             headers={"Authorization": f"Bearer {self.valves.PRAETOR_API_KEY}"},
             timeout=15,
         )
         resp.raise_for_status()
         data = resp.json()
-        return f"Task {data[\'task_id\']} dispatched ({data[\'event\']}). Check status in a few minutes."
+        return (
+            f"OpenHands task {data[\'task_id\']} dispatched. "
+            f"Watch progress at https://hands.amer.dev — "
+            f"conversation will appear within a few seconds."
+        )
 
-    def get_task_status(self, task_id: int) -> str:
-        """Check the status of a previously dispatched Praetor task."""
+    def get_openhands_status(self, task_id: int) -> str:
+        """Check whether a previously dispatched OpenHands task has completed."""
         resp = httpx.get(
             f"{self.valves.PRAETOR_BASE_URL}/api/v1/status/{task_id}",
             headers={"Authorization": f"Bearer {self.valves.PRAETOR_API_KEY}"},
@@ -61,7 +63,7 @@ class Tools:
         data = resp.json()
         if data["done"]:
             return f"Done. {data[\'mem0_summary\']}"
-        return "Still running. Check back shortly."
+        return "Still running. Check hands.amer.dev or try again shortly."
 '''
 
 
@@ -75,7 +77,6 @@ def main() -> None:
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
     with httpx.Client(base_url=base, headers=headers, timeout=15) as client:
-        # Check if tool already exists
         resp = client.get("/api/v1/tools/")
         resp.raise_for_status()
         existing = [t for t in resp.json() if t.get("name") == TOOL_NAME]
@@ -95,7 +96,7 @@ def main() -> None:
         resp.raise_for_status()
         tool = resp.json()
         print(f"Registered tool '{TOOL_NAME}' id={tool.get('id')}")
-        print("Next: set PRAETOR_API_KEY valve in Admin → Tools → Praetor Dispatch → Edit → Valves")
+        print("Next: set PRAETOR_API_KEY valve in Admin → Tools → OpenHands Dispatch → Edit → Valves")
 
 
 if __name__ == "__main__":
