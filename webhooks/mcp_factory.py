@@ -86,7 +86,8 @@ class McpRegistration(BaseModel):
     service_account_name: str | None = None  # mounts this SA in the pod
     cluster_role: str | None = None          # creates SA + ClusterRoleBinding when set
     health_path: str | None = None           # if set, use httpGet probe; otherwise tcpSocket
-    skip_pre_review: bool = False            # bypass inline LLM review loop (e.g. for idempotent re-runs)
+    skip_pre_review: bool = False            # bypass inline LLM review loop
+    skip_manifests: bool = False             # skip k8s manifest + ArgoCD steps; only upsert LiteLLM entry
 
 
 class McpStatusEntry(BaseModel):
@@ -252,6 +253,53 @@ async def _create_pr(
     )
     resp.raise_for_status()
     return resp.json()["html_url"]
+
+
+async def _get_or_create_pr(
+    client: httpx.AsyncClient, token: str, title: str, body: str, head: str
+) -> str:
+    """Return URL of an existing open PR for this head branch, or create one."""
+    resp = await client.get(
+        f"{GITHUB_API}/repos/{GITOPS_REPO}/pulls",
+        headers=_gh_headers(token),
+        params={"head": f"amerenda:{head}", "state": "open"},
+    )
+    resp.raise_for_status()
+    existing = resp.json()
+    if existing:
+        return existing[0]["html_url"]
+    return await _create_pr(client, token, title, body, head)
+
+
+def _upsert_litellm_config(cm_content: str, reg: McpRegistration) -> tuple[str, bool]:
+    """Insert or replace the MCP entry in the mcp_servers block. Returns (content, changed).
+
+    - If the entry already exists: replace its url/transport lines in-place (idempotent).
+    - If not: insert it immediately before the litellm_settings block.
+    - Fallback (no litellm_settings marker): append to end.
+    """
+    new_entry = _litellm_mcp_entry(reg)
+    entry_key = f"      {reg.name}:"  # 6-space indent matches mcp_servers children
+
+    lines = cm_content.split("\n")
+    for i, line in enumerate(lines):
+        if line == entry_key:
+            # Consume this line + all following 8-space-indented lines (url, transport, etc.)
+            end = i + 1
+            while end < len(lines) and lines[end].startswith("        "):
+                end += 1
+            new_lines = lines[:i] + new_entry.rstrip("\n").split("\n") + lines[end:]
+            new_content = "\n".join(new_lines)
+            return new_content, new_content != cm_content
+
+    # Entry absent — insert before litellm_settings
+    marker = "\n    litellm_settings:"
+    if marker in cm_content:
+        updated = cm_content.replace(marker, "\n" + new_entry + "    litellm_settings:", 1)
+        return updated, True
+
+    # Fallback: append (shouldn't happen with well-formed config)
+    return cm_content.rstrip("\n") + "\n" + new_entry, True
 
 
 # ---------------------------------------------------------------------------
@@ -569,50 +617,73 @@ async def _pre_review_loop(
 @router.post("/api/v1/mcp/register", response_model=McpRegisterResponse, dependencies=[Depends(_check_auth)])
 async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
     registry = await _load_registry()
-    if reg.name in registry:
-        raise HTTPException(status_code=409, detail=f"MCP '{reg.name}' is already registered")
+    already_exists = reg.name in registry
 
-    # Generate manifests in memory, optionally run review loop before any GitHub writes
-    manifests = _build_manifests(reg)
+    # Block full re-registration (would recreate gitops files that already exist).
+    # skip_manifests=True lets you re-register the LiteLLM entry for a pre-existing MCP.
+    if already_exists and not reg.skip_manifests:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"MCP '{reg.name}' is already registered. "
+                "Pass skip_manifests=true to update the LiteLLM entry only."
+            ),
+        )
+
+    manifests: dict[str, str] = {}
     review_warning: str | None = None
-    if not reg.skip_pre_review:
-        manifests, review_warning = await _pre_review_loop(manifests, reg)
+
+    if not reg.skip_manifests:
+        manifests = _build_manifests(reg)
+        if not reg.skip_pre_review:
+            manifests, review_warning = await _pre_review_loop(manifests, reg)
 
     token = get_installation_token()
     branch = f"feat/mcp-register-{reg.name}"
 
     async with httpx.AsyncClient(timeout=30) as gh:
         main_sha = await _get_main_sha(gh, token)
-        await _create_branch(gh, token, branch, main_sha)
 
-        for filename, content in manifests.items():
-            await _create_file(
-                gh, token,
-                f"apps/mcp/{reg.name}/{filename}",
-                content,
-                f"feat(mcp-factory): add {reg.name} MCP {filename}",
-                branch,
+        # Branch may already exist from a prior (partial) run — tolerate 422.
+        try:
+            await _create_branch(gh, token, branch, main_sha)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 422:
+                raise
+
+        if not reg.skip_manifests:
+            for filename, content in manifests.items():
+                await _create_file(
+                    gh, token,
+                    f"apps/mcp/{reg.name}/{filename}",
+                    content,
+                    f"feat(mcp-factory): add {reg.name} MCP {filename}",
+                    branch,
+                )
+
+            root_app, root_sha = await _get_file(gh, token, "root-app.yaml", branch)
+            await _update_file(
+                gh, token, "root-app.yaml",
+                root_app + _argocd_application_yaml(reg),
+                f"feat(mcp-factory): register {reg.name} in ArgoCD",
+                branch, root_sha,
             )
 
-        root_app, root_sha = await _get_file(gh, token, "root-app.yaml", branch)
-        await _update_file(
-            gh, token, "root-app.yaml",
-            root_app + _argocd_application_yaml(reg),
-            f"feat(mcp-factory): register {reg.name} in ArgoCD",
-            branch, root_sha,
-        )
-
+        # Always upsert the LiteLLM configmap entry — idempotent, correct placement.
         cm_path = "apps/litellm/server/configmap.yaml"
         cm_content, cm_sha = await _get_file(gh, token, cm_path, branch)
-        await _update_file(
-            gh, token, cm_path,
-            cm_content.rstrip("\n") + "\n" + _litellm_mcp_entry(reg),
-            f"feat(mcp-factory): add {reg.name} to LiteLLM mcp_servers",
-            branch, cm_sha,
-        )
+        new_cm_content, cm_changed = _upsert_litellm_config(cm_content, reg)
+        if cm_changed:
+            await _update_file(
+                gh, token, cm_path,
+                new_cm_content,
+                f"feat(mcp-factory): upsert {reg.name} in LiteLLM mcp_servers",
+                branch, cm_sha,
+            )
 
+        mode = "LiteLLM registration only" if reg.skip_manifests else "full registration"
         pr_body = (
-            f"Auto-generated by praetor MCP factory.\n\n"
+            f"Auto-generated by praetor MCP factory ({mode}).\n\n"
             f"Registers `{reg.name}` MCP:\n"
             f"- Image: `{reg.image}`\n"
             f"- Port: `{reg.port}`\n"
@@ -621,7 +692,7 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
         if review_warning:
             pr_body += f"\n---\n⚠️ **Pre-review warning:** {review_warning}\n"
 
-        pr_url = await _create_pr(
+        pr_url = await _get_or_create_pr(
             gh, token,
             f"feat(mcp-factory): register {reg.name} MCP",
             pr_body,
