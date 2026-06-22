@@ -6,10 +6,8 @@ from pathlib import Path
 
 import httpx
 from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai.usage import UsageLimits
 
 from common.memory_tools import add_memory, search_memory
 from common.github_app import get_installation_token
@@ -177,17 +175,6 @@ async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> 
     return "task updated"
 
 
-def _build_mcp_toolset() -> MCPToolset:
-    mcp_url = os.environ.get(
-        "LITELLM_MCP_URL",
-        os.environ["LITELLM_BASE_URL"].replace("/v1", "/mcp"),
-    )
-    return MCPToolset(
-        mcp_url,
-        headers={"Authorization": f"Bearer {os.environ['LITELLM_API_KEY']}"},
-    )
-
-
 def build_agent() -> Agent:
     model = OpenAIChatModel(
         model_name=os.environ.get("LLM_MODEL", "coder"),
@@ -199,7 +186,6 @@ def build_agent() -> Agent:
     return Agent(
         model=model,
         system_prompt=get_system_prompt("coder-system", fallback=_CODER_SYSTEM_PROMPT_FALLBACK),
-        mcp_servers=[_build_mcp_toolset()],
         tools=[
             read_file,
             write_file,
