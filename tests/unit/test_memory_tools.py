@@ -22,14 +22,14 @@ def mock_http(env_mem0):
 
 
 class TestAddMemory:
-    def test_calls_post_memories(self, mock_http):
+    async def test_calls_post_memories(self, mock_http):
         instance, _ = mock_http
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock()
         instance.post.return_value = mock_resp
 
         from common.memory_tools import add_memory
-        add_memory("a fact", "agent-1")
+        await add_memory("a fact", "agent-1")
 
         instance.post.assert_called_once()
         call_args = instance.post.call_args
@@ -39,17 +39,17 @@ class TestAddMemory:
         assert body["agent_id"] == "agent-1"
         assert body["infer"] is False
 
-    def test_returns_stored(self, mock_http):
+    async def test_returns_stored(self, mock_http):
         instance, _ = mock_http
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock()
         instance.post.return_value = mock_resp
 
         from common.memory_tools import add_memory
-        result = add_memory("x", "a")
+        result = await add_memory("x", "a")
         assert result == "stored"
 
-    def test_raises_on_http_error(self, mock_http):
+    async def test_raises_on_http_error(self, mock_http):
         instance, _ = mock_http
         mock_resp = MagicMock()
         mock_resp.raise_for_status.side_effect = Exception("500 Internal Server Error")
@@ -57,11 +57,11 @@ class TestAddMemory:
 
         from common.memory_tools import add_memory
         with pytest.raises(Exception, match="500"):
-            add_memory("x", "a")
+            await add_memory("x", "a")
 
 
 class TestSearchMemory:
-    def test_calls_post_search(self, mock_http):
+    async def test_calls_post_search(self, mock_http):
         instance, _ = mock_http
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock()
@@ -69,7 +69,7 @@ class TestSearchMemory:
         instance.post.return_value = mock_resp
 
         from common.memory_tools import search_memory
-        search_memory("query", "agent-1")
+        await search_memory("query", "agent-1")
 
         instance.post.assert_called_once()
         call_args = instance.post.call_args
@@ -78,7 +78,7 @@ class TestSearchMemory:
         assert body["query"] == "query"
         assert body["agent_id"] == "agent-1"
 
-    def test_extracts_memory_field(self, mock_http):
+    async def test_extracts_memory_field(self, mock_http):
         instance, _ = mock_http
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock()
@@ -86,10 +86,10 @@ class TestSearchMemory:
         instance.post.return_value = mock_resp
 
         from common.memory_tools import search_memory
-        result = search_memory("q", "a")
+        result = await search_memory("q", "a")
         assert result == ["fact1", "fact2"]
 
-    def test_empty_results(self, mock_http):
+    async def test_empty_results(self, mock_http):
         instance, _ = mock_http
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock()
@@ -97,7 +97,7 @@ class TestSearchMemory:
         instance.post.return_value = mock_resp
 
         from common.memory_tools import search_memory
-        assert search_memory("q", "a") == []
+        assert await search_memory("q", "a") == []
 
 
 class TestGetAllMemories:
@@ -129,18 +129,18 @@ class TestGetAllMemories:
 
 
 class TestClientSingleton:
-    def test_client_created_once(self, mock_http):
+    async def test_client_created_once(self, mock_http):
         instance, MockClass = mock_http
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock()
         instance.post.return_value = mock_resp
 
         from common.memory_tools import add_memory
-        add_memory("a", "x")
-        add_memory("b", "x")
+        await add_memory("a", "x")
+        await add_memory("b", "x")
         assert MockClass.call_count == 1
 
-    def test_client_uses_x_api_key_header(self, env_mem0, monkeypatch):
+    async def test_client_uses_x_api_key_header(self, env_mem0, monkeypatch):
         monkeypatch.setenv("MEM0_API_KEY", "my-api-key")
         monkeypatch.setenv("MEM0_BASE_URL", "https://mem0.test")
 
@@ -152,13 +152,13 @@ class TestClientSingleton:
             MockClass.return_value = mock_instance
 
             from common.memory_tools import add_memory
-            add_memory("x", "y")
+            await add_memory("x", "y")
 
         call_kwargs = MockClass.call_args[1]
         assert call_kwargs["headers"]["x-api-key"] == "my-api-key"
         assert "Authorization" not in call_kwargs["headers"]
 
-    def test_client_uses_base_url(self, monkeypatch):
+    async def test_client_uses_base_url(self, monkeypatch):
         monkeypatch.setenv("MEM0_API_KEY", "key")
         monkeypatch.setenv("MEM0_BASE_URL", "https://custom-mem0.test")
 
@@ -170,14 +170,14 @@ class TestClientSingleton:
             MockClass.return_value = mock_instance
 
             from common.memory_tools import add_memory
-            add_memory("x", "y")
+            await add_memory("x", "y")
 
         call_kwargs = MockClass.call_args[1]
         assert call_kwargs["base_url"] == "https://custom-mem0.test"
 
-    def test_missing_env_raises_key_error(self, monkeypatch):
+    async def test_missing_env_raises_key_error(self, monkeypatch):
         monkeypatch.delenv("MEM0_BASE_URL", raising=False)
         monkeypatch.delenv("MEM0_API_KEY", raising=False)
         with pytest.raises(KeyError):
             from common.memory_tools import add_memory
-            add_memory("x", "y")
+            await add_memory("x", "y")
