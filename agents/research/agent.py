@@ -58,8 +58,11 @@ async def web_search(query: str, max_results: int = 5) -> str:
 async def web_read_url(url: str, max_chars: int = 4000) -> str:
     """Fetch a URL and return its text content (markdown-converted), capped at max_chars."""
     async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-        resp = await client.get(url, headers={"User-Agent": "praetor-research/1.0"})
-        resp.raise_for_status()
+        try:
+            resp = await client.get(url, headers={"User-Agent": "praetor-research/1.0"})
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            return f"ERROR fetching {url}: HTTP {exc.response.status_code} — skip this URL and continue"
         text = resp.text
         text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
