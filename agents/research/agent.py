@@ -1,5 +1,6 @@
 """PydanticAI research agent with web search via direct HTTP, memory, and Vikunja integration."""
 import os
+import re
 import httpx
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -60,8 +61,6 @@ async def web_read_url(url: str, max_chars: int = 4000) -> str:
         resp = await client.get(url, headers={"User-Agent": "praetor-research/1.0"})
         resp.raise_for_status()
         text = resp.text
-        # Strip HTML tags simply
-        import re
         text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<[^>]+>", " ", text)
