@@ -31,6 +31,7 @@
 | 26 | Inline Arbitration | ⬜ Pending | Re-dispatch loop exhausted → focused LLM call → decision memo written to mem0 + PR comment |
 | 27 | Voice Dispatch | ⬜ Pending | Voice input → OWU → lm_praetor_dispatch pipeline |
 | 28 | Control Plane UI | ⬜ Pending | Praetor "single pane of glass": agent matrix (skills × agents toggle), MCP registry panel, task log viewer, skill prompt editor. Requires Phase 24 (skills API). NOT Ecdysis. |
+| 29 | Model Factory | ⬜ Pending | Dispatch a model name → hardware fit check across all runners → download to best runner → LiteLLM GitOps PR → benchmark suite (tool calling, approvals, general capability, instruction following) → Langfuse report. See phase-29.md. |
 
 ---
 
