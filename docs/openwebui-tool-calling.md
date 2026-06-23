@@ -43,25 +43,31 @@ Without this, OpenWebUI defaults to text injection and tool calls will never exe
 
 ### Current models with tools enabled
 
-| Model ID | Tool Server | function_calling |
-|----------|-------------|-----------------|
-| `qwen3-35b-think` | `server:mcp:litellm-mcp` | `native` |
+| Model ID | Type | Base model | Tool Server | function_calling |
+|----------|------|------------|-------------|-----------------|
+| `qwen3-35b-think-custom` | **custom** | `qwen3-35b-think` | `server:mcp:lm` | `native` |
 
-### Setting via API
+The model is a **custom OWU model** (not a base model). Custom models have `base_model_id` set
+and are never overwritten by OWU's LiteLLM model sync. This is the durable fix — base models
+(those without `base_model_id`) get their `params` and `meta` reset by the sync job on restart.
+
+The raw `qwen3-35b-think` base model is kept but marked `is_active: false` to hide it from users.
+
+`DEFAULT_MODELS` in `komodo-dean-gitops/mac-mini-m4/openwebui/compose.yaml` is set to
+`qwen3-35b-think-custom`.
+
+### Recreating from scratch
+
+If OWU's database is ever wiped, run:
 
 ```bash
-curl -X POST "https://bot.amer.dev/api/v1/models/model/update" \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "<model-id>",
-    "name": "<model-name>",
-    "meta": { ... },
-    "params": { "function_calling": "native" },
-    "is_active": true,
-    "access_grants": []
-  }'
+OWUI_BASE_URL=https://bot.amer.dev \
+OWUI_ADMIN_EMAIL=alex@amer.dev \
+OWUI_ADMIN_PASSWORD=<from BWS: openwebui-dean-admin-password> \
+python scripts/register_owui_tool.py
 ```
+
+This script is idempotent and handles all three steps: tool, custom model, base model deactivation.
 
 ---
 
