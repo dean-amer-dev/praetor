@@ -78,7 +78,7 @@ class Tools:
 '''
 
 CUSTOM_MODEL_ID = "qwen3-35b-think-custom"
-CUSTOM_MODEL_NAME = "qwen3-35b-think"
+CUSTOM_MODEL_NAME = "murderbot-v0"
 BASE_MODEL_ID = "qwen3-35b-think"
 
 SYSTEM_PROMPT = """\
@@ -157,7 +157,7 @@ def ensure_custom_model(client: httpx.Client) -> None:
         "params": {"function_calling": "native"},
         "meta": {
             "profile_image_url": "",
-            "description": "Qwen3 35B with thinking — Alex personal assistant",
+            "description": "murderbot qwen3-35b — personal assistant with tool calling",
             "capabilities": {
                 "vision": False, "usage": False, "citations": False,
                 "memory": False, "builtin_tools": False,
