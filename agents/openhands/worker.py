@@ -30,12 +30,27 @@ async def _create_conversation(task_text: str) -> str:
         resp = await client.post(f"{_OPENHANDS_BASE}/api/conversations", json={})
         resp.raise_for_status()
         conversation_id = resp.json()["conversation_id"]
+
+    # Wait for agent session to be ready (AWAITING_USER_INPUT) before sending the
+    # message. The action execution server takes ~45s to initialize; messages sent
+    # before the session is ready are silently dropped.
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        async with httpx.AsyncClient(timeout=10) as client:
+            check = await client.get(f"{_OPENHANDS_BASE}/api/conversations/{conversation_id}")
+            check.raise_for_status()
+        state = check.json().get("status", "")
+        if state in ("RUNNING", "AWAITING_USER_INPUT"):
+            break
+        await asyncio.sleep(5)
+
+    async with httpx.AsyncClient(timeout=30) as client:
         msg = await client.post(
             f"{_OPENHANDS_BASE}/api/conversations/{conversation_id}/message",
             json={"message": task_text},
         )
         msg.raise_for_status()
-        return conversation_id
+    return conversation_id
 
 
 async def _poll_until_done(conversation_id: str) -> dict:
