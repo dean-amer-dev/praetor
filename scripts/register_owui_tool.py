@@ -150,8 +150,10 @@ def ensure_tool(client: httpx.Client) -> None:
 
 
 def ensure_custom_model(client: httpx.Client) -> None:
-    models = client.get("/api/v1/models/base").raise_for_status().json()
-    existing = next((m for m in models if m.get("id") == CUSTOM_MODEL_ID), None)
+    # Use the direct model endpoint — /api/v1/models/base only returns LiteLLM base models,
+    # not OWU custom models, causing false "not found" → failed create on restart.
+    resp = client.get(f"/api/v1/models/model?id={CUSTOM_MODEL_ID}")
+    existing = resp.json() if resp.status_code == 200 else None
 
     model_payload = {
         "id": CUSTOM_MODEL_ID,
@@ -212,7 +214,9 @@ def main() -> None:
         client.headers["Authorization"] = f"Bearer {token}"
         ensure_tool(client)
         ensure_custom_model(client)
-        deactivate_base_model(client)
+        # NOTE: deactivate_base_model was removed — deactivating qwen3-35b-think breaks
+        # custom model routing in OWU 0.9.6 (custom models route through their base_model_id,
+        # which OWU requires to be active in the model list)
         print("Done.")
 
 
