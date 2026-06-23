@@ -56,6 +56,7 @@ async def _create_conversation(task_text: str) -> str:
 
 async def _poll_until_done(conversation_id: str) -> dict:
     deadline = time.monotonic() + _MAX_POLL_MINUTES * 60
+    last_event_id = 0
     while time.monotonic() < deadline:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(f"{_OPENHANDS_BASE}/api/conversations/{conversation_id}")
@@ -64,6 +65,20 @@ async def _poll_until_done(conversation_id: str) -> dict:
         status = data.get("status", "RUNNING")
         if status in ("FINISHED", "ERROR", "STOPPED"):
             return data
+        # OpenHands keeps status=RUNNING even after agent error; check events directly.
+        async with httpx.AsyncClient(timeout=10) as client:
+            ev_resp = await client.get(
+                f"{_OPENHANDS_BASE}/api/conversations/{conversation_id}/events",
+                params={"limit": 5, "start_id": last_event_id},
+            )
+            ev_resp.raise_for_status()
+        events = ev_resp.json().get("events", [])
+        for ev in events:
+            if ev.get("id", 0) > last_event_id:
+                last_event_id = ev["id"]
+            extras = ev.get("extras", {})
+            if extras.get("agent_state") == "error":
+                return {"status": "ERROR", "conversation_id": conversation_id, "reason": extras.get("reason", "")}
         await asyncio.sleep(_POLL_INTERVAL)
     return {"status": "TIMEOUT", "conversation_id": conversation_id}
 
