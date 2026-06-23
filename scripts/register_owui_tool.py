@@ -40,7 +40,10 @@ from pydantic import BaseModel, Field
 class Tools:
     class Valves(BaseModel):
         PRAETOR_BASE_URL: str = "https://praetor.amer.dev"
-        PRAETOR_API_KEY: str = Field(default_factory=lambda: os.environ.get("PRAETOR_API_KEY", ""))
+        # env var wins when set (after Komodo redeploy); hardcoded key is fallback for now
+        PRAETOR_API_KEY: str = Field(
+            default_factory=lambda: os.environ.get("PRAETOR_API_KEY", "dRykVJyZp79Ute6JRKlZAgTuMs2jMXodKpszRyj-8aY")
+        )
 
     def __init__(self):
         self.valves = self.Valves()
