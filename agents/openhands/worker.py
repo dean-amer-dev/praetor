@@ -31,16 +31,17 @@ async def _create_conversation(task_text: str) -> str:
         resp.raise_for_status()
         conversation_id = resp.json()["conversation_id"]
 
-    # Wait for agent session to be ready (AWAITING_USER_INPUT) before sending the
-    # message. The action execution server takes ~45s to initialize; messages sent
-    # before the session is ready are silently dropped.
+    # Wait for AWAITING_USER_INPUT before sending the message. OpenHands returns
+    # "RUNNING" while the session is still loading (action server ~45s init), so
+    # accepting RUNNING causes messages to be dropped. Must wait for the specific
+    # AWAITING_USER_INPUT state which only appears after the session is truly ready.
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         async with httpx.AsyncClient(timeout=10) as client:
             check = await client.get(f"{_OPENHANDS_BASE}/api/conversations/{conversation_id}")
             check.raise_for_status()
         state = check.json().get("status", "")
-        if state in ("RUNNING", "AWAITING_USER_INPUT"):
+        if state == "AWAITING_USER_INPUT":
             break
         await asyncio.sleep(5)
 
