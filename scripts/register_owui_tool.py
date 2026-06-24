@@ -31,8 +31,9 @@ TOOL_NAME = "Praetor Dispatch"
 TOOL_DESCRIPTION = "Dispatch Praetor agent tasks (research, code, pipeline) and check their status."
 
 TOOL_CONTENT = '''\
-"""Praetor Agent Dispatch"""
+"""Praetor Agent Dispatch + Web Search"""
 import os
+import json
 import httpx
 from pydantic import BaseModel, Field
 
@@ -40,6 +41,7 @@ from pydantic import BaseModel, Field
 class Tools:
     class Valves(BaseModel):
         PRAETOR_BASE_URL: str = "https://praetor.amer.dev"
+        SEARXNG_BASE_URL: str = "https://searxng.amer.dev"
         # env var wins when set (after Komodo redeploy); hardcoded key is fallback for now
         PRAETOR_API_KEY: str = Field(
             default_factory=lambda: os.environ.get("PRAETOR_API_KEY", "dRykVJyZp79Ute6JRKlZAgTuMs2jMXodKpszRyj-8aY")
@@ -47,6 +49,48 @@ class Tools:
 
     def __init__(self):
         self.valves = self.Valves()
+
+    def web_search(self, query: str) -> str:
+        """
+        Search the web for current information. Use this for ANY research question,
+        news, facts, events, or anything you need to look up. Returns top results with
+        titles, URLs, and snippets.
+        """
+        resp = httpx.get(
+            f"{self.valves.SEARXNG_BASE_URL}/search",
+            params={"q": query, "format": "json", "engines": "google,bing,duckduckgo"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", [])[:6]
+        if not results:
+            return "No results found."
+        lines = []
+        for r in results:
+            lines.append(f"[{r.get(\'title\', \'\')}]({r.get(\'url\', \'\')})")
+            if r.get("content"):
+                lines.append(r["content"][:300])
+            lines.append("")
+        return "\\n".join(lines)
+
+    def web_read_url(self, url: str) -> str:
+        """
+        Fetch and return the text content of a web page. Use after web_search to
+        read the full content of a specific result.
+        """
+        try:
+            resp = httpx.get(url, timeout=15, follow_redirects=True,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            text = resp.text
+            # strip tags naively
+            import re
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = re.sub(r"\\s+", " ", text).strip()
+            return text[:4000]
+        except Exception as e:
+            return f"Error fetching URL: {e}"
 
     def dispatch_task(self, title: str, description: str, task_type: str) -> str:
         """
@@ -172,7 +216,7 @@ def ensure_custom_model(client: httpx.Client) -> None:
             "description": "murderbot qwen3-35b — personal assistant with tool calling",
             "capabilities": {
                 "vision": False, "usage": False, "citations": False,
-                "memory": False, "builtin_tools": False,
+                "memory": False, "builtin_tools": True,
             },
             "builtinTools": {
                 "chats": False, "calendar": False, "tasks": False, "memory": False,
