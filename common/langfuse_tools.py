@@ -26,7 +26,7 @@ if _ENABLED:
 else:
     import functools
 
-    def observe():  # type: ignore[misc]
+    def observe(*args, **kwargs):  # type: ignore[misc]
         def decorator(fn):
             return fn
         return decorator

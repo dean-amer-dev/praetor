@@ -59,20 +59,42 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
     repo = repo_match.group(1)
     memory_agent_id = f"coder-{repo}"
 
+    pr_match     = re.search(r"pr:\s*(\d+)",       input.task_description)
+    branch_match = re.search(r"branch:\s*(\S+)",   input.task_description)
+    attempt_match = re.search(r"attempt:\s*(\d+)", input.task_description)
+
+    pr_number = pr_match.group(1)            if pr_match      else None
+    branch    = branch_match.group(1)        if branch_match  else None
+    attempt   = int(attempt_match.group(1))  if attempt_match else 0
+
     # Phase 21 condition 6: search_memory is ALWAYS the first operation.
     # Awaited directly (not via run_in_executor) so @observe() creates a child span
     # in the current Langfuse trace, making it visible as the first tool call.
     prior = await search_memory(f"{input.task_title} {input.task_description}", memory_agent_id)
     prior_context = "\n".join(prior) if prior else "No prior memory found for this repo."
 
+    if pr_number and branch:
+        # Mode B — edit existing PR
+        mode_block = (
+            f"This is revision attempt {attempt + 1}/2 for existing PR #{pr_number}.\n"
+            f"Branch: {branch}\n"
+            f"DO NOT create a new branch. Check out '{branch}' and push your fixes to it.\n"
+            f"DO NOT open a new PR. The PR already exists at #{pr_number}.\n"
+        )
+    else:
+        # Mode A — create new PR
+        mode_block = (
+            f"Create branch praetor-coder/task-{input.task_id}, implement, commit, push, "
+            f"then open a draft PR. "
+        )
+
     prompt = (
         f"Task #{input.task_id}: {input.task_title}\n\n"
         f"Prior memory context for {repo}:\n{prior_context}\n\n"
         f"Description: {input.task_description}\n\n"
-        f"Implement this task on the referenced repo. Create branch praetor-coder/task-{input.task_id}, "
-        f"implement, commit, push, then open a draft PR. "
+        f"{mode_block}"
         f"After completing, call add_memory(agent_id='{memory_agent_id}') with key decisions, "
-        f"and update_vikunja_task(task_id={input.task_id}) with the PR URL."
+        f"and update_vikunja_task(task_id={input.task_id}) with the outcome."
     )
     agent = _get_agent()
     task_active.labels(agent=_AGENT_NAME).inc()

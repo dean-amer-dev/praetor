@@ -104,23 +104,12 @@ def fetch_file_content(repo: str, path: str, ref: str, token: str) -> str:
 
 
 def post_review_comment(repo: str, pr_number: str, body: str, event: str, token: str) -> str:
-    """Post a review on a GitHub PR. event must be APPROVE, REQUEST_CHANGES, or COMMENT.
-    Skips silently if this bot has already posted a review on this PR."""
+    """Post a review on a GitHub PR. event must be APPROVE, REQUEST_CHANGES, or COMMENT."""
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    existing = httpx.get(
-        f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews",
-        headers=headers,
-        timeout=15,
-    )
-    existing.raise_for_status()
-    bot_login = os.environ.get("GITHUB_BOT_LOGIN", "praetor-reviewer[bot]")
-    if any(r.get("user", {}).get("login", "") == bot_login for r in existing.json()):
-        return "already reviewed — skipping duplicate"
-
     valid_events = {"APPROVE", "REQUEST_CHANGES", "COMMENT"}
     if event not in valid_events:
         event = "COMMENT"
