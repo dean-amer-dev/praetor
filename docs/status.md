@@ -26,7 +26,7 @@
 | 21 | Coder Re-Dispatch Loop | ✅ Complete | PR #118 merged. pr:/branch:/attempt: parsing in coder worker; Mode A (new PR) + Mode B (edit existing PR) prompts; reviewer re-dispatch on REQUEST_CHANGES (cap attempt<1); synchronize webhook on praetor-coder/ branches; 8 new unit tests. |
 | 22 | Spec Layer + Planning Conversation | ✅ Complete | PRs #124 (praetor) + #27 (dean-mcp) merged, deployed sha-3e1bfb1 + sha-eac9572. spec.py: POST /api/v1/spec/execute + POST /api/v1/memory/search. Coder: _parse_spec + spec-aware prompts + request_limit + planner-global Mem0. Reviewer+Research: planner-global writes. dean-mcp: memory_search + execute_spec tools. 292 unit tests pass. 51/51 smoke tests green. |
 | 23 | Coder Context Management + Feature Decomposition | ✅ Complete | PRs #127 (praetor) + #930/#931 (k3s-dean-gitops) merged, deployed sha-04244ae. (23a) run_shell→3000 chars tail, read_file→8000 chars head; (23b) save_progress tool in coder agent; (23c) feature-pipeline-worker running (pipeline:feature_decompose). 297 unit tests pass, 51/51 smoke tests green. |
-| 24 | Skills System | ⬜ Pending | Dynamic per-agent prompt-only skills. Storage: PostgreSQL (praetor_skills + praetor_agent_skills tables on existing mac-mini DB) — no pod restarts, instant updates. Workers query at task-start and assemble final prompt = base + active skill snippets. Skill text lives in Langfuse as skill-{name}. API: CRUD for skills + per-agent assignments. |
+| 24 | Skills System | ✅ Complete | PRs #130 (praetor) + #932/#933/#934 (k3s-dean-gitops) merged, deployed sha-ee8e4e8. common/db.py (asyncpg pool), common/skills.py (assemble_prompt), webhooks/skills.py (CRUD API). All workers call assemble_prompt() at task-start. praetor_skills + praetor_agent_skills tables on mac-mini postgres. 318 unit tests pass. |
 | 25 | Agent Factory | ⬜ Pending | POST /api/v1/agent/create → scaffold → wire Hatchet event → CI/deploy → smoke test in one call. Phase 11 scaffold-worker does the PR; this wraps the full pipeline. |
 | 26 | Inline Arbitration | ⬜ Pending | Re-dispatch loop exhausted → focused LLM call → decision memo written to mem0 + PR comment |
 | 27 | Voice Dispatch | ⬜ Pending | Voice input → OWU → lm_praetor_dispatch pipeline |
@@ -143,6 +143,19 @@ reviewer                                              ✓              ✓
 ---
 
 ## Completed Work Notes
+
+### Phase 24 (merged PR #130)
+- `common/db.py`: asyncpg pool, lazy init, graceful fallback when PRAETOR_DB_URL not set
+- `common/skills.py`: load_skill_assignments(agent_name) + assemble_prompt(agent_name, base) — queries praetor_skills/praetor_agent_skills, fetches snippet text from Langfuse
+- `webhooks/skills.py`: full CRUD for /api/v1/skills + /api/v1/agents/{name}/skills
+- `webhooks/app.py`: skills router registered; DB pool warmed in lifespan
+- `agents/*/agent.py`: build_agent() accepts optional system_prompt override (all 4 agents)
+- `agents/*/worker.py`: assemble_prompt() called at task-start, global agent cache removed (all 4 workers)
+- `agents/research/run_once.py`: assemble_prompt in subprocess
+- `pipelines/feature_pipeline.py`: assembles coder prompt once per pipeline run, passes to all build_coder_agent() calls
+- `requirements.txt`: asyncpg>=0.29.0
+- DB: praetor user/database on mac-mini postgres; praetor_skills + praetor_agent_skills tables; BWS secret praetor-db-password
+- k3s-dean-gitops: PRAETOR_DB_URL added to 7 workers/adapters (PRs #932/#933/#934)
 
 ### Phase 23 (merged PR #127)
 - `agents/coder/agent.py`: run_shell capped at 3000 chars (tail), read_file at 8000 chars (head); save_progress(task_id, done, remaining, notes) tool registered in build_agent()
