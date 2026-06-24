@@ -319,6 +319,44 @@ def _deployment_yaml(name: str, image_tag: str) -> str:
     )
 
 
+def _argocd_app_yaml(name: str) -> str:
+    return (
+        f"---\n"
+        f"# Application: praetor {name} worker (agent-factory managed)\n"
+        f"apiVersion: argoproj.io/v1alpha1\n"
+        f"kind: Application\n"
+        f"metadata:\n"
+        f"  name: app-praetor-{name}-worker\n"
+        f"  namespace: default\n"
+        f"  annotations:\n"
+        f"    argocd.argoproj.io/sync-wave: \"5\"\n"
+        f"  finalizers:\n"
+        f"    - resources-finalizer.argocd.argoproj.io/background\n"
+        f"spec:\n"
+        f"  project: application\n"
+        f"  source:\n"
+        f"    repoURL: https://github.com/amerenda/k3s-dean-gitops.git\n"
+        f"    targetRevision: main\n"
+        f"    path: apps/praetor/{name}-worker\n"
+        f"  destination:\n"
+        f"    server: https://kubernetes.default.svc\n"
+        f"    namespace: praetor\n"
+        f"  syncPolicy:\n"
+        f"    automated:\n"
+        f"      prune: true\n"
+        f"      selfHeal: true\n"
+        f"    syncOptions:\n"
+        f"      - CreateNamespace=true\n"
+        f"      - PrunePropagationPolicy=foreground\n"
+        f"    retry:\n"
+        f"      limit: 5\n"
+        f"      backoff:\n"
+        f"        duration: 5s\n"
+        f"        factor: 2\n"
+        f"        maxDuration: 3m\n"
+    )
+
+
 def _externalsecret_yaml(name: str, include_coder_creds: bool = False) -> str:
     secret_name = f"praetor-{name}-secrets"
     keys = list(_BASE_SECRET_KEYS)
@@ -427,6 +465,44 @@ async def _create_file(
         json={
             "message": message,
             "content": base64.b64encode(content.encode()).decode(),
+            "branch": branch,
+        },
+    )
+    resp.raise_for_status()
+
+
+async def _get_file(
+    client: httpx.AsyncClient, token: str, repo: str, path: str, branch: str = "main"
+) -> tuple[str, str]:
+    """Return (decoded_content, sha) for a file in the repo."""
+    resp = await client.get(
+        f"{GITHUB_API}/repos/{repo}/contents/{path}",
+        headers=_gh_headers(token),
+        params={"ref": branch},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    content = base64.b64decode(data["content"].replace("\n", "")).decode()
+    return content, data["sha"]
+
+
+async def _update_file(
+    client: httpx.AsyncClient,
+    token: str,
+    repo: str,
+    path: str,
+    content: str,
+    message: str,
+    branch: str,
+    file_sha: str,
+) -> None:
+    resp = await client.put(
+        f"{GITHUB_API}/repos/{repo}/contents/{path}",
+        headers=_gh_headers(token),
+        json={
+            "message": message,
+            "content": base64.b64encode(content.encode()).decode(),
+            "sha": file_sha,
             "branch": branch,
         },
     )
@@ -768,12 +844,27 @@ async def create_agent(req: AgentCreateRequest) -> AgentCreateResponse:
             f"feat(agent-factory): add {req.name} externalsecret",
             manifest_branch,
         )
+        # Patch root-app.yaml to add ArgoCD Application entry (idempotent)
+        root_app_path = "root-app.yaml"
+        root_app_content, root_app_sha = await _get_file(
+            gh, token, GITOPS_REPO, root_app_path, manifest_branch
+        )
+        argocd_app_block = _argocd_app_yaml(req.name)
+        app_marker = f"app-praetor-{req.name}-worker"
+        if app_marker not in root_app_content:
+            updated_root = root_app_content.rstrip("\n") + "\n" + argocd_app_block
+            await _update_file(
+                gh, token, GITOPS_REPO, root_app_path, updated_root,
+                f"feat(agent-factory): register ArgoCD app for {req.name}",
+                manifest_branch, root_app_sha,
+            )
         manifest_pr_url = await _create_pr(
             gh, token, GITOPS_REPO,
             f"feat(agent-factory): deploy {req.name} agent",
             (
                 f"Gitops manifest for `praetor-{req.name}-worker`.\n\n"
-                f"Image: `amerenda/praetor-{req.name}:{image_tag}`"
+                f"Image: `amerenda/praetor-{req.name}:{image_tag}`\n\n"
+                f"Adds deployment, externalsecret, and ArgoCD Application to root-app.yaml."
             ),
             manifest_branch,
         )
