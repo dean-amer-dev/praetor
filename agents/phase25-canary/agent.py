@@ -10,11 +10,22 @@ _SYSTEM_PROMPT_FALLBACK = """You are phase25-canary, a Hatchet agent. Phase 25 c
 
 
 def build_agent() -> Agent:
+    litellm_base_url = os.environ.get("LITELLM_BASE_URL")
+    if not litellm_base_url:
+        raise RuntimeError(
+            "LITELLM_BASE_URL environment variable is required but was not set"
+        )
+    litellm_api_key = os.environ.get("LITELLM_API_KEY")
+    if not litellm_api_key:
+        raise RuntimeError(
+            "LITELLM_API_KEY environment variable is required but was not set"
+        )
+
     model = OpenAIChatModel(
         model_name=os.environ.get("LLM_MODEL", "phase25-canary"),
         provider=OpenAIProvider(
-            base_url=os.environ["LITELLM_BASE_URL"],
-            api_key=os.environ["LITELLM_API_KEY"],
+            base_url=litellm_base_url,
+            api_key=litellm_api_key,
         ),
     )
     return Agent(
