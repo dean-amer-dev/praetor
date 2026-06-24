@@ -45,13 +45,13 @@ Without this, OpenWebUI defaults to text injection and tool calls will never exe
 
 | Model ID | Type | Base model | Tool Server | function_calling |
 |----------|------|------------|-------------|-----------------|
-| `qwen3-35b-think-custom` | **custom** | `qwen3-35b-think` | `server:mcp:lm` | `native` |
+| `qwen3-35b-think-custom` | **custom** | `qwen3-35b-think` | `server:mcp:lm`, `praetor_dispatch` | `native` |
 
 The model is a **custom OWU model** (not a base model). Custom models have `base_model_id` set
 and are never overwritten by OWU's LiteLLM model sync. This is the durable fix — base models
 (those without `base_model_id`) get their `params` and `meta` reset by the sync job on restart.
 
-The raw `qwen3-35b-think` base model is kept but marked `is_active: false` to hide it from users.
+The raw `qwen3-35b-think` base model must remain `is_active: true`. OWU 0.9.6 requires the base model to be in the active list to route completions for custom models that reference it via `base_model_id`.
 
 `DEFAULT_MODELS` in `komodo-dean-gitops/mac-mini-m4/openwebui/compose.yaml` is set to
 `qwen3-35b-think-custom`.
@@ -67,7 +67,7 @@ OWUI_ADMIN_PASSWORD=<from BWS: openwebui-dean-admin-password> \
 python scripts/register_owui_tool.py
 ```
 
-This script is idempotent and handles all three steps: tool, custom model, base model deactivation.
+This script is idempotent and handles: `praetor_dispatch` Python tool, `date_injector` global filter, and the custom model config (toolIds, system prompt, function_calling param). It does NOT register the LiteLLM MCP server connection — that lives in OWU's admin UI and persists in the SQLite database at `/Users/alex/komodo/openwebui/data`.
 
 ---
 
@@ -105,3 +105,25 @@ This allows LiteLLM to pass the `tools` parameter through to the underlying back
 **LiteLLM returns 406 "Not Acceptable"**: the MCP client is not sending `Accept: application/json, text/event-stream`. OpenWebUI sends these correctly; custom clients must add both headers.
 
 **`session terminated` error for a tool server**: known issue with the mem0 MCP server — mem0 tools are excluded from available tools but do not block other MCP servers from working.
+
+---
+
+## Date Injection Filter
+
+A global OWU Filter (`date_injector`) prepends `Today's date is YYYY-MM-DD (UTC).` to every system prompt before the request reaches the model. This is required for accurate web searches — without it the model uses its training-data date anchor and may search for stale events.
+
+The filter is registered and enabled by `register_owui_tool.py`. Verify with:
+
+```bash
+SMOKE_TESTS=1 pytest tests/smoke/test_owui_tool_pipeline.py::TestModelConfig::test_date_injector_filter_active_and_global -v
+```
+
+---
+
+## Registered Python Tools
+
+`praetor_dispatch` is an OWU Python tool (not MCP). It provides `dispatch_task` and `get_task_status` only — web search is handled by `server:mcp:lm`. The tool is in `toolIds` alongside `server:mcp:lm`.
+
+Tool methods:
+- `dispatch_task(title, description, task_type)` — dispatches to Praetor API; task_type: `openhands | code | pipeline`
+- `get_task_status(task_id)` — polls Praetor for completion and returns mem0 summary
