@@ -25,7 +25,7 @@
 | 20 | Mem0 Integration + Pre-PR Review Loop | ✅ Complete | search_memory before every task; add_memory after key decisions; reviewer check-before-write pattern |
 | 21 | Coder Re-Dispatch Loop | ✅ Complete | PR #118 merged. pr:/branch:/attempt: parsing in coder worker; Mode A (new PR) + Mode B (edit existing PR) prompts; reviewer re-dispatch on REQUEST_CHANGES (cap attempt<1); synchronize webhook on praetor-coder/ branches; 8 new unit tests. |
 | 22 | Spec Layer + Planning Conversation | ✅ Complete | PRs #124 (praetor) + #27 (dean-mcp) merged, deployed sha-3e1bfb1 + sha-eac9572. spec.py: POST /api/v1/spec/execute + POST /api/v1/memory/search. Coder: _parse_spec + spec-aware prompts + request_limit + planner-global Mem0. Reviewer+Research: planner-global writes. dean-mcp: memory_search + execute_spec tools. 292 unit tests pass. 51/51 smoke tests green. |
-| 23 | Coder Context Management + Feature Decomposition | ⬜ Pending | Three-layer fix for coder OOM: (23a) truncate tool outputs at source; (23b) Mem0 progress checkpoints every 8 actions for crash recovery; (23c) multi-feature specs dispatch pipeline:feature_decompose — sequential inline coder runs, one feature per clean context, idempotent Mem0 resume. See phase-23.md. Requires Phase 22 spec layer. |
+| 23 | Coder Context Management + Feature Decomposition | 🔁 PR merged | PR #127 merged. (23a) run_shell→3000 chars tail, read_file→8000 chars head; (23b) save_progress tool in coder agent; (23c) pipelines/feature_pipeline.py handles pipeline:feature_decompose — sequential per-feature coder runs, crash recovery via Mem0. k3s-dean-gitops PR #930 open for feature-pipeline-worker pod. 297 unit tests pass. |
 | 24 | Skills System | ⬜ Pending | Dynamic per-agent prompt-only skills. Storage: PostgreSQL (praetor_skills + praetor_agent_skills tables on existing mac-mini DB) — no pod restarts, instant updates. Workers query at task-start and assemble final prompt = base + active skill snippets. Skill text lives in Langfuse as skill-{name}. API: CRUD for skills + per-agent assignments. |
 | 25 | Agent Factory | ⬜ Pending | POST /api/v1/agent/create → scaffold → wire Hatchet event → CI/deploy → smoke test in one call. Phase 11 scaffold-worker does the PR; this wraps the full pipeline. |
 | 26 | Inline Arbitration | ⬜ Pending | Re-dispatch loop exhausted → focused LLM call → decision memo written to mem0 + PR comment |
@@ -143,6 +143,15 @@ reviewer                                              ✓              ✓
 ---
 
 ## Completed Work Notes
+
+### Phase 23 (merged PR #127)
+- `agents/coder/agent.py`: run_shell capped at 3000 chars (tail), read_file at 8000 chars (head); save_progress(task_id, done, remaining, notes) tool registered in build_agent()
+- `pipelines/feature_pipeline.py`: new Hatchet worker for pipeline:feature_decompose; sequential per-feature coder runs; branch setup for new_app; Mem0 crash recovery skips done features; GROUP_ROUND_ROBIN concurrency (queues, doesn't cancel)
+- `common/dispatch.py`: feature_pipeline → pipeline:feature_decompose
+- `webhooks/spec.py`: multi-feature modify_app → feature_pipeline; new_app passes spec_toml to _provision_and_dispatch
+- `webhooks/app_factory.py`: _provision_and_dispatch accepts spec_toml, dispatches feature_pipeline for multi-feature new_app
+- Build: Dockerfile.feature-pipeline-worker, gen_matrix.py, build.yaml updated for new static component
+- k3s-dean-gitops: feature-pipeline-worker deployment + externalsecret + ArgoCD Application (PR #930)
 
 ### Phase 21 (merged PR #118)
 - `agents/coder/worker.py`: parses `pr:`, `branch:`, `attempt:` from task description; builds Mode A (new PR) or Mode B (edit existing PR) prompt
