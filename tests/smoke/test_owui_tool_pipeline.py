@@ -108,35 +108,40 @@ class TestModelConfig:
             f"praetor_dispatch missing from toolIds: {tool_ids}"
         )
 
-    def test_no_server_mcp_lm_in_tool_ids(self, owui):
+    def test_server_mcp_lm_in_tool_ids(self, owui):
         """
-        server:mcp:lm must NOT be in toolIds.
+        server:mcp:lm must be in toolIds.
 
-        This MCP integration uses text injection in OWU 0.9.6 regardless of
-        function_calling setting, producing <function=lm_web_search> output
-        that OWU cannot execute. Replaced by builtinTools.web_search.
+        This is the LiteLLM MCP gateway — it exposes web_search, web_read_url,
+        github_*, infra_* tools (16 total). OWU namespaces them as lm_web_search
+        etc. in the model's tool list. Without this entry the model has no web
+        search capability.
+
+        If missing: run `python scripts/register_owui_tool.py` to restore.
         """
         resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
         assert resp.status_code == 200
         tool_ids = resp.json().get("meta", {}).get("toolIds", [])
-        assert "server:mcp:lm" not in tool_ids, (
-            "server:mcp:lm is in toolIds — this causes text-injection tool calls "
-            "(<function=lm_web_search>) that OWU cannot parse and execute."
+        assert "server:mcp:lm" in tool_ids, (
+            f"server:mcp:lm missing from toolIds: {tool_ids}. "
+            "Run scripts/register_owui_tool.py to restore."
         )
 
-    def test_builtin_web_search_enabled(self, owui):
+    def test_builtin_web_search_disabled(self, owui):
         """
-        builtinTools.web_search must be True on the model.
+        builtinTools.web_search must be False.
 
-        This enables OWU's native web search pipeline (SearXNG-backed) which
-        injects search results as context before the model responds — no tool
-        call parsing required.
+        Web search is provided by server:mcp:lm (LiteLLM MCP gateway), not OWU's
+        builtin. OWU's builtin web_search requires a per-request features.web_search
+        flag that the API never sends, so it never fires. LiteLLM MCP is the reliable
+        path — leave the OWU builtin disabled to avoid confusion.
         """
         resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
         assert resp.status_code == 200
         ws = resp.json().get("meta", {}).get("builtinTools", {}).get("web_search")
-        assert ws is True, (
-            f"builtinTools.web_search={ws!r} — must be True for web search to work"
+        assert ws is False, (
+            f"builtinTools.web_search={ws!r} — should be False. "
+            "Web search is provided by server:mcp:lm, not OWU builtins."
         )
 
     def test_system_prompt_present(self, owui):
@@ -145,6 +150,30 @@ class TestModelConfig:
         system = resp.json().get("meta", {}).get("system", "")
         assert len(system) > 100, f"system prompt missing or too short ({len(system)} chars)"
         assert "dispatch_task" in system, "system prompt does not mention dispatch_task"
+
+    def test_date_injector_filter_active_and_global(self, owui):
+        """
+        date_injector filter must be active and global.
+
+        This filter prepends "Today's date is YYYY-MM-DD (UTC)" to every system
+        prompt. Without it the model has no date context and may produce stale
+        searches (e.g. searching for "2024" events when it's 2026).
+
+        If missing: run `python scripts/register_owui_tool.py` to restore.
+        """
+        resp = owui.get("/api/v1/functions/")
+        assert resp.status_code == 200
+        f = next((x for x in resp.json() if x.get("id") == "date_injector"), None)
+        assert f is not None, (
+            "date_injector filter not found. Run scripts/register_owui_tool.py."
+        )
+        assert f.get("is_active") is True, (
+            f"date_injector is_active={f.get('is_active')} — filter is registered but disabled"
+        )
+        assert f.get("is_global") is True, (
+            f"date_injector is_global={f.get('is_global')} — filter exists but is not global, "
+            "so it won't apply to all chats"
+        )
 
     def test_base_model_active(self, owui):
         """
@@ -476,6 +505,69 @@ class TestOWUIToolPipeline:
             f"content: {choice['message'].get('content','')[:200]!r}"
         )
         assert choice["message"].get("tool_calls"), "tool_calls field missing"
+
+
+# ── LiteLLM MCP gateway ───────────────────────────────────────────────────────
+
+class TestLiteLLMMCP:
+    """Verify LiteLLM MCP gateway is reachable and exposes required tools."""
+
+    def test_litellm_mcp_reachable(self, litellm):
+        """LiteLLM /mcp/ endpoint responds to a JSON-RPC tools/list call."""
+        resp = litellm.post(
+            "/mcp/",
+            content=b'{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}',
+            headers={"Accept": "application/json, text/event-stream", "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200, f"LiteLLM MCP HTTP {resp.status_code}: {resp.text[:300]}"
+
+    def test_litellm_mcp_exposes_web_search(self, litellm):
+        """MCP tools list must include web_search and web_read_url."""
+        import json as _json
+        resp = litellm.post(
+            "/mcp/",
+            content=b'{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}',
+            headers={"Accept": "application/json, text/event-stream", "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        # SSE response: parse the data: line
+        tools = []
+        for line in resp.text.splitlines():
+            if line.startswith("data: "):
+                tools = _json.loads(line[6:])["result"]["tools"]
+                break
+        names = {t["name"] for t in tools}
+        assert "web_search" in names, f"web_search missing from LiteLLM MCP tools: {names}"
+        assert "web_read_url" in names, f"web_read_url missing from LiteLLM MCP tools: {names}"
+
+    def test_date_injected_into_system_prompt(self, owui):
+        """
+        The date_injector filter must have fired — model should report today's date
+        without searching for it.
+
+        Uses tool_choice=none to force a text response and tools=[] to prevent any
+        tool injection that would let the model search for the date instead.
+        """
+        import re
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        resp = owui.post(
+            "/api/v1/chat/completions",
+            json={
+                "model": CUSTOM_MODEL,
+                "messages": [{"role": "user", "content": "What date does your system context say it is? Reply with just the ISO date, no tools."}],
+                "tools": [],
+                "stream": False,
+                "max_tokens": 50,
+            },
+        )
+        assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        content = resp.json()["choices"][0]["message"].get("content", "") or ""
+        assert today in content, (
+            f"Model did not report today's date {today!r} in its response: {content!r}. "
+            "date_injector filter may not be active/global."
+        )
 
 
 # ── Web search behavioral test ─────────────────────────────────────────────────
