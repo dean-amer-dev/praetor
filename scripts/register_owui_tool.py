@@ -20,12 +20,14 @@ What it does:
   4. server:mcp:lm (LiteLLM MCP Gateway) is registered by OWU's MCP server config, not here.
      This script just ensures the model's toolIds reference it.
 
-LiteLLM MCP tools exposed via server:mcp:lm (as of 2026-06-24):
+LiteLLM MCP tools exposed via server:mcp:lm (as of 2026-06-25):
   web_search, web_read_url,
   infra_scaffold, infra_provision, infra_deploy_pr, infra_add_runner,
   infra_check_secrets, infra_app_status, infra_resolve_secret,
   github_ls, github_read, github_search, github_prs, github_pr_diff,
-  github_commits, github_tree
+  github_commits, github_tree,
+  praetor_dispatch, praetor_create_agent, praetor_create_app, praetor_add_mcp,
+  praetor_status, praetor_memory_search, praetor_execute_spec
 """
 from __future__ import annotations
 
@@ -132,7 +134,7 @@ BASE_MODEL_ID = "qwen3-35b-think"
 
 SYSTEM_PROMPT = """\
 You are a helpful personal assistant with access to web search, GitHub, infrastructure, \
-and Praetor agent dispatch tools.
+Praetor agent dispatch, and agent factory tools.
 
 ## Research / information questions
 Call web_search immediately. Read pages with web_read_url as needed. \
@@ -141,6 +143,10 @@ Answer directly — never dispatch for research.
 ## Coding tasks (implement, fix bugs, modify files, open PRs)
 Call dispatch_task with task_type="openhands". Include "repo: owner/name" in description. \
 Write a complete self-contained spec. Do NOT write code yourself.
+
+## Creating a new Praetor agent
+Call lm_praetor_create_agent with name (kebab-case), description, event (e.g. "agent:grafana-monitor"), \
+and tools list. Present a plan and get approval first. Blocks ~5 min until the agent is live.
 
 ## Other dispatch types
 - task_type="pipeline" — data pipeline tasks (only if user asks)
