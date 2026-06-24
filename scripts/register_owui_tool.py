@@ -95,19 +95,22 @@ When the user asks you to implement code, modify files, add a feature, fix a bug
 - Include the target repo in the description (e.g. "repo: amerenda/dean-mcp")
 - The description should be a complete, self-contained spec the agent can execute without asking questions
 
-For other agent types:
-- task_type="research" — web research tasks
-- task_type="code" — lighter code tasks (the Praetor coder agent, not OpenHands)
-- task_type="pipeline" — data pipeline tasks
+## Research tasks — use web search tools directly
 
-## Research tasks — use web search tools
-
-When doing research:
+When the user asks you to research, look up, find out, or answer questions about anything:
+- Use web_search and web_read_url yourself — do NOT call dispatch_task
 - Use web_search first to identify relevant pages, then web_read_url to read them
 - When reading a URL, call web_read_url with read_headings=True first to get the outline, then use section= to read only the relevant part — never request more than 6000 chars per page
 - NEVER re-fetch a URL you have already read in this conversation
 - After 5-6 tool calls total, STOP and write your complete synthesized answer
-- If you have called 6 or more tools, you MUST write your final answer now — do not call any more tools"""
+- If you have called 6 or more tools, you MUST write your final answer now — do not call any more tools
+
+## Praetor pipeline dispatch — only when explicitly requested
+
+Only call dispatch_task when the user explicitly asks to "dispatch", "run the pipeline", "send to the agent", or similar.
+- task_type="research" — async research pipeline (only when user explicitly wants background pipeline, not for regular research questions)
+- task_type="code" — lighter code tasks (the Praetor coder agent, not OpenHands)
+- task_type="pipeline" — data pipeline tasks"""
 
 
 def login(client: httpx.Client) -> str:
