@@ -9,14 +9,26 @@ Run:
   OWUI_ADMIN_PASSWORD=<password> python scripts/register_owui_tool.py
 
 What it does:
-  1. Ensures the praetor_dispatch native tool exists (with env-based PRAETOR_API_KEY)
-  2. Ensures the qwen3-35b-think-custom model exists with function_calling=native,
-     toolIds, and the OWU system prompt — this model is never touched by LiteLLM sync
-  3. Deactivates the raw qwen3-35b-think base model so users only see the custom one
+  1. Ensures the praetor_dispatch Python tool exists (dispatch_task + get_task_status only;
+     web_search/web_read_url come from the LiteLLM MCP Gateway tool, not here)
+  2. Ensures the date_injector global Filter exists — prepends "Today is <date>" to every
+     system prompt so the model can do date-accurate searches
+  3. Ensures the qwen3-35b-think-custom model exists with:
+       - function_calling=native
+       - toolIds: ["praetor_dispatch", "server:mcp:lm"]
+       - minimal behavioral system prompt (date line comes from the filter)
+  4. server:mcp:lm (LiteLLM MCP Gateway) is registered by OWU's MCP server config, not here.
+     This script just ensures the model's toolIds reference it.
+
+LiteLLM MCP tools exposed via server:mcp:lm (as of 2026-06-24):
+  web_search, web_read_url,
+  infra_scaffold, infra_provision, infra_deploy_pr, infra_add_runner,
+  infra_check_secrets, infra_app_status, infra_resolve_secret,
+  github_ls, github_read, github_search, github_prs, github_pr_diff,
+  github_commits, github_tree
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 
@@ -26,14 +38,17 @@ OWUI_BASE_URL = os.environ.get("OWUI_BASE_URL", "https://bot.amer.dev").rstrip("
 OWUI_ADMIN_EMAIL = os.environ.get("OWUI_ADMIN_EMAIL", "alex@amer.dev")
 OWUI_ADMIN_PASSWORD = os.environ.get("OWUI_ADMIN_PASSWORD", "")
 
+# ---------------------------------------------------------------------------
+# praetor_dispatch Python tool — Praetor task dispatch only.
+# web_search / web_read_url intentionally omitted: those come from server:mcp:lm.
+# ---------------------------------------------------------------------------
 TOOL_ID = "praetor_dispatch"
 TOOL_NAME = "Praetor Dispatch"
-TOOL_DESCRIPTION = "Dispatch Praetor agent tasks (research, code, pipeline) and check their status."
+TOOL_DESCRIPTION = "Dispatch Praetor agent tasks (code, pipeline) and check their status."
 
 TOOL_CONTENT = '''\
-"""Praetor Agent Dispatch + Web Search"""
+"""Praetor Agent Dispatch"""
 import os
-import json
 import httpx
 from pydantic import BaseModel, Field
 
@@ -41,7 +56,6 @@ from pydantic import BaseModel, Field
 class Tools:
     class Valves(BaseModel):
         PRAETOR_BASE_URL: str = "https://praetor.amer.dev"
-        SEARXNG_BASE_URL: str = "https://searxng.amer.dev"
         # env var wins when set (after Komodo redeploy); hardcoded key is fallback for now
         PRAETOR_API_KEY: str = Field(
             default_factory=lambda: os.environ.get("PRAETOR_API_KEY", "dRykVJyZp79Ute6JRKlZAgTuMs2jMXodKpszRyj-8aY")
@@ -50,54 +64,13 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
 
-    def web_search(self, query: str) -> str:
-        """
-        Search the web for current information. Use this for ANY research question,
-        news, facts, events, or anything you need to look up. Returns top results with
-        titles, URLs, and snippets.
-        """
-        resp = httpx.get(
-            f"{self.valves.SEARXNG_BASE_URL}/search",
-            params={"q": query, "format": "json", "engines": "google,bing,duckduckgo"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        results = data.get("results", [])[:6]
-        if not results:
-            return "No results found."
-        lines = []
-        for r in results:
-            lines.append(f"[{r.get(\'title\', \'\')}]({r.get(\'url\', \'\')})")
-            if r.get("content"):
-                lines.append(r["content"][:300])
-            lines.append("")
-        return "\\n".join(lines)
-
-    def web_read_url(self, url: str) -> str:
-        """
-        Fetch and return the text content of a web page. Use after web_search to
-        read the full content of a specific result.
-        """
-        try:
-            resp = httpx.get(url, timeout=15, follow_redirects=True,
-                             headers={"User-Agent": "Mozilla/5.0"})
-            resp.raise_for_status()
-            text = resp.text
-            # strip tags naively
-            import re
-            text = re.sub(r"<[^>]+>", " ", text)
-            text = re.sub(r"\\s+", " ", text).strip()
-            return text[:4000]
-        except Exception as e:
-            return f"Error fetching URL: {e}"
-
     def dispatch_task(self, title: str, description: str, task_type: str) -> str:
         """
-        Dispatch a background agent task for CODE and PIPELINE work only.
+        Dispatch a background agent task.
         task_type: openhands | code | pipeline
-        Use openhands for ALL coding tasks (implement features, fix bugs, modify files).
-        NEVER use for research or questions — use web_search for those instead.
+        - openhands: autonomous coding agent — use for ALL code tasks (implement, fix, modify files, open PRs)
+        - code: lighter code tasks via Praetor coder
+        - pipeline: data pipeline tasks
         Include \'repo: owner/name\' in description for code tasks.
         Returns task_id and confirmation.
         """
@@ -125,40 +98,57 @@ class Tools:
         return "Still running. Check back shortly."
 '''
 
+# ---------------------------------------------------------------------------
+# date_injector Filter — global inlet, prepends current date to system prompt
+# ---------------------------------------------------------------------------
+FILTER_ID = "date_injector"
+FILTER_NAME = "Date Injector"
+FILTER_DESCRIPTION = "Prepends today's UTC date to the system prompt on every request."
+
+FILTER_CONTENT = '''\
+"""Inject current UTC date into every system prompt."""
+from datetime import datetime, timezone
+from typing import Optional
+
+
+class Filter:
+    def inlet(self, body: dict, __user: Optional[dict] = None) -> dict:
+        date_line = f"Today\'s date is {datetime.now(timezone.utc).strftime(\'%Y-%m-%d\')} (UTC).\\n"
+        messages = body.get("messages", [])
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = date_line + messages[0]["content"]
+        else:
+            messages.insert(0, {"role": "system", "content": date_line})
+        body["messages"] = messages
+        return body
+'''
+
+# ---------------------------------------------------------------------------
+# murderbot-v0 model config
+# ---------------------------------------------------------------------------
 CUSTOM_MODEL_ID = "qwen3-35b-think-custom"
 CUSTOM_MODEL_NAME = "murderbot-v0"
 BASE_MODEL_ID = "qwen3-35b-think"
 
 SYSTEM_PROMPT = """\
-You are a helpful personal assistant with access to web search and Praetor agent dispatch tools.
+You are a helpful personal assistant with access to web search, GitHub, infrastructure, \
+and Praetor agent dispatch tools.
 
-## RULE 1 — Research questions: use web_search NOW, NEVER dispatch
+## Research / information questions
+Call web_search immediately. Read pages with web_read_url as needed. \
+Answer directly — never dispatch for research.
 
-If the user asks a question, asks you to research something, asks what happened, asks for news, or asks you to look something up:
-- Call web_search immediately. Answer the question yourself.
-- NEVER call dispatch_task for research. NEVER. Not even once.
-- dispatch_task for research ONLY fires if the user says the word "dispatch" or "pipeline" explicitly.
+## Coding tasks (implement, fix bugs, modify files, open PRs)
+Call dispatch_task with task_type="openhands". Include "repo: owner/name" in description. \
+Write a complete self-contained spec. Do NOT write code yourself.
 
-## RULE 2 — Coding tasks: use dispatch_task, never write code yourself
-
-If the user asks you to implement code, modify files, add a feature, fix a bug, or make any changes to a codebase:
-- Call dispatch_task with task_type="openhands"
-- Do NOT write the code yourself
-- Include the target repo in the description (e.g. "repo: amerenda/dean-mcp")
-- The description should be a complete, self-contained spec
-
-## Web search how-to
-
-- Call web_search first, then web_read_url for pages you need to read
-- After 5-6 tool calls total, stop and write your complete answer
-- NEVER re-fetch a URL already read in this conversation
-
-## dispatch_task reference (use sparingly)
-
-- task_type="openhands" — autonomous coding agent (use for ALL code tasks)
-- task_type="research" — background research pipeline (ONLY if user says "dispatch" or "pipeline")
+## Other dispatch types
+- task_type="pipeline" — data pipeline tasks (only if user asks)
 - task_type="code" — lighter code tasks via Praetor coder
-- task_type="pipeline" — data pipeline tasks"""
+
+## General
+After 5–6 tool calls on a research question, stop and write your answer. \
+Never re-fetch a URL already read in this conversation."""
 
 
 def login(client: httpx.Client) -> str:
@@ -173,31 +163,46 @@ def login(client: httpx.Client) -> str:
 def ensure_tool(client: httpx.Client) -> None:
     tools = client.get("/api/v1/tools/").raise_for_status().json()
     existing = next((t for t in tools if t.get("id") == TOOL_ID), None)
-
+    payload = {
+        "id": TOOL_ID,
+        "name": TOOL_NAME,
+        "description": TOOL_DESCRIPTION,
+        "content": TOOL_CONTENT,
+        "meta": {"description": TOOL_DESCRIPTION},
+    }
     if existing is None:
-        client.post(
-            "/api/v1/tools/create",
-            json={
-                "id": TOOL_ID,
-                "name": TOOL_NAME,
-                "description": TOOL_DESCRIPTION,
-                "content": TOOL_CONTENT,
-                "meta": {"description": TOOL_DESCRIPTION},
-            },
-        ).raise_for_status()
+        client.post("/api/v1/tools/create", json=payload).raise_for_status()
         print(f"Created tool '{TOOL_NAME}'")
     else:
-        client.post(
-            f"/api/v1/tools/id/{TOOL_ID}/update",
-            json={
-                "id": TOOL_ID,
-                "name": TOOL_NAME,
-                "description": TOOL_DESCRIPTION,
-                "content": TOOL_CONTENT,
-                "meta": {"description": TOOL_DESCRIPTION},
-            },
-        ).raise_for_status()
-        print(f"Updated tool '{TOOL_NAME}' (env-based PRAETOR_API_KEY)")
+        client.post(f"/api/v1/tools/id/{TOOL_ID}/update", json=payload).raise_for_status()
+        print(f"Updated tool '{TOOL_NAME}'")
+
+
+def ensure_filter(client: httpx.Client) -> None:
+    funcs = client.get("/api/v1/functions/").raise_for_status().json()
+    existing = next((f for f in funcs if f.get("id") == FILTER_ID), None)
+    payload = {
+        "id": FILTER_ID,
+        "name": FILTER_NAME,
+        "type": "filter",
+        "content": FILTER_CONTENT,
+        "meta": {"description": FILTER_DESCRIPTION, "manifest": {}},
+    }
+    if existing is None:
+        client.post("/api/v1/functions/create", json=payload).raise_for_status()
+        # OWU create endpoint ignores is_active/is_global — toggle separately
+        client.post(f"/api/v1/functions/id/{FILTER_ID}/toggle").raise_for_status()
+        client.post(f"/api/v1/functions/id/{FILTER_ID}/toggle/global").raise_for_status()
+        print(f"Created filter '{FILTER_NAME}' (active, global)")
+    else:
+        client.post(f"/api/v1/functions/id/{FILTER_ID}/update", json=payload).raise_for_status()
+        # Ensure active + global regardless of previous state
+        f = existing
+        if not f.get("is_active"):
+            client.post(f"/api/v1/functions/id/{FILTER_ID}/toggle").raise_for_status()
+        if not f.get("is_global"):
+            client.post(f"/api/v1/functions/id/{FILTER_ID}/toggle/global").raise_for_status()
+        print(f"Updated filter '{FILTER_NAME}'")
 
 
 def ensure_custom_model(client: httpx.Client) -> None:
@@ -220,11 +225,13 @@ def ensure_custom_model(client: httpx.Client) -> None:
             },
             "builtinTools": {
                 "chats": False, "calendar": False, "tasks": False, "memory": False,
-                "notes": False, "channels": False, "web_search": True,
+                "notes": False, "channels": False, "web_search": False,
                 "automations": False, "image_generation": False,
-                "code_interpreter": False, "time": False, "knowledge": True,
+                "code_interpreter": False, "time": False, "knowledge": False,
             },
-            "toolIds": ["praetor_dispatch"],
+            # server:mcp:lm provides: web_search, web_read_url, infra_*, github_*
+            # praetor_dispatch provides: dispatch_task, get_task_status
+            "toolIds": ["praetor_dispatch", "server:mcp:lm"],
             "system": SYSTEM_PROMPT,
         },
         "is_active": True,
@@ -236,23 +243,7 @@ def ensure_custom_model(client: httpx.Client) -> None:
         print(f"Created custom model '{CUSTOM_MODEL_ID}'")
     else:
         client.post("/api/v1/models/model/update", json=model_payload).raise_for_status()
-        print(f"Custom model '{CUSTOM_MODEL_ID}' already exists — settings verified")
-
-
-def deactivate_base_model(client: httpx.Client) -> None:
-    models = client.get("/api/v1/models/base").raise_for_status().json()
-    base = next(
-        (m for m in models if m.get("id") == BASE_MODEL_ID and m.get("base_model_id") is None),
-        None,
-    )
-    if base is None:
-        return
-    if not base.get("is_active", True):
-        print(f"Base model '{BASE_MODEL_ID}' already inactive")
-        return
-    base["is_active"] = False
-    client.post("/api/v1/models/model/update", json=base).raise_for_status()
-    print(f"Deactivated base model '{BASE_MODEL_ID}'")
+        print(f"Custom model '{CUSTOM_MODEL_ID}' updated (toolIds now include server:mcp:lm)")
 
 
 def main() -> None:
@@ -264,6 +255,7 @@ def main() -> None:
         token = login(client)
         client.headers["Authorization"] = f"Bearer {token}"
         ensure_tool(client)
+        ensure_filter(client)
         ensure_custom_model(client)
         # NOTE: deactivate_base_model was removed — deactivating qwen3-35b-think breaks
         # custom model routing in OWU 0.9.6 (custom models route through their base_model_id,
