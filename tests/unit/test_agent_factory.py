@@ -153,6 +153,28 @@ class TestCreateAgent:
         assert data["status"] == "partial"
         assert "timed out" in data["message"].lower()
 
+    def test_create_agent_ci_checks_403_proceeds_to_running(self, client):
+        """Factory succeeds when _wait_for_pr_ci returns True (403 fallback path)."""
+        with (
+            patch("webhooks.agent_factory._load_agent_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.agent_factory._save_agent_registry", new=AsyncMock()),
+            patch("webhooks.agent_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.agent_factory._get_main_sha", new=AsyncMock(return_value="abc1234567")),
+            patch("webhooks.agent_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.agent_factory._create_file", new=AsyncMock()),
+            patch("webhooks.agent_factory._create_pr", new=AsyncMock(return_value="https://github.com/amerenda/praetor/pull/42")),
+            patch("webhooks.agent_factory._merge_pr", new=AsyncMock(return_value="deadbeef1234567")),
+            patch("webhooks.agent_factory._wait_for_pr_ci", new=AsyncMock(return_value=True)),
+            patch("webhooks.agent_factory._wait_for_ci_run_complete", new=AsyncMock(return_value=True)),
+            patch("webhooks.agent_factory._wait_for_pod", new=AsyncMock(return_value="ready")),
+            patch("webhooks.agent_factory._smoke_test", new=AsyncMock(return_value="passed")),
+            patch("webhooks.agent_factory.create_prompt", return_value=True),
+        ):
+            resp = client.post("/api/v1/agent/create", json=_req(), headers=_auth())
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "running"
+
     def test_create_agent_merge_fails_returns_partial(self, client):
         import httpx
 

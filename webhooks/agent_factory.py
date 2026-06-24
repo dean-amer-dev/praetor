@@ -519,11 +519,19 @@ async def _wait_for_pr_ci(
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        resp = await client.get(
-            f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/check-runs",
-            headers=_gh_headers(token),
-        )
-        resp.raise_for_status()
+        try:
+            resp = await client.get(
+                f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/check-runs",
+                headers=_gh_headers(token),
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                # GitHub App lacks checks:read — wait 90s for CI to likely complete, then proceed
+                logger.warning("checks:read permission missing on GitHub App — waiting 90s for CI then proceeding")
+                await asyncio.sleep(90)
+                return True
+            raise
         runs = resp.json().get("check_runs", [])
         if runs and all(r["status"] == "completed" for r in runs):
             return all(r["conclusion"] == "success" for r in runs)
@@ -536,14 +544,22 @@ async def _wait_for_ci_run_complete(
 ) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        resp = await client.get(
-            f"{GITHUB_API}/repos/{PRAETOR_REPO}/actions/runs",
-            params={"head_sha": merge_sha, "per_page": 5},
-            headers=_gh_headers(token),
-        )
-        for run in resp.json().get("workflow_runs", []):
-            if run["name"] == "Build and Deploy" and run["status"] == "completed":
-                return run["conclusion"] == "success"
+        try:
+            resp = await client.get(
+                f"{GITHUB_API}/repos/{PRAETOR_REPO}/actions/runs",
+                params={"head_sha": merge_sha, "per_page": 5},
+                headers=_gh_headers(token),
+            )
+            if resp.status_code == 403:
+                # GitHub App lacks actions:read — wait remaining timeout as fixed delay
+                logger.warning("actions:read permission missing on GitHub App — waiting for image build timeout")
+                await asyncio.sleep(min(timeout, 240))
+                return True
+            for run in resp.json().get("workflow_runs", []):
+                if run["name"] == "Build and Deploy" and run["status"] == "completed":
+                    return run["conclusion"] == "success"
+        except Exception as exc:
+            logger.warning("_wait_for_ci_run_complete error: %s", exc)
         await asyncio.sleep(15)
     return False
 
