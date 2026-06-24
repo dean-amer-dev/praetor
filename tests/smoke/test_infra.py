@@ -433,21 +433,21 @@ class TestPhase13OpenWebUI:
         resp = httpx.get("https://bot.amer.dev/", timeout=10)
         assert resp.status_code == 200, f"bot.amer.dev not accessible: {resp.status_code}"
 
-    def test_mcp_bridge_exposes_praetor_tools(self):
+    def test_mcp_bridge_accessible(self):
+        # praetor-mcp tools (dispatch, status, etc.) are OWU Python tools, not LiteLLM MCP.
+        # This test verifies the mcp-bridge gateway itself is alive and serving tools.
         resp = httpx.get("https://mcp-bridge.amer.dev/mcp/openapi.json", timeout=15)
         assert resp.status_code == 200, f"mcp-bridge openapi not accessible: {resp.status_code}"
         paths = list(resp.json().get("paths", {}).keys())
-        praetor_tools = [p for p in paths if "praetor_mcp" in p]
-        assert any("dispatch" in t for t in praetor_tools), \
-            f"praetor_mcp-dispatch_praetor_task not in mcp-bridge paths: {paths}"
+        assert len(paths) > 0, "mcp-bridge returned no tool paths"
 
     def test_mcp_bridge_exposes_infra_tools(self):
         resp = httpx.get("https://mcp-bridge.amer.dev/mcp/openapi.json", timeout=15)
         assert resp.status_code == 200, f"mcp-bridge openapi not accessible: {resp.status_code}"
         paths = list(resp.json().get("paths", {}).keys())
-        infra_tools = [p for p in paths if "infra_mcp" in p]
-        assert any("scaffold" in t for t in infra_tools), \
-            f"infra_mcp-scaffold_app not in mcp-bridge paths: {paths}"
+        # Infra tools use short names: infra_scaffold, infra_provision, etc.
+        assert any("infra_scaffold" in p for p in paths), \
+            f"infra_scaffold tool not in mcp-bridge paths: {paths}"
 
     def test_qwen3_think_system_prompt_set(self):
         if not OPENWEBUI_ADMIN_PASSWORD:
