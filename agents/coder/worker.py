@@ -12,12 +12,11 @@ from hatchet_sdk.types.concurrency import ConcurrencyExpression, ConcurrencyLimi
 from pydantic import BaseModel
 from pydantic_ai.usage import UsageLimits
 
-from .agent import build_agent, update_vikunja_task
-from common.langfuse_tools import langfuse_context, observe
+from .agent import build_agent, update_vikunja_task, _CODER_SYSTEM_PROMPT_FALLBACK
+from common.langfuse_tools import langfuse_context, observe, get_system_prompt
 from common.memory_tools import add_memory, search_memory
 from common.metrics import start_metrics_server, task_invocations, task_active, task_duration
-
-_agent = None
+from common.skills import assemble_prompt
 
 
 def _parse_spec(description: str) -> dict | None:
@@ -28,13 +27,6 @@ def _parse_spec(description: str) -> dict | None:
         return tomllib.loads(match.group(1))
     except tomllib.TOMLDecodeError:
         return None
-
-
-def _get_agent():
-    global _agent
-    if _agent is None:
-        _agent = build_agent()
-    return _agent
 
 
 class CoderInput(BaseModel):
@@ -164,7 +156,9 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
         f"After completing, call add_memory(agent_id='{memory_agent_id}') with key decisions, "
         f"and update_vikunja_task(task_id={input.task_id}) with the outcome."
     )
-    agent = _get_agent()
+    base_prompt = get_system_prompt("coder-system", fallback=_CODER_SYSTEM_PROMPT_FALLBACK)
+    full_prompt = await assemble_prompt(_AGENT_NAME, base_prompt)
+    agent = build_agent(system_prompt=full_prompt)
     task_active.labels(agent=_AGENT_NAME).inc()
     t0 = time.monotonic()
     try:

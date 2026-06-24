@@ -57,7 +57,8 @@ class TestCoderWorkerPrompt:
         mock_agent.run = AsyncMock(return_value=mock_result)
 
         with (
-            patch("agents.coder.worker._get_agent", return_value=mock_agent),
+            patch("agents.coder.worker.build_agent", return_value=mock_agent),
+            patch("agents.coder.worker.assemble_prompt", AsyncMock(return_value="PROMPT")),
             patch("agents.coder.worker.search_memory", AsyncMock(return_value=[])),
             patch("agents.coder.worker.add_memory", AsyncMock()),
             patch("agents.coder.worker.update_vikunja_task", AsyncMock()),
@@ -122,7 +123,8 @@ class TestReviewerRedispatch:
         mock_agent.run = AsyncMock(return_value=mock_result)
 
         with (
-            patch("agents.pr_reviewer.worker._get_agent", return_value=mock_agent),
+            patch("agents.pr_reviewer.worker.build_agent", return_value=mock_agent),
+            patch("agents.pr_reviewer.worker.assemble_prompt", AsyncMock(return_value="PROMPT")),
             patch("agents.pr_reviewer.worker.dispatch_agent") as mock_dispatch,
             patch("agents.pr_reviewer.worker.add_memory", AsyncMock()),
         ):

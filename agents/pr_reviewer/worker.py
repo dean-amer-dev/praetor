@@ -9,19 +9,11 @@ from hatchet_sdk import Context, Hatchet
 from hatchet_sdk.types.concurrency import ConcurrencyExpression, ConcurrencyLimitStrategy
 from pydantic import BaseModel
 
-from .agent import build_agent
+from .agent import build_agent, SYSTEM_PROMPT
 from common.dispatch import dispatch_agent
 from common.memory_tools import add_memory
 from common.metrics import start_metrics_server, task_invocations, task_active, task_duration
-
-_agent = None
-
-
-def _get_agent():
-    global _agent
-    if _agent is None:
-        _agent = build_agent()
-    return _agent
+from common.skills import assemble_prompt
 
 
 class PROpenedInput(BaseModel):
@@ -60,7 +52,8 @@ async def _run_reviewer(input: PROpenedInput, context: Context) -> dict:
         f"Author: {input.author}\n\n"
         f"Fetch the diff, analyze it, and post a structured review comment."
     )
-    agent = _get_agent()
+    full_prompt = await assemble_prompt(_AGENT_NAME, SYSTEM_PROMPT)
+    agent = build_agent(system_prompt=full_prompt)
     task_active.labels(agent=_AGENT_NAME).inc()
     t0 = time.monotonic()
     try:

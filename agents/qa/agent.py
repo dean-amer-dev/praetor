@@ -51,7 +51,7 @@ def post_qa_result(repo: str, pr_number: int | None, summary: str, passed: bool)
     return result
 
 
-def build_agent() -> Agent:
+def build_agent(system_prompt: str | None = None) -> Agent:
     model = OpenAIChatModel(
         model_name=os.environ.get("LLM_MODEL", "qwen3-35b"),
         provider=OpenAIProvider(
@@ -61,6 +61,6 @@ def build_agent() -> Agent:
     )
     return Agent(
         model=model,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt if system_prompt is not None else SYSTEM_PROMPT,
         tools=[http_check, playwright_check, post_qa_result],
     )
