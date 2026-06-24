@@ -98,10 +98,12 @@ async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> 
     return "task updated"
 
 
-def build_agent() -> Agent:
+def build_agent(system_prompt: str | None = None) -> Agent:
     model = _build_model()
+    if system_prompt is None:
+        system_prompt = get_system_prompt("research-system", fallback=_RESEARCH_SYSTEM_PROMPT_FALLBACK)
     return Agent(
         model=model,
-        system_prompt=get_system_prompt("research-system", fallback=_RESEARCH_SYSTEM_PROMPT_FALLBACK),
+        system_prompt=system_prompt,
         tools=[web_search, web_read_url, add_memory, search_memory, update_vikunja_task],
     )

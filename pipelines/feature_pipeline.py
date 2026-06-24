@@ -15,9 +15,11 @@ from hatchet_sdk.types.concurrency import ConcurrencyExpression, ConcurrencyLimi
 from pydantic import BaseModel
 from pydantic_ai.usage import UsageLimits
 
-from agents.coder.agent import build_agent as build_coder_agent
+from agents.coder.agent import build_agent as build_coder_agent, _CODER_SYSTEM_PROMPT_FALLBACK
+from common.langfuse_tools import get_system_prompt
 from common.memory_tools import add_memory, search_memory
 from common.metrics import start_metrics_server, task_invocations, task_active, task_duration
+from common.skills import assemble_prompt as _assemble_coder_prompt
 
 _AGENT_NAME = "feature-pipeline"
 
@@ -103,12 +105,14 @@ async def _run_feature_pipeline(input: FeaturePipelineInput, context: Context) -
 
     task_active.labels(agent=_AGENT_NAME).inc()
     t0 = time.monotonic()
+    coder_base = get_system_prompt("coder-system", fallback=_CODER_SYSTEM_PROMPT_FALLBACK)
+    coder_prompt = await _assemble_coder_prompt("coder", coder_base)
     try:
         # For new_app specs: set up the initial branch before the feature loop
         if task_type == "new_app":
             hits = await search_memory("branch-setup", task_agent_id)
             if not any("branch-setup" in h.lower() for h in hits):
-                agent = build_coder_agent()
+                agent = build_coder_agent(system_prompt=coder_prompt)
                 await agent.run(
                     _setup_branch_prompt(spec, input.task_id),
                     usage_limits=UsageLimits(request_limit=10),
@@ -122,12 +126,12 @@ async def _run_feature_pipeline(input: FeaturePipelineInput, context: Context) -
                 continue
 
             prompt = _feature_prompt(spec, feature, i, len(features), input.task_id)
-            agent = build_coder_agent()
+            agent = build_coder_agent(system_prompt=coder_prompt)
             await agent.run(prompt, usage_limits=UsageLimits(request_limit=request_limit))
             await add_memory(f"feature done: {feature}", task_agent_id)
 
         # Open the draft PR
-        agent = build_coder_agent()
+        agent = build_coder_agent(system_prompt=coder_prompt)
         result = await agent.run(
             _finalize_prompt(spec, features, input.task_id),
             usage_limits=UsageLimits(request_limit=20),

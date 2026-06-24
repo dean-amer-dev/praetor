@@ -42,9 +42,13 @@ async def main() -> None:
             f"Call update_vikunja_task when done."
         )
 
-    from agents.research.agent import build_agent
+    from agents.research.agent import build_agent, _RESEARCH_SYSTEM_PROMPT_FALLBACK
+    from common.langfuse_tools import get_system_prompt
+    from common.skills import assemble_prompt
 
-    agent = build_agent()
+    base = get_system_prompt("research-system", fallback=_RESEARCH_SYSTEM_PROMPT_FALLBACK)
+    full_prompt = await assemble_prompt("research", base)
+    agent = build_agent(system_prompt=full_prompt)
     result = await agent.run(prompt, usage_limits=UsageLimits(request_limit=30))
 
     output = {"summary": str(result.output), "task_id": task_id}

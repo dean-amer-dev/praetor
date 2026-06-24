@@ -251,7 +251,7 @@ async def save_progress(task_id: int, done: list[str], remaining: list[str], not
     return f"checkpoint saved — {len(remaining)} items remaining"
 
 
-def build_agent() -> Agent:
+def build_agent(system_prompt: str | None = None) -> Agent:
     model = OpenAIChatModel(
         model_name=os.environ.get("LLM_MODEL", "coder"),
         provider=OpenAIProvider(
@@ -259,9 +259,11 @@ def build_agent() -> Agent:
             api_key=os.environ["LITELLM_API_KEY"],
         ),
     )
+    if system_prompt is None:
+        system_prompt = get_system_prompt("coder-system", fallback=_CODER_SYSTEM_PROMPT_FALLBACK)
     return Agent(
         model=model,
-        system_prompt=get_system_prompt("coder-system", fallback=_CODER_SYSTEM_PROMPT_FALLBACK),
+        system_prompt=system_prompt,
         tools=[
             read_file,
             write_file,

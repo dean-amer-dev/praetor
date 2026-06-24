@@ -123,7 +123,7 @@ def post_review_comment(repo: str, pr_number: str, body: str, event: str, token:
     return resp.json().get("html_url", "review posted")
 
 
-def build_agent() -> Agent:
+def build_agent(system_prompt: str | None = None) -> Agent:
     model = OpenAIChatModel(
         model_name=os.environ.get("LLM_MODEL", "qwen3-35b"),
         provider=OpenAIProvider(
@@ -133,7 +133,7 @@ def build_agent() -> Agent:
     )
     return Agent(
         model=model,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt if system_prompt is not None else SYSTEM_PROMPT,
         tools=[get_github_token, fetch_pr_diff, fetch_file_content, post_review_comment, add_memory, search_memory],
         model_settings={"temperature": 0},
     )
