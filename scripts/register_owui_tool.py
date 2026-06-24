@@ -9,7 +9,8 @@ Run:
   OWUI_ADMIN_PASSWORD=<password> python scripts/register_owui_tool.py
 
 What it does:
-  1. Ensures the praetor_dispatch Python tool exists (dispatch_task + get_task_status only;
+  1. Ensures the praetor_dispatch Python tool exists (dispatch_task + get_task_status +
+     skills management: list_skills, create_skill, assign_skill, remove_skill_assignment;
      web_search/web_read_url come from the LiteLLM MCP Gateway tool, not here)
   2. Ensures the date_injector global Filter exists — prepends "Today is <date>" to every
      system prompt so the model can do date-accurate searches
@@ -44,10 +45,10 @@ OWUI_ADMIN_PASSWORD = os.environ.get("OWUI_ADMIN_PASSWORD", "")
 # ---------------------------------------------------------------------------
 TOOL_ID = "praetor_dispatch"
 TOOL_NAME = "Praetor Dispatch"
-TOOL_DESCRIPTION = "Dispatch Praetor agent tasks (code, pipeline) and check their status."
+TOOL_DESCRIPTION = "Dispatch Praetor agent tasks (code, pipeline) and manage agent skills."
 
 TOOL_CONTENT = '''\
-"""Praetor Agent Dispatch"""
+"""Praetor Agent Dispatch + Skills Management"""
 import os
 import httpx
 from pydantic import BaseModel, Field
@@ -56,13 +57,22 @@ from pydantic import BaseModel, Field
 class Tools:
     class Valves(BaseModel):
         PRAETOR_BASE_URL: str = "https://praetor.amer.dev"
-        # env var wins when set (after Komodo redeploy); hardcoded key is fallback for now
         PRAETOR_API_KEY: str = Field(
             default_factory=lambda: os.environ.get("PRAETOR_API_KEY", "dRykVJyZp79Ute6JRKlZAgTuMs2jMXodKpszRyj-8aY")
         )
 
     def __init__(self):
         self.valves = self.Valves()
+
+    def _h(self) -> dict:
+        return {"Authorization": f"Bearer {self.valves.PRAETOR_API_KEY}"}
+
+    def _base(self) -> str:
+        return self.valves.PRAETOR_BASE_URL
+
+    # ------------------------------------------------------------------
+    # Agent dispatch
+    # ------------------------------------------------------------------
 
     def dispatch_task(self, title: str, description: str, task_type: str) -> str:
         """
@@ -75,10 +85,9 @@ class Tools:
         Returns task_id and confirmation.
         """
         resp = httpx.post(
-            f"{self.valves.PRAETOR_BASE_URL}/api/v1/dispatch",
+            f"{self._base()}/api/v1/dispatch",
             json={"title": title, "description": description, "type": task_type},
-            headers={"Authorization": f"Bearer {self.valves.PRAETOR_API_KEY}"},
-            timeout=15,
+            headers=self._h(), timeout=15,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -87,15 +96,94 @@ class Tools:
     def get_task_status(self, task_id: int) -> str:
         """Check the status of a previously dispatched Praetor task."""
         resp = httpx.get(
-            f"{self.valves.PRAETOR_BASE_URL}/api/v1/status/{task_id}",
-            headers={"Authorization": f"Bearer {self.valves.PRAETOR_API_KEY}"},
-            timeout=10,
+            f"{self._base()}/api/v1/status/{task_id}",
+            headers=self._h(), timeout=10,
         )
         resp.raise_for_status()
         data = resp.json()
         if data["done"]:
             return f"Done. {data[\'mem0_summary\']}"
         return "Still running. Check back shortly."
+
+    # ------------------------------------------------------------------
+    # Skills management
+    # ------------------------------------------------------------------
+
+    def list_skills(self) -> str:
+        """
+        List all skills and their current agent assignments.
+        Returns every skill (name, description) and which agents have it active.
+        """
+        skills_resp = httpx.get(f"{self._base()}/api/v1/skills", headers=self._h(), timeout=10)
+        skills_resp.raise_for_status()
+        skills = skills_resp.json()
+        agents_resp = httpx.get(f"{self._base()}/api/v1/agents", headers=self._h(), timeout=10)
+        agents_resp.raise_for_status()
+        agents = agents_resp.json()
+
+        agent_map: dict[str, list[str]] = {}
+        for a in agents:
+            for s in a.get("skills", []):
+                agent_map.setdefault(s, []).append(a["agent_name"])
+
+        if not skills:
+            return "No skills defined yet. Use create_skill to add one."
+        lines = ["**Skills:**"]
+        for s in skills:
+            assigned = agent_map.get(s["name"], [])
+            assigned_str = ", ".join(assigned) if assigned else "unassigned"
+            lines.append(f"- **{s[\'name\']}** ({assigned_str}): {s[\'description\']}")
+        return "\\n".join(lines)
+
+    def create_skill(self, name: str, description: str, prompt: str) -> str:
+        """
+        Create a new agent skill. The prompt is injected into the agent\'s system prompt
+        at task-start — no pod restart needed, takes effect immediately.
+
+        name: kebab-case identifier, e.g. "write-tests" or "add-logging"
+        description: one-line summary of what this skill teaches the agent
+        prompt: raw text appended to the agent\'s system prompt. Write it as a directive,
+                e.g. "== SKILL: Write tests ==\\nAlways write pytest tests for every function..."
+        """
+        resp = httpx.post(
+            f"{self._base()}/api/v1/skills",
+            json={"name": name, "description": description, "prompt": prompt},
+            headers=self._h(), timeout=10,
+        )
+        if resp.status_code == 409:
+            return f\'Skill "{name}" already exists. Use update_skill to change its prompt.\'
+        resp.raise_for_status()
+        data = resp.json()
+        return f\'Skill "{data["name"]}" created. Assign it to an agent with assign_skill.\'
+
+    def assign_skill(self, agent_name: str, skill_name: str) -> str:
+        """
+        Assign a skill to an agent. Takes effect on the next task — no restart needed.
+        agent_name: coder | research | reviewer | qa
+        skill_name: name of an existing skill (use list_skills to see options)
+        """
+        resp = httpx.post(
+            f"{self._base()}/api/v1/agents/{agent_name}/skills",
+            json={"skill_name": skill_name},
+            headers=self._h(), timeout=10,
+        )
+        if resp.status_code == 404:
+            return f\'Skill "{skill_name}" not found. Create it first with create_skill.\'
+        resp.raise_for_status()
+        data = resp.json()
+        skills_list = ", ".join(data["skills"]) if data["skills"] else "none"
+        return f\'Assigned "{skill_name}" to {agent_name}. {agent_name} active skills: [{skills_list}]\'
+
+    def remove_skill_assignment(self, agent_name: str, skill_name: str) -> str:
+        """Remove a skill assignment from an agent."""
+        resp = httpx.delete(
+            f"{self._base()}/api/v1/agents/{agent_name}/skills/{skill_name}",
+            headers=self._h(), timeout=10,
+        )
+        if resp.status_code == 404:
+            return f\'Assignment {agent_name}/{skill_name} not found.\'
+        resp.raise_for_status()
+        return f\'Removed "{skill_name}" from {agent_name}.\'
 '''
 
 # ---------------------------------------------------------------------------
@@ -132,7 +220,7 @@ BASE_MODEL_ID = "qwen3-35b-think"
 
 SYSTEM_PROMPT = """\
 You are a helpful personal assistant with access to web search, GitHub, infrastructure, \
-and Praetor agent dispatch tools.
+Praetor agent dispatch, and agent skills management tools.
 
 ## Research / information questions
 Call web_search immediately. Read pages with web_read_url as needed. \
@@ -145,6 +233,19 @@ Write a complete self-contained spec. Do NOT write code yourself.
 ## Other dispatch types
 - task_type="pipeline" — data pipeline tasks (only if user asks)
 - task_type="code" — lighter code tasks via Praetor coder
+
+## Agent skills management
+Skills are prompt snippets injected into an agent's system prompt at task-start — \
+no pod restart needed, takes effect immediately.
+- list_skills() — see all skills and which agents have them
+- create_skill(name, description, prompt) — define a new skill
+- assign_skill(agent_name, skill_name) — activate skill for an agent (coder | research | reviewer | qa)
+- remove_skill_assignment(agent_name, skill_name) — deactivate
+
+Example flow: user says "teach the coder to always write tests" →
+  1. create_skill("write-tests", "Ensures pytest tests are written", "== SKILL: Write tests ==\\nAlways write pytest tests...")
+  2. assign_skill("coder", "write-tests")
+  Done — next coder task will include the skill.
 
 ## General
 After 5–6 tool calls on a research question, stop and write your answer. \
