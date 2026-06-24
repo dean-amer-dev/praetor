@@ -339,6 +339,10 @@ class TestDockerfile:
         out = _dockerfile("my-cool-agent")
         assert "agents.my_cool_agent.worker" in out
 
+    def test_dockerfile_copy_uses_underscore_dest(self):
+        out = _dockerfile("my-agent")
+        assert "COPY agents/my-agent/ agents/my_agent/" in out
+
 
 class TestDeploymentYaml:
     def test_deployment_yaml_uses_sha_tag(self):
