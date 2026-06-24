@@ -50,10 +50,11 @@ class Tools:
 
     def dispatch_task(self, title: str, description: str, task_type: str) -> str:
         """
-        Dispatch a Praetor agent task.
-        task_type: research | code | pipeline | openhands
-        For code/pipeline/openhands tasks, include \'repo: owner/name\' in description.
-        Use openhands to send fully autonomous coding tasks to the OpenHands agent.
+        Dispatch a background agent task for CODE and PIPELINE work only.
+        task_type: openhands | code | pipeline
+        Use openhands for ALL coding tasks (implement features, fix bugs, modify files).
+        NEVER use for research or questions — use web_search for those instead.
+        Include \'repo: owner/name\' in description for code tasks.
         Returns task_id and confirmation.
         """
         resp = httpx.post(
