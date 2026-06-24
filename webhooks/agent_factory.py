@@ -445,16 +445,44 @@ async def _create_pr(
     return resp.json()["html_url"]
 
 
+async def _get_pr_node_id(
+    client: httpx.AsyncClient, token: str, repo: str, pr_number: int
+) -> str:
+    resp = await client.get(
+        f"{GITHUB_API}/repos/{repo}/pulls/{pr_number}",
+        headers=_gh_headers(token),
+    )
+    resp.raise_for_status()
+    return resp.json()["node_id"]
+
+
 async def _merge_pr(
     client: httpx.AsyncClient, token: str, repo: str, pr_number: int, merge_method: str = "squash"
 ) -> str:
+    """Merge a PR via GraphQL (REST merge endpoint returns 404 for GitHub App tokens)."""
+    node_id = await _get_pr_node_id(client, token, repo, pr_number)
+    gql_method = merge_method.upper()
     resp = await client.post(
-        f"{GITHUB_API}/repos/{repo}/pulls/{pr_number}/merge",
+        f"{GITHUB_API}/graphql",
         headers=_gh_headers(token),
-        json={"merge_method": merge_method},
+        json={
+            "query": (
+                f'mutation {{ mergePullRequest(input: {{pullRequestId: "{node_id}", '
+                f"mergeMethod: {gql_method}}}) "
+                f"{{ pullRequest {{ mergeCommit {{ oid }} }} }} }}"
+            )
+        },
     )
     resp.raise_for_status()
-    return resp.json()["sha"]
+    data = resp.json()
+    if "errors" in data:
+        raise httpx.HTTPStatusError(
+            f"GraphQL merge failed: {data['errors']}",
+            request=resp.request,
+            response=resp,
+        )
+    oid = data["data"]["mergePullRequest"]["pullRequest"]["mergeCommit"]["oid"]
+    return oid
 
 
 # ---------------------------------------------------------------------------
