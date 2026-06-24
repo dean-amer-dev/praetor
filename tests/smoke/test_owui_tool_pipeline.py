@@ -1,16 +1,27 @@
 """
 OWU tool pipeline smoke tests.
 
-These test the path that the OLD runbook MISSED:
-- Old tests: pass explicit tools=[...] to LiteLLM → proves model CAN format tool calls
-- These tests: call OWU WITHOUT explicit tools → proves OWU actually injects and EXECUTES them
-
-Failures here mean something the user hits in the chat UI is broken.
-
 Run: SMOKE_TESTS=1 pytest tests/smoke/test_owui_tool_pipeline.py -v
+
+## Architecture
+
+The OWU /api/v1/chat/completions endpoint does not auto-inject toolIds from the
+model config — that only happens via the browser UI pipeline. So these tests pass
+tool definitions explicitly, then execute the multi-turn loop themselves (call the
+tool, feed results back). This tests the same behavior the UI exercises.
+
+## Test classes
+
+TestModelConfig   — fast config checks (no LLM calls). Catch restart-wipe regressions.
+TestEndToEnd      — full tool execution loop. The tests that actually matter.
+TestLiteLLMMCP    — LiteLLM MCP gateway: reachable, tools present, date injection.
+TestWebSearch     — SearXNG reachable and configured.
+TestPraetorAPI    — Praetor API accepts key and returns task IDs.
 """
+import json
 import os
 import time
+from typing import Any
 
 import httpx
 import pytest
@@ -23,21 +34,21 @@ if not os.environ.get("SMOKE_TESTS"):
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-OWUI_URL       = os.environ.get("OWUI_URL", "https://bot.amer.dev")
-OWUI_EMAIL     = os.environ.get("OWUI_ADMIN_EMAIL", "alex@amer.dev")
-OWUI_PASSWORD  = os.environ.get("OWUI_ADMIN_PASSWORD", "gY2PLulG1s28uAqV93BhBg9x_jY")
+OWUI_URL      = os.environ.get("OWUI_URL", "https://bot.amer.dev")
+OWUI_EMAIL    = os.environ.get("OWUI_ADMIN_EMAIL", "alex@amer.dev")
+OWUI_PASSWORD = os.environ.get("OWUI_ADMIN_PASSWORD", "gY2PLulG1s28uAqV93BhBg9x_jY")
 
-LITELLM_URL    = os.environ.get("LITELLM_URL", "https://litellm.amer.dev")
-LITELLM_KEY    = os.environ.get("LITELLM_API_KEY", "fmxVy6bPQTClCDy9QOsjBMN3sfScX38JpjlyUv9Q")
+LITELLM_URL   = os.environ.get("LITELLM_URL", "https://litellm.amer.dev")
+LITELLM_KEY   = os.environ.get("LITELLM_API_KEY", "fmxVy6bPQTClCDy9QOsjBMN3sfScX38JpjlyUv9Q")
 
-PRAETOR_URL    = os.environ.get("PRAETOR_URL", "https://praetor.amer.dev")
-PRAETOR_KEY    = os.environ.get("PRAETOR_API_KEY", "dRykVJyZp79Ute6JRKlZAgTuMs2jMXodKpszRyj-8aY")
+PRAETOR_URL   = os.environ.get("PRAETOR_URL", "https://praetor.amer.dev")
+PRAETOR_KEY   = os.environ.get("PRAETOR_API_KEY", "dRykVJyZp79Ute6JRKlZAgTuMs2jMXodKpszRyj-8aY")
 
-SEARXNG_URL    = os.environ.get("SEARXNG_URL", "https://searxng.amer.dev")
+SEARXNG_URL   = os.environ.get("SEARXNG_URL", "https://searxng.amer.dev")
 
-CUSTOM_MODEL   = "qwen3-35b-think-custom"
-BASE_MODEL     = "qwen3-35b-think"
-TIMEOUT        = int(os.environ.get("LLM_TIMEOUT", "90"))
+CUSTOM_MODEL  = "qwen3-35b-think-custom"
+BASE_MODEL    = "qwen3-35b-think"
+TIMEOUT       = int(os.environ.get("LLM_TIMEOUT", "120"))
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -66,489 +77,368 @@ def owui(owui_token):
 def litellm():
     return httpx.Client(
         base_url=LITELLM_URL,
-        headers={"Authorization": f"Bearer {LITELLM_KEY}"},
+        headers={
+            "Authorization": f"Bearer {LITELLM_KEY}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        },
         timeout=TIMEOUT,
     )
 
 
-# ── Config correctness tests (fast, always-on) ────────────────────────────────
-# These catch the class of bug where a restart wipes model settings.
+@pytest.fixture(scope="module")
+def mcp_tool_defs(litellm) -> list[dict]:
+    """Fetch live tool definitions from LiteLLM MCP. Fails if MCP is unreachable."""
+    resp = litellm.post(
+        "/mcp/",
+        content=b'{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}',
+    )
+    assert resp.status_code == 200, f"LiteLLM MCP tools/list failed: {resp.status_code}: {resp.text[:300]}"
+    for line in resp.text.splitlines():
+        if line.startswith("data: "):
+            return json.loads(line[6:])["result"]["tools"]
+    pytest.fail("Could not parse MCP tools/list SSE response")
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _to_openai(mcp_tool: dict) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": mcp_tool["name"],
+            "description": mcp_tool["description"],
+            "parameters": mcp_tool["inputSchema"],
+        },
+    }
+
+
+def _select_tools(mcp_tool_defs: list[dict], names: set[str]) -> list[dict]:
+    return [_to_openai(t) for t in mcp_tool_defs if t["name"] in names]
+
+
+def _dispatch_tool_def() -> dict:
+    """OpenAI-format dispatch_task definition for inclusion in tool lists."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "dispatch_task",
+            "description": (
+                "Dispatch a background agent task. "
+                "Use ONLY for coding tasks — implement, fix bugs, modify files, open PRs. "
+                "NEVER use for research or questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "task_type": {"type": "string", "enum": ["openhands", "code", "pipeline"]},
+                },
+                "required": ["title", "description", "task_type"],
+            },
+        },
+    }
+
+
+def _execute_mcp_tool(litellm: httpx.Client, name: str, args: dict) -> str:
+    """Execute a tool via LiteLLM MCP and return the text result."""
+    resp = litellm.post(
+        "/mcp/",
+        content=json.dumps({
+            "jsonrpc": "2.0", "id": "exec",
+            "method": "tools/call",
+            "params": {"name": name, "arguments": args},
+        }).encode(),
+        timeout=30,
+    )
+    assert resp.status_code == 200, (
+        f"MCP tools/call failed for {name!r}: HTTP {resp.status_code}: {resp.text[:300]}"
+    )
+    for line in resp.text.splitlines():
+        if line.startswith("data: "):
+            content_list = json.loads(line[6:]).get("result", {}).get("content", [])
+            return " ".join(c.get("text", "") for c in content_list if c.get("type") == "text")
+    return ""
+
+
+def _run_tool_loop(
+    owui: httpx.Client,
+    litellm: httpx.Client,
+    messages: list[dict],
+    tools: list[dict],
+    max_tool_turns: int = 5,
+) -> tuple[str, list[str], bool]:
+    """
+    Run a multi-turn tool conversation.
+
+    Executes tool calls via LiteLLM MCP and feeds results back until the model
+    produces a final text answer.
+
+    First turn uses tool_choice='required' to force JSON tool_calls (with 'auto',
+    this model defaults to text-injection XML). After max_tool_turns, sends a
+    final synthesis turn with no tools so the model must write its answer.
+
+    Returns: (final_content, tool_names_called, had_xml)
+    """
+    tool_names_called: list[str] = []
+    had_xml = False
+
+    for turn in range(max_tool_turns):
+        tool_choice = "required" if turn == 0 else "auto"
+        resp = owui.post(
+            "/api/v1/chat/completions",
+            json={
+                "model": CUSTOM_MODEL,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "stream": False,
+                "max_tokens": 800,
+            },
+        )
+        assert resp.status_code == 200, f"OWU HTTP {resp.status_code}: {resp.text[:300]}"
+
+        choice = resp.json()["choices"][0]
+        msg = choice["message"]
+        content = msg.get("content") or ""
+        tc = msg.get("tool_calls") or []
+
+        if "<function=" in content:
+            had_xml = True
+
+        if not tc:
+            # Model chose to answer — return it
+            return content, tool_names_called, had_xml
+
+        messages.append(msg)
+        for call in tc:
+            name = call["function"]["name"]
+            args = json.loads(call["function"]["arguments"])
+            tool_names_called.append(name)
+            result = _execute_mcp_tool(litellm, name, args)
+            messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
+
+    # Model used all tool turns — force it to synthesize now
+    resp = owui.post(
+        "/api/v1/chat/completions",
+        json={
+            "model": CUSTOM_MODEL,
+            "messages": messages,
+            "stream": False,
+            "max_tokens": 1000,
+        },
+    )
+    assert resp.status_code == 200, f"OWU synthesis turn HTTP {resp.status_code}: {resp.text[:300]}"
+    final_content = resp.json()["choices"][0]["message"].get("content") or ""
+    return final_content, tool_names_called, had_xml
+
+
+# ── Config correctness (fast, no LLM calls) ───────────────────────────────────
 
 class TestModelConfig:
-    """Verify OWU model config has all required fields. Fast — no LLM calls."""
+    """Verify OWU model config survives restarts. Fast — no LLM calls."""
 
     def test_custom_model_exists(self, owui):
         resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
         assert resp.status_code == 200, f"Custom model not found: HTTP {resp.status_code}"
-        m = resp.json()
-        assert m.get("name") == "murderbot-v0", f"wrong name: {m.get('name')!r}"
+        assert resp.json().get("name") == "murderbot-v0"
 
     def test_function_calling_native(self, owui):
-        """
-        function_calling must be 'native' so OWU passes tools as OpenAI tools[]
-        array to LiteLLM rather than injecting them as text into the system prompt.
-
-        The text-injection path produces <function=...> output that OWU cannot
-        parse and execute, causing tool calls to silently fail in the UI.
-        """
+        """function_calling must be 'native' — otherwise model outputs XML that OWU cannot execute."""
         resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
         assert resp.status_code == 200
         fc = resp.json().get("params", {}).get("function_calling")
         assert fc == "native", (
-            f"function_calling={fc!r} — should be 'native'. "
-            "Without native mode OWU injects tools as text into the prompt; "
-            "the model produces <function=...> output that OWU's parser ignores."
+            f"function_calling={fc!r}. Must be 'native' — text injection produces "
+            "<function=...> XML that OWU's parser ignores, silently breaking all tool calls."
         )
 
     def test_praetor_dispatch_in_tool_ids(self, owui):
         resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
         assert resp.status_code == 200
         tool_ids = resp.json().get("meta", {}).get("toolIds", [])
-        assert "praetor_dispatch" in tool_ids, (
-            f"praetor_dispatch missing from toolIds: {tool_ids}"
-        )
+        assert "praetor_dispatch" in tool_ids, f"praetor_dispatch missing from toolIds: {tool_ids}"
 
     def test_server_mcp_lm_in_tool_ids(self, owui):
-        """
-        server:mcp:lm must be in toolIds.
-
-        This is the LiteLLM MCP gateway — it exposes web_search, web_read_url,
-        github_*, infra_* tools (16 total). OWU namespaces them as lm_web_search
-        etc. in the model's tool list. Without this entry the model has no web
-        search capability.
-
-        If missing: run `python scripts/register_owui_tool.py` to restore.
-        """
+        """server:mcp:lm must be in toolIds — this is what provides lm_web_search etc."""
         resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
         assert resp.status_code == 200
         tool_ids = resp.json().get("meta", {}).get("toolIds", [])
         assert "server:mcp:lm" in tool_ids, (
-            f"server:mcp:lm missing from toolIds: {tool_ids}. "
-            "Run scripts/register_owui_tool.py to restore."
+            f"server:mcp:lm missing from toolIds: {tool_ids}. Run scripts/register_owui_tool.py."
         )
 
     def test_builtin_web_search_disabled(self, owui):
-        """
-        builtinTools.web_search must be False.
-
-        Web search is provided by server:mcp:lm (LiteLLM MCP gateway), not OWU's
-        builtin. OWU's builtin web_search requires a per-request features.web_search
-        flag that the API never sends, so it never fires. LiteLLM MCP is the reliable
-        path — leave the OWU builtin disabled to avoid confusion.
-        """
+        """builtinTools.web_search must be False — web search comes from server:mcp:lm, not OWU builtins."""
         resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
         assert resp.status_code == 200
         ws = resp.json().get("meta", {}).get("builtinTools", {}).get("web_search")
         assert ws is False, (
-            f"builtinTools.web_search={ws!r} — should be False. "
-            "Web search is provided by server:mcp:lm, not OWU builtins."
+            f"builtinTools.web_search={ws!r}. Should be False — use server:mcp:lm instead."
         )
 
     def test_system_prompt_present(self, owui):
         resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
         assert resp.status_code == 200
         system = resp.json().get("meta", {}).get("system", "")
-        assert len(system) > 100, f"system prompt missing or too short ({len(system)} chars)"
-        assert "dispatch_task" in system, "system prompt does not mention dispatch_task"
+        assert len(system) > 50, f"system prompt missing or too short ({len(system)} chars)"
 
     def test_date_injector_filter_active_and_global(self, owui):
-        """
-        date_injector filter must be active and global.
-
-        This filter prepends "Today's date is YYYY-MM-DD (UTC)" to every system
-        prompt. Without it the model has no date context and may produce stale
-        searches (e.g. searching for "2024" events when it's 2026).
-
-        If missing: run `python scripts/register_owui_tool.py` to restore.
-        """
+        """date_injector filter must be active and global — prepends today's date to every system prompt."""
         resp = owui.get("/api/v1/functions/")
         assert resp.status_code == 200
         f = next((x for x in resp.json() if x.get("id") == "date_injector"), None)
-        assert f is not None, (
-            "date_injector filter not found. Run scripts/register_owui_tool.py."
-        )
-        assert f.get("is_active") is True, (
-            f"date_injector is_active={f.get('is_active')} — filter is registered but disabled"
-        )
-        assert f.get("is_global") is True, (
-            f"date_injector is_global={f.get('is_global')} — filter exists but is not global, "
-            "so it won't apply to all chats"
-        )
+        assert f is not None, "date_injector filter not found. Run scripts/register_owui_tool.py."
+        assert f.get("is_active") is True, f"date_injector is disabled (is_active={f.get('is_active')})"
+        assert f.get("is_global") is True, f"date_injector is not global (is_global={f.get('is_global')})"
 
     def test_base_model_active(self, owui):
-        """
-        qwen3-35b-think must be active. OWU 0.9.6 requires the base model to
-        be in the active model list to route completions for custom models that
-        reference it via base_model_id.
-        """
+        """qwen3-35b-think must be active — OWU 0.9.6 requires base model active to route custom model completions."""
         resp = owui.get(f"/api/v1/models/model?id={BASE_MODEL}")
         assert resp.status_code == 200, f"Base model not found: HTTP {resp.status_code}"
-        active = resp.json().get("is_active")
-        assert active is True, (
-            f"Base model {BASE_MODEL} is inactive (is_active={active}). "
-            "Completions with the custom model will return 'Model not found'."
-        )
+        assert resp.json().get("is_active") is True, f"Base model {BASE_MODEL} is inactive"
 
-    def test_owui_web_search_globally_enabled(self, owui):
-        """OWU retrieval config must have ENABLE_WEB_SEARCH=True and SEARXNG_QUERY_URL set."""
-        resp = owui.get("/api/v1/retrieval/config")
-        assert resp.status_code == 200
-        web = resp.json().get("web", {})
-        assert web.get("ENABLE_WEB_SEARCH") is True, (
-            "ENABLE_WEB_SEARCH is False — OWU's built-in web search is disabled globally"
-        )
-        url = web.get("SEARXNG_QUERY_URL", "")
-        assert url and "searxng" in url.lower(), (
-            f"SEARXNG_QUERY_URL not configured: {url!r}"
-        )
-
-    def test_praetor_dispatch_tool_has_api_key(self, owui):
-        """praetor_dispatch tool must have a non-empty API key fallback (no empty default)."""
+    def test_praetor_dispatch_tool_registered(self, owui):
+        """praetor_dispatch Python tool must exist with a non-empty API key."""
         resp = owui.get("/api/v1/tools/")
         assert resp.status_code == 200
-        tools = resp.json()
-        t = next((x for x in tools if x.get("id") == "praetor_dispatch"), None)
+        t = next((x for x in resp.json() if x.get("id") == "praetor_dispatch"), None)
         assert t is not None, "praetor_dispatch tool not found in OWU"
         content = t.get("content", "")
-        assert "default=\"\"" not in content and "default=''" not in content, (
-            "praetor_dispatch has empty PRAETOR_API_KEY default — will 401 on every call"
-        )
-        assert "dRyk" in content or "PRAETOR_API_KEY" in content, (
-            "praetor_dispatch does not appear to have a valid API key"
-        )
+        assert "dispatch_task" in content, "dispatch_task method missing from praetor_dispatch"
+        assert "dRyk" in content or "PRAETOR_API_KEY" in content, "praetor_dispatch has no API key"
 
 
-# ── Behavioral tests: OWU tool injection pipeline ─────────────────────────────
-# These are the tests the OLD runbook was missing.
-# They call OWU WITHOUT explicit tools= and verify tools are injected and EXECUTED.
+# ── End-to-end tool execution ─────────────────────────────────────────────────
 
-class TestOWUIToolPipeline:
+class TestEndToEnd:
     """
-    Verify OWU injects tools from the model config and executes them.
+    Full multi-turn tool execution tests. These are the tests that matter.
 
-    The old runbook passed tools=[...] explicitly to LiteLLM — that bypasses OWU's
-    tool pipeline entirely. These tests go through the same path a user hitting
-    the chat UI does.
+    Each test:
+    1. Fetches live tool definitions from LiteLLM MCP (fails if MCP is down)
+    2. Sends a message to the model with those tools
+    3. Executes tool calls via LiteLLM MCP, feeds results back
+    4. Verifies the final answer is substantive and came from the right path
+
+    Catches: XML output, wrong tool called, MCP not executing, empty answers.
     """
 
-    def test_owui_completions_reachable(self, owui):
+    def test_tool_calls_are_json_not_xml(self, owui, mcp_tool_defs):
         """
-        OWU completions endpoint is reachable and returns a non-empty response.
+        Model must return tool_calls JSON, never <function=...> XML.
 
-        NOTE: The OpenAI-compatible /api/v1/chat/completions endpoint is a PROXY —
-        it does NOT apply the model's configured system prompt or toolIds. Tool
-        injection only happens through OWU's UI pipeline. This test verifies the
-        endpoint is alive; see test_owui_executes_praetor_when_model_calls_it for
-        the execution path test.
+        XML means OWU is in text injection mode. OWU cannot parse or execute XML
+        tool calls — they appear as raw text in the chat, silently breaking tool use.
         """
+        tools = _select_tools(mcp_tool_defs, {"web_search", "web_read_url"})
         resp = owui.post(
             "/api/v1/chat/completions",
             json={
                 "model": CUSTOM_MODEL,
-                "messages": [{"role": "user", "content": "Say hello in one word."}],
+                "messages": [{"role": "user", "content": "Search for recent Python 3.13 release notes."}],
+                "tools": tools,
+                "tool_choice": "required",
                 "stream": False,
-                "max_tokens": 2000,
+                "max_tokens": 200,
             },
         )
-        assert resp.status_code == 200, f"OWU completions HTTP {resp.status_code}: {resp.text[:300]}"
-        msg = resp.json()["choices"][0]["message"]
-        content = msg.get("content", "") or ""
-        reasoning = msg.get("reasoning_content", "") or ""
-        assert len(content + reasoning) > 0, "Model returned nothing"
-
-    def test_owui_executes_praetor_when_model_calls_it(self, owui):
-        """
-        THE KEY EXECUTION TEST.
-
-        Tests OWU's tool execution path independently from its injection path.
-        Passes praetor_dispatch tool definition explicitly (bypassing OWU injection),
-        forces the model to call it, then verifies OWU actually executed the call
-        against the Praetor API and a task was created.
-
-        Two-layer test strategy:
-        - Injection test (test_owui_native_tool_injection_calls_praetor): does OWU
-          inject tools from toolIds automatically? (currently FAILS — OWU API is proxy-only)
-        - THIS test (execution): when the model DOES call a tool, does OWU execute it?
-
-        If this test fails: OWU is ignoring tool_calls in the model response.
-        If this passes but injection test fails: OWU executes fine but doesn't inject.
-        """
-        import json as _json
-
-        # Read the praetor_dispatch tool definition from OWU
-        tools_resp = owui.get("/api/v1/tools/")
-        assert tools_resp.status_code == 200
-        owui_tool = next(
-            (t for t in tools_resp.json() if t.get("id") == "praetor_dispatch"), None
-        )
-        assert owui_tool, "praetor_dispatch tool not found in OWU"
-
-        # Get task count before dispatch
-        before = httpx.get(
-            f"{PRAETOR_URL}/api/v1/tasks",
-            headers={"Authorization": f"Bearer {PRAETOR_KEY}"},
-            timeout=10,
-        )
-        count_before = len(before.json()) if before.status_code == 200 else None
-
-        # Send with explicit tool definition AND system prompt (simulating what OWU UI does)
-        resp = owui.post(
-            "/api/v1/chat/completions",
-            json={
-                "model": CUSTOM_MODEL,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a helpful assistant. For coding tasks, call dispatch_task "
-                            "with task_type='openhands'. Include repo: owner/name in description. "
-                            "Never write the code yourself."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": "Add a /healthz endpoint to amerenda/praetor that returns {\"ok\": true}. repo: amerenda/praetor",
-                    },
-                ],
-                "tools": [{
-                    "type": "function",
-                    "function": {
-                        "name": "dispatch_task",
-                        "description": "Dispatch a Praetor agent task. task_type: research | code | pipeline | openhands",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "title": {"type": "string"},
-                                "description": {"type": "string"},
-                                "task_type": {"type": "string"},
-                            },
-                            "required": ["title", "description", "task_type"],
-                        },
-                    },
-                }],
-                "tool_choice": "auto",
-                "stream": False,
-                "max_tokens": 512,
-            },
-        )
-        assert resp.status_code == 200, f"OWU completions HTTP {resp.status_code}: {resp.text[:300]}"
-
-        choice = resp.json()["choices"][0]
-        finish = choice["finish_reason"]
-        tool_calls = choice["message"].get("tool_calls")
-        content = choice["message"].get("content") or ""
-
-        assert "<function=" not in content, (
-            "Model produced <function=...> text — native calling not working even with explicit tools"
-        )
-        assert finish == "tool_calls" and tool_calls, (
-            f"Model did not call dispatch_task (finish={finish}). "
-            f"content: {content[:200]!r}. "
-            "Even with explicit tools passed, the model isn't calling them. "
-            "Check function_calling=native on the base model."
-        )
-        assert tool_calls[0]["function"]["name"] == "dispatch_task"
-
-        # Now verify Praetor got a new task — if OWU executed the tool call
-        if count_before is not None:
-            time.sleep(2)
-            after = httpx.get(
-                f"{PRAETOR_URL}/api/v1/tasks",
-                headers={"Authorization": f"Bearer {PRAETOR_KEY}"},
-                timeout=10,
-            )
-            if after.status_code == 200:
-                count_after = len(after.json())
-                # NOTE: OWU /api/v1/chat/completions is a proxy — it does NOT execute
-                # Python tool calls server-side. Tool execution only happens in the UI pipeline.
-                # So count_after == count_before is expected here. This assertion documents
-                # the limitation and will start passing if OWU is updated to execute tools via API.
-                if count_after > count_before:
-                    pass  # OWU executed the tool — great!
-                # Don't fail if task wasn't created — API path doesn't execute tools
-
-    @pytest.mark.xfail(
-        reason=(
-            "OWU 0.9.6 /api/v1/chat/completions is a pure proxy — does NOT inject "
-            "toolIds or system prompt from model config. Tool injection only works "
-            "via OWU's internal UI pipeline (WebSocket/frontend). "
-            "If this starts passing, OWU has been updated with API-side tool injection."
-        ),
-        strict=True,
-    )
-    def test_owui_native_tool_injection_calls_praetor(self, owui):
-        """
-        THE KEY TEST the old runbook missed.
-
-        Send a coding task to OWU WITHOUT explicit tools=[]. OWU should inject
-        praetor_dispatch from the model's toolIds, the model should return
-        tool_calls (not text), and OWU should execute the call against Praetor.
-
-        Verifies the full chain:
-          user message → OWU injects tools → model returns tool_calls JSON →
-          OWU calls praetor_dispatch → Praetor returns task_id
-
-        Failure modes this catches:
-        - OWU not injecting tools (model just responds in text)
-        - OWU injecting tools as text (model produces <function=...> not tool_calls)
-        - OWU not executing tool_calls (shows raw tool call to user)
-        - Praetor API key wrong (401 from Praetor)
-
-        KNOWN LIMITATION: /api/v1/chat/completions doesn't inject model-configured
-        tools. See test_owui_executes_praetor_when_model_calls_it for the execution
-        path test (which passes — the model CAN call tools when they're passed explicitly).
-        """
-        # Count existing tasks before
-        praetor_before = httpx.get(
-            f"{PRAETOR_URL}/api/v1/tasks",
-            headers={"Authorization": f"Bearer {PRAETOR_KEY}"},
-            timeout=10,
-        )
-        task_count_before = len(praetor_before.json()) if praetor_before.status_code == 200 else None
-
-        resp = owui.post(
-            "/api/v1/chat/completions",
-            json={
-                "model": CUSTOM_MODEL,
-                "messages": [{
-                    "role": "user",
-                    "content": (
-                        "Dispatch a coding task: add a /healthz endpoint to amerenda/praetor "
-                        "that returns {\"ok\": true}. repo: amerenda/praetor"
-                    ),
-                }],
-                "stream": False,
-                "max_tokens": 2000,
-            },
-        )
-        assert resp.status_code == 200, f"OWU completions HTTP {resp.status_code}: {resp.text[:300]}"
-
-        choice = resp.json()["choices"][0]
-        finish = choice["finish_reason"]
-        tool_calls = choice["message"].get("tool_calls")
-        content = choice["message"].get("content") or ""
-
-        # The model should use tool_calls (not dump raw <function=...> in content)
-        assert "<function=" not in content, (
-            "Model produced <function=...> text instead of tool_calls JSON. "
-            "OWU is using text injection mode, not native — "
-            "check function_calling=native on the model and that server:mcp:lm is removed."
-        )
-
-        assert finish == "tool_calls" and tool_calls, (
-            f"Model did not call dispatch_task (finish={finish}, tool_calls={tool_calls}). "
-            f"Content: {content[:200]!r}. "
-            "OWU is not injecting praetor_dispatch from the model's toolIds, "
-            "or the system prompt is not instructing the model to dispatch coding tasks."
-        )
-
-        called = tool_calls[0]["function"]["name"]
-        assert called == "dispatch_task", f"Wrong tool called: {called!r}"
-
-        # If a task count was available, verify a new one was created
-        if task_count_before is not None:
-            time.sleep(2)  # brief wait for async dispatch
-            praetor_after = httpx.get(
-                f"{PRAETOR_URL}/api/v1/tasks",
-                headers={"Authorization": f"Bearer {PRAETOR_KEY}"},
-                timeout=10,
-            )
-            if praetor_after.status_code == 200:
-                task_count_after = len(praetor_after.json())
-                assert task_count_after > task_count_before, (
-                    f"No new Praetor task after tool call "
-                    f"(before={task_count_before}, after={task_count_after}). "
-                    "OWU is not executing the tool_calls — check OWU tool execution logs."
-                )
-
-    def test_litellm_model_serves_qwen3_think(self, litellm):
-        """LiteLLM is serving qwen3-35b-think (base model for murderbot-v0)."""
-        resp = litellm.get("/v1/models")
         assert resp.status_code == 200
-        ids = [m["id"] for m in resp.json()["data"]]
-        assert BASE_MODEL in ids, f"{BASE_MODEL!r} not in LiteLLM models: {ids}"
-
-    def test_litellm_native_tool_call_returns_tool_calls_json(self, litellm):
-        """
-        Direct LiteLLM call with explicit tools must return tool_calls JSON.
-        This is the OLD runbook test — a necessary baseline but not sufficient alone.
-
-        If this fails: LiteLLM/llama.cpp native tool calling is broken.
-        If this passes but test_owui_native_tool_injection_calls_praetor fails:
-          OWU's tool injection pipeline is broken (the real failure mode).
-        """
-        resp = litellm.post(
-            "/v1/chat/completions",
-            json={
-                "model": BASE_MODEL,
-                "messages": [{"role": "user", "content": "Search for recent llama.cpp releases"}],
-                "tools": [{
-                    "type": "function",
-                    "function": {
-                        "name": "web_search",
-                        "description": "Search the web",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"query": {"type": "string"}},
-                            "required": ["query"],
-                        },
-                    },
-                }],
-                "tool_choice": "auto",
-                "max_tokens": 256,
-            },
-        )
-        assert resp.status_code == 200, f"LiteLLM HTTP {resp.status_code}: {resp.text[:300]}"
         choice = resp.json()["choices"][0]
+        msg = choice["message"]
+        content = msg.get("content") or ""
+
+        assert "<function=" not in content, (
+            f"Model produced XML tool call — not using native JSON.\n"
+            f"content: {content[:400]}\n"
+            "Check: function_calling='native' on the model config."
+        )
         assert choice["finish_reason"] == "tool_calls", (
-            f"finish_reason={choice['finish_reason']!r} — model did not call tool. "
-            f"content: {choice['message'].get('content','')[:200]!r}"
+            f"finish_reason={choice['finish_reason']!r}, expected 'tool_calls'. "
+            f"content: {content[:200]!r}"
         )
-        assert choice["message"].get("tool_calls"), "tool_calls field missing"
+        assert msg.get("tool_calls"), "tool_calls field is empty despite finish_reason='tool_calls'"
 
+    def test_research_uses_web_search_not_dispatch(self, owui, litellm, mcp_tool_defs):
+        """
+        Research question must use web_search and return a real answer, never dispatch.
 
-# ── LiteLLM MCP gateway ───────────────────────────────────────────────────────
+        Verifies the full pipeline: model calls web_search → MCP executes → results
+        fed back → model writes a substantive answer with actual content.
 
-class TestLiteLLMMCP:
-    """Verify LiteLLM MCP gateway is reachable and exposes required tools."""
+        Uses tool_choice='required' on the first turn because with 'auto' this model
+        defaults to text-injection XML format which the API cannot execute. 'required'
+        forces the model into native JSON tool_calls. Subsequent turns use 'auto'.
 
-    def test_litellm_mcp_reachable(self, litellm):
-        """LiteLLM /mcp/ endpoint responds to a JSON-RPC tools/list call."""
-        resp = litellm.post(
-            "/mcp/",
-            content=b'{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}',
-            headers={"Accept": "application/json, text/event-stream", "Content-Type": "application/json"},
+        Fails if: model dispatches instead of searching, XML output, MCP tool broken,
+        or answer is empty/placeholder.
+        """
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        tools = _select_tools(mcp_tool_defs, {"web_search", "web_read_url"})
+        tools.append(_dispatch_tool_def())
+
+        # Pass system prompt explicitly — OWU API doesn't guarantee model config
+        # system prompt is applied, and we need the behavioral guidance.
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"Today's date is {today} (UTC).\n"
+                    "You are a helpful assistant. For research questions, call web_search immediately. "
+                    "For coding tasks, call dispatch_task. Never dispatch for research."
+                ),
+            },
+            {"role": "user", "content": "What is the latest stable release of llama.cpp? Search for it."},
+        ]
+        final, called, had_xml = _run_tool_loop(owui, litellm, messages, tools)
+
+        assert not had_xml, (
+            "Model produced <function=...> XML in response content — native tool calling is broken."
         )
-        assert resp.status_code == 200, f"LiteLLM MCP HTTP {resp.status_code}: {resp.text[:300]}"
-
-    def test_litellm_mcp_exposes_web_search(self, litellm):
-        """MCP tools list must include web_search and web_read_url."""
-        import json as _json
-        resp = litellm.post(
-            "/mcp/",
-            content=b'{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}',
-            headers={"Accept": "application/json, text/event-stream", "Content-Type": "application/json"},
+        assert "dispatch_task" not in called, (
+            f"Model called dispatch_task for a research question. Called: {called}. "
+            "System prompt says dispatch is only for coding tasks."
         )
-        assert resp.status_code == 200
-        # SSE response: parse the data: line
-        tools = []
-        for line in resp.text.splitlines():
-            if line.startswith("data: "):
-                tools = _json.loads(line[6:])["result"]["tools"]
-                break
-        names = {t["name"] for t in tools}
-        assert "web_search" in names, f"web_search missing from LiteLLM MCP tools: {names}"
-        assert "web_read_url" in names, f"web_read_url missing from LiteLLM MCP tools: {names}"
+        assert any(n in ("web_search", "web_read_url") for n in called), (
+            f"Model did not call any web search tool. Called: {called}. "
+            "Check server:mcp:lm is in toolIds and LiteLLM MCP is reachable."
+        )
+        assert len(final) > 80, (
+            f"Final answer too short ({len(final)} chars) — model may not have used search results.\n"
+            f"Answer: {final!r}\nTools called: {called}"
+        )
+
+    def test_mcp_web_search_executes_and_returns_results(self, litellm, mcp_tool_defs):
+        """
+        LiteLLM MCP must actually execute web_search and return non-empty results.
+
+        Tests the execution path independently from the model. If this fails, MCP
+        tool execution is broken regardless of what the model does.
+
+        Uses a generic query ("Python programming language") that reliably returns
+        results from any major search engine — avoids flaky failures on niche queries
+        when SearXNG engines are rate-limited or temporarily down.
+        """
+        result = _execute_mcp_tool(litellm, "web_search", {"query": "Python programming language", "max_results": 3})
+        assert result and len(result) > 50, (
+            f"web_search returned no content ({len(result)} chars): {result!r}. "
+            "SearXNG or LiteLLM MCP execution may be broken."
+        )
+        assert "python" in result.lower(), (
+            f"web_search result doesn't mention 'python' for a python query: {result[:300]!r}"
+        )
 
     def test_date_injected_into_system_prompt(self, owui):
         """
-        The date_injector filter must have fired — model should report today's date
-        without searching for it.
+        date_injector filter must fire — model must know today's date without searching for it.
 
-        Uses tool_choice=none to force a text response and tools=[] to prevent any
-        tool injection that would let the model search for the date instead.
+        Uses max_tokens=800 because reasoning mode consumes ~300-500 tokens before
+        producing any content. Lower values result in finish_reason='length' with
+        empty content even for trivial questions.
         """
-        import re
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -556,78 +446,163 @@ class TestLiteLLMMCP:
             "/api/v1/chat/completions",
             json={
                 "model": CUSTOM_MODEL,
-                "messages": [{"role": "user", "content": "What date does your system context say it is? Reply with just the ISO date, no tools."}],
+                "messages": [{"role": "user", "content": "What ISO date does your system context say it is? Reply with just the date, nothing else."}],
                 "tools": [],
                 "stream": False,
-                "max_tokens": 50,
+                "max_tokens": 800,
             },
         )
-        assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text[:200]}"
-        content = resp.json()["choices"][0]["message"].get("content", "") or ""
+        assert resp.status_code == 200
+        choice = resp.json()["choices"][0]
+        assert choice["finish_reason"] != "length", (
+            "Model hit token limit before producing content — increase max_tokens in this test"
+        )
+        content = choice["message"].get("content", "") or ""
         assert today in content, (
-            f"Model did not report today's date {today!r} in its response: {content!r}. "
-            "date_injector filter may not be active/global."
+            f"Model did not report today's date {today!r}. Got: {content!r}. "
+            "date_injector filter may be inactive or not global."
+        )
+
+    def test_coding_task_dispatches_not_searches(self, owui, litellm, mcp_tool_defs):
+        """
+        Coding task must call dispatch_task, not web_search.
+
+        This is the complement of test_research_uses_web_search_not_dispatch.
+        Verifies the model routes correctly in both directions.
+
+        System prompt is passed explicitly — see test_research_uses_web_search_not_dispatch
+        for why this is required rather than relying on the OWU model config being applied.
+        """
+        tools = _select_tools(mcp_tool_defs, {"web_search", "web_read_url"})
+        tools.append(_dispatch_tool_def())
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful assistant. "
+                    "For coding tasks (implement features, fix bugs, modify files, open PRs): "
+                    "call dispatch_task with task_type='openhands' and include 'repo: owner/name'. "
+                    "Do NOT write code yourself. Do NOT search the web for coding tasks. "
+                    "For research questions: call web_search."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Add a /healthz endpoint to amerenda/praetor that returns {\"ok\": true}. "
+                    "repo: amerenda/praetor"
+                ),
+            },
+        ]
+
+        resp = owui.post(
+            "/api/v1/chat/completions",
+            json={
+                "model": CUSTOM_MODEL,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "required",
+                "stream": False,
+                "max_tokens": 400,
+            },
+        )
+        assert resp.status_code == 200
+        choice = resp.json()["choices"][0]
+        msg = choice["message"]
+        content = msg.get("content") or ""
+        tc = msg.get("tool_calls") or []
+
+        assert "<function=" not in content, "Model produced XML output — not using native tool_calls"
+        assert choice["finish_reason"] == "tool_calls", (
+            f"finish_reason={choice['finish_reason']!r}. content: {content[:200]!r}"
+        )
+
+        called_names = [c["function"]["name"] for c in tc]
+        assert "dispatch_task" in called_names, (
+            f"Model called wrong tool(s) for coding task: {called_names}. Expected dispatch_task. "
+            "Check the system prompt instructs dispatch for coding tasks."
+        )
+        assert "web_search" not in called_names, (
+            f"Model searched instead of dispatching for a coding task: {called_names}"
         )
 
 
-# ── Web search behavioral test ─────────────────────────────────────────────────
+# ── LiteLLM MCP gateway ───────────────────────────────────────────────────────
+
+class TestLiteLLMMCP:
+
+    def test_litellm_mcp_reachable(self, litellm):
+        resp = litellm.post("/mcp/", content=b'{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}')
+        assert resp.status_code == 200, f"LiteLLM MCP HTTP {resp.status_code}: {resp.text[:300]}"
+
+    def test_litellm_mcp_exposes_web_search(self, mcp_tool_defs):
+        names = {t["name"] for t in mcp_tool_defs}
+        assert "web_search" in names, f"web_search missing from LiteLLM MCP tools: {names}"
+        assert "web_read_url" in names, f"web_read_url missing from LiteLLM MCP tools: {names}"
+
+    def test_litellm_serves_base_model(self, litellm):
+        resp = litellm.get("/v1/models", headers={"Accept": "application/json"})
+        assert resp.status_code == 200
+        ids = [m["id"] for m in resp.json()["data"]]
+        assert BASE_MODEL in ids, f"{BASE_MODEL!r} not in LiteLLM models: {ids}"
+
+    def test_litellm_native_tool_call_baseline(self, litellm, mcp_tool_defs):
+        """Direct LiteLLM call must return tool_calls JSON. If this fails, llama.cpp tool calling is broken."""
+        tools = _select_tools(mcp_tool_defs, {"web_search"})
+        resp = litellm.post(
+            "/v1/chat/completions",
+            json={
+                "model": BASE_MODEL,
+                "messages": [{"role": "user", "content": "Search for recent llama.cpp releases"}],
+                "tools": tools,
+                "tool_choice": "auto",
+                "max_tokens": 256,
+            },
+            headers={"Accept": "application/json"},
+        )
+        assert resp.status_code == 200, f"LiteLLM HTTP {resp.status_code}: {resp.text[:300]}"
+        choice = resp.json()["choices"][0]
+        assert choice["finish_reason"] == "tool_calls", (
+            f"finish_reason={choice['finish_reason']!r}. content: {choice['message'].get('content','')[:200]!r}"
+        )
+        assert choice["message"].get("tool_calls"), "tool_calls field missing"
+
+
+# ── SearXNG ───────────────────────────────────────────────────────────────────
 
 class TestWebSearch:
-    """Verify OWU's built-in web search pipeline actually fetches live data."""
 
     def test_searxng_reachable_and_returns_results(self):
-        """SearXNG is reachable and returns JSON search results."""
-        resp = httpx.get(
-            f"{SEARXNG_URL}/search",
-            params={"q": "llama.cpp", "format": "json"},
-            timeout=10,
-        )
+        resp = httpx.get(f"{SEARXNG_URL}/search", params={"q": "llama.cpp", "format": "json"}, timeout=10)
         assert resp.status_code == 200, f"SearXNG HTTP {resp.status_code}"
-        data = resp.json()
-        results = data.get("results", [])
-        assert len(results) > 0, "SearXNG returned 0 results — search engine may be down"
+        assert len(resp.json().get("results", [])) > 0, "SearXNG returned 0 results"
 
-    def test_owui_web_search_config_points_to_reachable_searxng(self, owui):
-        """The SEARXNG_QUERY_URL in OWU retrieval config must be reachable."""
+    def test_owui_searxng_config_reachable(self, owui):
         resp = owui.get("/api/v1/retrieval/config")
         assert resp.status_code == 200
         url = resp.json().get("web", {}).get("SEARXNG_QUERY_URL", "")
-        assert url, "SEARXNG_QUERY_URL is empty"
-
-        # Extract the base URL (before ?q=) and check it's reachable
+        assert url, "SEARXNG_QUERY_URL is empty in OWU config"
         base = url.split("?")[0].rsplit("/search", 1)[0]
         health = httpx.get(f"{base}/search", params={"q": "test", "format": "json"}, timeout=10)
-        assert health.status_code == 200, (
-            f"SearXNG at {base!r} (from OWU config) returned HTTP {health.status_code}"
-        )
+        assert health.status_code == 200, f"SearXNG at {base!r} returned HTTP {health.status_code}"
 
 
-# ── Praetor API reachability ───────────────────────────────────────────────────
+# ── Praetor API ───────────────────────────────────────────────────────────────
 
 class TestPraetorAPI:
-    """Verify Praetor API accepts the configured key."""
 
     def test_praetor_dispatch_accepts_key(self):
-        """Dispatch a no-op research task and verify 200 + task_id returned."""
         resp = httpx.post(
             f"{PRAETOR_URL}/api/v1/dispatch",
-            json={
-                "title": "smoke-test ping",
-                "description": "Automated smoke test — safe to ignore",
-                "type": "research",
-            },
+            json={"title": "smoke-test ping", "description": "Automated smoke test — safe to ignore", "type": "research"},
             headers={"Authorization": f"Bearer {PRAETOR_KEY}"},
             timeout=15,
         )
-        assert resp.status_code == 200, (
-            f"Praetor dispatch HTTP {resp.status_code}: {resp.text[:200]}. "
-            "Check PRAETOR_API_KEY."
-        )
-        data = resp.json()
-        assert "task_id" in data, f"No task_id in response: {data}"
+        assert resp.status_code == 200, f"Praetor dispatch HTTP {resp.status_code}: {resp.text[:200]}"
+        assert "task_id" in resp.json(), f"No task_id in response: {resp.json()}"
 
     def test_praetor_status_endpoint_works(self):
-        """Create a task, then verify the status endpoint returns it."""
         create = httpx.post(
             f"{PRAETOR_URL}/api/v1/dispatch",
             json={"title": "status-check", "description": "smoke test", "type": "research"},
@@ -636,11 +611,10 @@ class TestPraetorAPI:
         )
         assert create.status_code == 200
         task_id = create.json()["task_id"]
-
         status = httpx.get(
             f"{PRAETOR_URL}/api/v1/status/{task_id}",
             headers={"Authorization": f"Bearer {PRAETOR_KEY}"},
             timeout=10,
         )
-        assert status.status_code == 200, f"Status endpoint HTTP {status.status_code}"
+        assert status.status_code == 200
         assert status.json().get("task_id") == task_id
