@@ -72,12 +72,16 @@ async def _run_research(input: ResearchInput, context: Context) -> dict:
         task_invocations.labels(agent=_AGENT_NAME, status="success").inc()
         langfuse_context.update_current_trace(output=result.get("summary", ""))
 
-        # Phase 21: always store completion note so task status is trackable.
         summary = result.get("summary", "")
         if summary:
             await add_memory(
                 f"research task #{input.task_id} ({input.task_title}) completed: {summary[:500]}",
                 f"task-{input.task_id}",
+            )
+            # planner-global: research findings available for planning conversations
+            await add_memory(
+                f"research: {input.task_title} — {summary[:400]}",
+                "planner-global",
             )
         return result
     except Exception:

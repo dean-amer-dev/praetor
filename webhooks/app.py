@@ -11,6 +11,7 @@ from .mcp_factory import router as mcp_factory_router
 from .app_factory import router as app_factory_router
 from .mcp_request import router as mcp_request_router
 from .agent_factory import router as agent_factory_router
+from .spec import router as spec_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -29,6 +30,7 @@ app.include_router(mcp_factory_router)
 app.include_router(app_factory_router)
 app.include_router(mcp_request_router)
 app.include_router(agent_factory_router)
+app.include_router(spec_router)
 
 
 @app.get("/healthz")
