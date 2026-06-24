@@ -169,11 +169,11 @@ def ensure_custom_model(client: httpx.Client) -> None:
             },
             "builtinTools": {
                 "chats": False, "calendar": False, "tasks": False, "memory": False,
-                "notes": False, "channels": False, "web_search": False,
+                "notes": False, "channels": False, "web_search": True,
                 "automations": False, "image_generation": False,
                 "code_interpreter": False, "time": False, "knowledge": True,
             },
-            "toolIds": ["server:mcp:lm", "praetor_dispatch"],
+            "toolIds": ["praetor_dispatch"],
             "system": SYSTEM_PROMPT,
         },
         "is_active": True,
