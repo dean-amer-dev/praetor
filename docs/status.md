@@ -28,10 +28,11 @@
 | 23 | Coder Context Management + Feature Decomposition | ✅ Complete | PRs #127 (praetor) + #930/#931 (k3s-dean-gitops) merged, deployed sha-04244ae. (23a) run_shell→3000 chars tail, read_file→8000 chars head; (23b) save_progress tool in coder agent; (23c) feature-pipeline-worker running (pipeline:feature_decompose). 297 unit tests pass, 51/51 smoke tests green. |
 | 24 | Skills System | ✅ Complete | PRs #130 (praetor) + #932/#933/#934 (k3s-dean-gitops) merged, deployed sha-ee8e4e8. common/db.py (asyncpg pool), common/skills.py (assemble_prompt), webhooks/skills.py (CRUD API). All workers call assemble_prompt() at task-start. praetor_skills + praetor_agent_skills tables on mac-mini postgres. 318 unit tests pass. |
 | 25 | Agent Factory | ⬜ Pending | POST /api/v1/agent/create → scaffold → wire Hatchet event → CI/deploy → smoke test in one call. Phase 11 scaffold-worker does the PR; this wraps the full pipeline. |
-| 26 | Inline Arbitration | ⬜ Pending | Re-dispatch loop exhausted → focused LLM call → decision memo written to mem0 + PR comment |
-| 27 | Voice Dispatch | ⬜ Pending | Voice input → OWU → lm_praetor_dispatch pipeline |
-| 28 | Control Plane UI | ⬜ Pending | Praetor "single pane of glass": agent matrix (skills × agents toggle), MCP registry panel, task log viewer, skill prompt editor. Requires Phase 24 (skills API). NOT Ecdysis. |
-| 29 | Model Factory | ⬜ Pending | Dispatch a model name → hardware fit check across all runners → download to best runner → LiteLLM GitOps PR → benchmark suite (tool calling, approvals, general capability, instruction following) → Langfuse report. See phase-29.md. |
+| 26 | Skills Benchmark | ⬜ Pending | Before/after compliance measurement for each skill. Eval datasets in Langfuse (skill-eval-{name}), benchmark:skill Hatchet event, LLM-as-judge scoring, compliance_rate + quality_delta + regression_rate written to Mem0. Phase 30 consumes this for model × skill matrix. |
+| 27 | Inline Arbitration | ⬜ Pending | Re-dispatch loop exhausted → focused LLM call → decision memo written to mem0 + PR comment |
+| 28 | Voice Dispatch | ⬜ Pending | Voice input → OWU → lm_praetor_dispatch pipeline |
+| 29 | Control Plane UI | ⬜ Pending | Praetor "single pane of glass": agent matrix (skills × agents toggle + effectiveness scores), MCP registry panel, task log viewer, skill prompt editor. Requires Phase 24 (skills API) + Phase 26 (skill scores). NOT Ecdysis. |
+| 30 | Model Factory | ⬜ Pending | Dispatch a model name → hardware fit check across all runners → download to best runner → LiteLLM GitOps PR → benchmark suite (tool calling, approvals, general capability, instruction following, skill receptiveness via Phase 26) → Langfuse report. See phase-30.md. |
 
 ---
 

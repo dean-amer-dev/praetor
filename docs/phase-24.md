@@ -1,77 +1,90 @@
-# Phase 21 — Coder Re-Dispatch Loop (Historical Planning Doc)
+# Phase 24 — Skills System
 
-> **Note:** This was the planning document written when re-dispatch was Phase 22.
-> The feature was implemented as Phase 21 (PR #118). See `phase-21.md` for status.
-
-**Goal:** Close the coder→reviewer feedback loop. When the reviewer posts `REQUEST_CHANGES`, automatically re-dispatch the coder with the review feedback attached. Cap at 2 coder attempts before leaving the PR open for human review.
+**Goal:** Give every agent a hot-swappable behavior layer. Skills are named, versioned prompt snippets stored in PostgreSQL and Langfuse. Workers inject them at task-start — no pod restart needed, changes take effect on the next task.
 
 ---
 
-## Pre-conditions
+## What Was Built
 
-- Phase 21 complete (mem0 active, reviewer writes structured memories)
-- Reviewer worker live (`amerenda-reviewer` GitHub App posting reviews)
-- Coder worker live (praetor-coder GitHub App opening draft PRs)
+### `common/db.py`
 
----
+asyncpg connection pool, lazy-initialized on first use. Graceful no-op when `PRAETOR_DB_URL` is not set (workers remain functional without DB). Pool is reused within a process lifetime.
 
-## What Gets Built
+### `common/skills.py`
 
-### Trigger: reviewer REQUEST_CHANGES → re-dispatch coder
+Two functions:
 
-Currently:
+- `load_skill_assignments(agent_name)` — queries `praetor_agent_skills` for the agent's active skill names
+- `assemble_prompt(agent_name, base)` — loads assignments, fetches each snippet from Langfuse via `get_system_prompt(f"skill-{name}", fallback="")`, appends non-empty snippets to `base`. Returns `base` unchanged if DB is unavailable or no skills are assigned.
+
+### `webhooks/skills.py`
+
+Full CRUD REST API:
+
 ```
-coder opens draft PR → reviewer posts review → human decides
+GET    /api/v1/skills                        list all skills
+POST   /api/v1/skills                        create {name, description, prompt}
+GET    /api/v1/skills/{name}                 get skill
+PUT    /api/v1/skills/{name}                 update prompt (new Langfuse version)
+DELETE /api/v1/skills/{name}                 delete
+
+GET    /api/v1/agents                        list agents + their active skills
+GET    /api/v1/agents/{name}/skills          list skills for one agent
+POST   /api/v1/agents/{name}/skills          assign {skill_name}
+DELETE /api/v1/agents/{name}/skills/{skill}  remove assignment
 ```
 
-After Phase 22:
+`create_skill` and `update_skill` push the prompt text to Langfuse as `skill-{name}`. PostgreSQL stores the snapshot + metadata; Langfuse is the versioned canonical source.
+
+### Worker integration
+
+All workers (coder, research, reviewer, qa) and feature-pipeline call `assemble_prompt()` at task-start before building the agent. The global agent cache was removed — a fresh agent is built per task so the skill-augmented prompt is always current.
+
+```python
+base = get_system_prompt("coder-system", fallback=_FALLBACK)
+full_prompt = await assemble_prompt("coder", base)
+agent = build_agent(system_prompt=full_prompt)
 ```
-coder opens draft PR
-  → reviewer posts review
-    → if REQUEST_CHANGES and attempt < 2: re-dispatch coder with review feedback
-    → if APPROVE or attempt >= 2: leave for human review
+
+### Database
+
+Two tables on the existing mac-mini PostgreSQL (shared with Hatchet, Mem0, Langfuse):
+
+```sql
+CREATE TABLE praetor_skills (
+    name        TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    prompt      TEXT NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE praetor_agent_skills (
+    agent_name  TEXT NOT NULL,
+    skill_name  TEXT NOT NULL REFERENCES praetor_skills(name) ON DELETE CASCADE,
+    assigned_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (agent_name, skill_name)
+);
 ```
 
-### Implementation
+`PRAETOR_DB_URL` added to all 7 k3s worker deployments via ExternalSecret → Secret env var pattern.
 
-**`webhooks/github_webhook.py`** — add handler for `pull_request_review` events:
-- If `action == "submitted"` and `state == "REQUEST_CHANGES"`
-- Extract repo, PR number, review body, reviewer comments
-- Check attempt counter (stored in PR description or a Vikunja task comment)
-- If attempt < 2: dispatch `agent:code` with the original task context + review feedback appended
-- If attempt >= 2: post a PR comment noting the loop is exhausted, leave for human
+### OWU tool
 
-**`agents/coder/agent.py`** — system prompt already does `search_memory` first (Phase 21). Add:
-- Accept `review_feedback: str | None` in the dispatch payload
-- If present, append it to the task description so the LLM sees what the reviewer said
-
-**Attempt counter:** Simplest approach — store in the PR description as a hidden HTML comment `<!-- praetor-attempt: 1 -->`. The webhook handler reads it, increments, and writes it back on re-dispatch. No new state store needed.
-
-### What "re-dispatch" means
-
-The coder agent pushes a new commit to the same branch (not a new PR). The reviewer will re-review the updated diff via a new `pull_request` → `synchronize` event (already wired in `github_webhook.py`).
+Four new methods on the `praetor_dispatch` OWU Python tool: `list_skills()`, `create_skill()`, `assign_skill()`, `remove_skill_assignment()`. The `murderbot-v0` system prompt was updated with a skills management section and example flow.
 
 ---
 
-## Ready Conditions
+## Merged PRs
 
-- Reviewer `REQUEST_CHANGES` on a praetor-coder draft PR triggers automatic coder re-dispatch
-- Coder reads the reviewer feedback and mem0 context before making the fix
-- After 2 failed attempts, PR stays open with a note — no infinite loop
-- `APPROVE` on first review skips the loop entirely
+- `amerenda/praetor` PR #130 — skills system implementation
+- `amerenda/k3s-dean-gitops` PRs #932, #933, #934 — PRAETOR_DB_URL env vars for all workers
+- `amerenda/praetor` PR #132 — register_owui_tool.py updated with skills methods
 
----
-
-## What NOT to Build
-
-- No moderator agent yet (Phase 24)
-- No changes to the reviewer — it reviews the same way regardless of attempt number
-- No changes to how PRs are opened or merged
+Deployed sha: `ee8e4e8`
 
 ---
 
-## Notes
+## E2E Test Result
 
-- The attempt counter in the PR description is intentionally low-tech. It avoids needing a new DB table or ConfigMap for transient loop state.
-- mem0 is the long-term fix for repeated disputes: if the reviewer writes a memory on attempt 1, the coder reads it on attempt 2 and should apply it correctly.
-- The cap of 2 is deliberate. 3+ attempts without resolution almost always means the original task is underspecified, not that the coder needs another try.
+Skill `test-file-header` created and assigned to the coder via API. Coder task dispatched — the output file `skills-test.py` opened with `# created by praetor-coder` exactly as instructed by the skill prompt. Skill and assignment cleaned up post-test.
