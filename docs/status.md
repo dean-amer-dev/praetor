@@ -23,7 +23,7 @@
 | 18 | Kubernetes MCP | ✅ Complete | mcp-server-kubernetes deployed via Phase 17 pipeline; github-mcp and kubernetes-mcp registered in LiteLLM configmap |
 | 19 | GitHub Write MCP | ⬜ Pending | New MCP server in dean-mcp wrapping GitHub write ops: create_pr, update_pr, comment_pr, close_pr, push_branch. Removes github_api() from agent.py into a centralized MCP tool any agent can use. Deploy via mcp-factory. |
 | 20 | Mem0 Integration + Pre-PR Review Loop | ✅ Complete | search_memory before every task; add_memory after key decisions; reviewer check-before-write pattern |
-| 21 | Coder Re-Dispatch Loop | 🔁 PR open | PR #118 (phase-21-redispatch). pr:/branch:/attempt: parsing in coder worker done. Mode B prompt built. Reviewer re-dispatch on REQUEST_CHANGES done (cap attempt<1). Webhook handles synchronize on praetor-coder/ branches. Dedup block removed from reviewer agent. 8 new unit tests, all 256 pass. Merge when ready. |
+| 21 | Coder Re-Dispatch Loop | ✅ Complete | PR #118 merged. pr:/branch:/attempt: parsing in coder worker; Mode A (new PR) + Mode B (edit existing PR) prompts; reviewer re-dispatch on REQUEST_CHANGES (cap attempt<1); synchronize webhook on praetor-coder/ branches; 8 new unit tests. |
 | 22 | Spec Layer + Planning Conversation | ⬜ Pending | OWU planning agent produces structured TOML spec before dispatch; Mem0-seeded pre-fill; user approves before agent runs; coder reads spec for unambiguous requirements. See phase-22.md. |
 | 23 | Coder Context Management + Feature Decomposition | ⬜ Pending | Three-layer fix for coder OOM: (23a) truncate tool outputs at source; (23b) Mem0 progress checkpoints every 8 actions for crash recovery; (23c) multi-feature specs dispatch pipeline:feature_decompose — sequential inline coder runs, one feature per clean context, idempotent Mem0 resume. See phase-23.md. Requires Phase 22 spec layer. |
 | 24 | Skills System | ⬜ Pending | Dynamic per-agent prompt-only skills. Storage: PostgreSQL (praetor_skills + praetor_agent_skills tables on existing mac-mini DB) — no pod restarts, instant updates. Workers query at task-start and assemble final prompt = base + active skill snippets. Skill text lives in Langfuse as skill-{name}. API: CRUD for skills + per-agent assignments. |
@@ -144,12 +144,19 @@ reviewer                                              ✓              ✓
 
 ## Completed Work Notes
 
-### Phase 21 partial (coder-system v10 + github_api)
-- `github_api` Python tool added to `agents/coder/agent.py` — authenticated GitHub REST calls without curl
-- `coder-system` v10 live in Langfuse — Mode A (create PR), Mode B (edit existing PR), Mode C (comment)
-- github-mcp and kubernetes-mcp confirmed registered in LiteLLM configmap (k3s-dean-gitops PRs #904, #905)
-- mcp-factory idempotent upsert fixed — entries now land in mcp_servers block, not litellm_settings
-- TODO: parse `pr:` and `branch:` from worker task description in `_run_coder` to wire Mode B end-to-end
+### Phase 21 (merged PR #118)
+- `agents/coder/worker.py`: parses `pr:`, `branch:`, `attempt:` from task description; builds Mode A (new PR) or Mode B (edit existing PR) prompt
+- `agents/pr_reviewer/worker.py`: re-dispatches `agent:code` with `pr:/branch:/attempt:1` on REQUEST_CHANGES (capped at attempt < 1)
+- `webhooks/github.py`: `synchronize` on `praetor-coder/` branches fires `github:pr_opened` with `attempt=1` so reviewer re-runs but coder doesn't loop
+- `agents/pr_reviewer/agent.py`: dedup block removed — Hatchet GROUP_ROUND_ROBIN concurrency serializes per-PR events natively
+- `coder-system` v10 in Langfuse — Mode A/B/C prompts live
+- github-mcp and kubernetes-mcp registered in LiteLLM configmap
+
+### OpenHands dispatch (june 2026)
+- `agents/openhands/worker.py` complete — creates conversation, waits for AWAITING_USER_INPUT, sends task, polls until done, writes Mem0
+- `common/dispatch.py` includes `type=openhands` → `agent:openhands` event
+- `praetor-mcp` dispatch tool now accepts `openhands` as valid task_type (dean-mcp PR #26) — enables OWU dispatch
+- Deploy: `praetor-openhands-worker` running in praetor namespace
 
 ### Conversational Dispatch (completed during Phase 3/13)
 - `POST /api/v1/dispatch` and `GET /api/v1/status/{task_id}` live on praetor webhook-adapter
