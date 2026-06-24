@@ -1,0 +1,24 @@
+"""PydanticAI agent: Phase 25 canary agent — validates the agent factory pipeline end-to-end."""
+import os
+from pydantic_ai import Agent
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
+from common.memory_tools import search_memory, add_memory
+from common.langfuse_tools import get_system_prompt
+
+_SYSTEM_PROMPT_FALLBACK = """You are phase25-canary, a Hatchet agent. Phase 25 canary agent — validates the agent factory pipeline end-to-end."""
+
+
+def build_agent() -> Agent:
+    model = OpenAIChatModel(
+        model_name=os.environ.get("LLM_MODEL", "phase25-canary"),
+        provider=OpenAIProvider(
+            base_url=os.environ["LITELLM_BASE_URL"],
+            api_key=os.environ["LITELLM_API_KEY"],
+        ),
+    )
+    return Agent(
+        model=model,
+        system_prompt=get_system_prompt("phase25-canary-system", fallback=_SYSTEM_PROMPT_FALLBACK),
+        tools=[search_memory, add_memory],
+    )
