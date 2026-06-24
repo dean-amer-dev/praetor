@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from .agent import build_agent
 from common.dispatch import dispatch_agent
+from common.memory_tools import add_memory
 from common.metrics import start_metrics_server, task_invocations, task_active, task_duration
 
 _agent = None
@@ -85,6 +86,13 @@ async def _run_reviewer(input: PROpenedInput, context: Context) -> dict:
                     agent_type="code",
                 )
 
+        # planner-global: record review outcome so planning context tracks PR state
+        await add_memory(
+            f"{input.repo} PR #{input.pr_number}: review completed. "
+            f"outcome={'REQUEST_CHANGES' if 'REQUEST_CHANGES' in str(result.output) else 'APPROVED'}. "
+            f"attempt={input.attempt}",
+            "planner-global",
+        )
         return {"result": result.output, "pr_url": input.pr_url}
     except Exception:
         task_invocations.labels(agent=_AGENT_NAME, status="error").inc()

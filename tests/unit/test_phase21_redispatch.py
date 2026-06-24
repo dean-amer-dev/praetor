@@ -124,6 +124,7 @@ class TestReviewerRedispatch:
         with (
             patch("agents.pr_reviewer.worker._get_agent", return_value=mock_agent),
             patch("agents.pr_reviewer.worker.dispatch_agent") as mock_dispatch,
+            patch("agents.pr_reviewer.worker.add_memory", AsyncMock()),
         ):
             await _run_reviewer(input_obj, mock_ctx)
 
