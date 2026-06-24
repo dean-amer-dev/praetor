@@ -9,13 +9,14 @@ import glob
 import os
 
 STATIC: dict[str, dict] = {
-    "coder":     {"component": "coder",     "image": "amerenda/praetor-coder",     "dockerfile": "Dockerfile.coder-worker"},
-    "pipeline":  {"component": "pipeline",  "image": "amerenda/praetor-pipeline",  "dockerfile": "Dockerfile.pipeline-worker"},
-    "research":  {"component": "research",  "image": "amerenda/praetor-research",  "dockerfile": "Dockerfile.research-worker"},
-    "webhook":   {"component": "webhook",   "image": "amerenda/praetor-webhook",   "dockerfile": "Dockerfile.webhook-adapter"},
-    "qa":        {"component": "qa",        "image": "amerenda/praetor-qa",        "dockerfile": "Dockerfile.qa-worker"},
-    "reviewer":  {"component": "reviewer",  "image": "amerenda/praetor-reviewer",  "dockerfile": "Dockerfile.reviewer-worker"},
-    "benchmark": {"component": "benchmark", "image": "amerenda/praetor-benchmark", "dockerfile": "Dockerfile.benchmark-worker"},
+    "coder":            {"component": "coder",            "image": "amerenda/praetor-coder",            "dockerfile": "Dockerfile.coder-worker"},
+    "pipeline":         {"component": "pipeline",         "image": "amerenda/praetor-pipeline",         "dockerfile": "Dockerfile.pipeline-worker"},
+    "feature-pipeline": {"component": "feature-pipeline", "image": "amerenda/praetor-feature-pipeline", "dockerfile": "Dockerfile.feature-pipeline-worker"},
+    "research":         {"component": "research",         "image": "amerenda/praetor-research",         "dockerfile": "Dockerfile.research-worker"},
+    "webhook":          {"component": "webhook",          "image": "amerenda/praetor-webhook",          "dockerfile": "Dockerfile.webhook-adapter"},
+    "qa":               {"component": "qa",               "image": "amerenda/praetor-qa",               "dockerfile": "Dockerfile.qa-worker"},
+    "reviewer":         {"component": "reviewer",         "image": "amerenda/praetor-reviewer",         "dockerfile": "Dockerfile.reviewer-worker"},
+    "benchmark":        {"component": "benchmark",        "image": "amerenda/praetor-benchmark",        "dockerfile": "Dockerfile.benchmark-worker"},
 }
 
 rebuild: list[str] = json.loads(sys.argv[1])

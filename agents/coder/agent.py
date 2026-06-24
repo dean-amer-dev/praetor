@@ -53,8 +53,10 @@ def _scratch(path: str) -> str:
     return str(resolved)
 
 
-_MAX_TOOL_OUTPUT = 64 * 1024       # 64KB returned to message history
-_MAX_SUBPROCESS_CAPTURE = 512 * 1024  # 512KB buffered before truncation (we truncate to 64KB anyway)
+_MAX_TOOL_OUTPUT = 64 * 1024       # 64KB hard cap returned to message history
+_MAX_SUBPROCESS_CAPTURE = 512 * 1024  # 512KB buffered before truncation
+_SHELL_TAIL_LIMIT = 3000           # keep tail of shell output (errors at the end)
+_FILE_HEAD_LIMIT = 8000            # keep head of file reads (structure at the top)
 
 
 def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT) -> str:
@@ -81,7 +83,9 @@ async def read_file(path: str) -> str:
         text = await loop.run_in_executor(None, lambda: Path(full).read_text(errors="replace"))
     except FileNotFoundError:
         return f"ERROR: file not found: {path}. Use run_shell('ls') to list available files."
-    return _truncate(text)
+    if len(text) > _FILE_HEAD_LIMIT:
+        return text[:_FILE_HEAD_LIMIT] + f"\n[... {len(text) - _FILE_HEAD_LIMIT} chars truncated ...]"
+    return text
 
 
 @observe()
@@ -134,7 +138,12 @@ async def run_shell(cmd: str) -> str:
             output = "".join(chunks)
             if overflow:
                 output += f"\n[subprocess output exceeded {_MAX_SUBPROCESS_CAPTURE // 1024 // 1024}MB and was truncated]"
-            return _truncate(output) if output else f"(exit {proc.returncode})"
+            if not output:
+                return f"(exit {proc.returncode})"
+            if len(output) > _SHELL_TAIL_LIMIT:
+                dropped = len(output) - _SHELL_TAIL_LIMIT
+                return f"[... {dropped} chars truncated ...]\n" + output[-_SHELL_TAIL_LIMIT:]
+            return output
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _run)
@@ -219,6 +228,29 @@ async def update_vikunja_task(task_id: int, comment: str, done: bool = True) -> 
     return "task updated"
 
 
+@observe()
+async def save_progress(task_id: int, done: list[str], remaining: list[str], notes: str = "") -> str:
+    """
+    Checkpoint task progress to Mem0. Call every 8-10 actions.
+
+    task_id: the current task ID (from the task prompt header)
+    done: features or files completed so far
+    remaining: features or files still to implement
+    notes: current state, key decisions, anything needed on resume
+
+    If the run is retried or resumed, prior checkpoints appear in search_memory results
+    and should be used to skip already-completed work.
+    """
+    content = (
+        f"CHECKPOINT task-{task_id}\n"
+        f"done: {', '.join(done)}\n"
+        f"remaining: {', '.join(remaining)}\n"
+        f"notes: {notes}"
+    )
+    await add_memory(content, f"task-{task_id}")
+    return f"checkpoint saved — {len(remaining)} items remaining"
+
+
 def build_agent() -> Agent:
     model = OpenAIChatModel(
         model_name=os.environ.get("LLM_MODEL", "coder"),
@@ -238,6 +270,7 @@ def build_agent() -> Agent:
             github_api,
             add_memory,
             search_memory,
+            save_progress,
             update_vikunja_task,
         ],
     )
