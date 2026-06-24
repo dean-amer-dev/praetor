@@ -68,6 +68,38 @@ LiteLLM aggregates these at `/mcp`. All tools get the `lm_` prefix when exposed 
 
 ---
 
+## OpenWebUI — murderbot-v0
+
+The user-facing model is **murderbot-v0** (`qwen3-35b-think-custom`), a custom OWU model. Its config is stored in OWU's SQLite database and survives container restarts. Tools and behavior are baked in — there is no per-request injection of tool calling.
+
+| What | Detail |
+|------|--------|
+| **Base model** | `qwen3-35b-think` → routes to LiteLLM → llama.cpp on murderbot |
+| **Tool calling** | `function_calling: native` — model returns structured `tool_calls` JSON, not XML |
+| **Tools** | `server:mcp:lm` (all 16 LiteLLM MCP tools: `lm_web_search`, `lm_web_read_url`, `lm_github_*`, `lm_infra_*`) + `praetor_dispatch` Python tool (`dispatch_task`, `get_task_status`) |
+| **Date filter** | Global OWU filter (`date_injector`) prepends `Today's date is YYYY-MM-DD (UTC).` to every system prompt — required for date-accurate searches since the model has no clock |
+
+### Restoring after an OWU database wipe
+
+If the OWU container is redeployed from scratch (volume deleted), `server:mcp:lm` survives (it's registered in the OWU admin UI and persists with the data volume). Everything else is restored by running:
+
+```bash
+OWUI_ADMIN_PASSWORD=$(bws secret get openwebui-dean-admin-password) \
+  python scripts/register_owui_tool.py
+```
+
+The script is idempotent: registers `praetor_dispatch` Python tool, `date_injector` filter (sets active + global), and the `qwen3-35b-think-custom` model config.
+
+### Smoke tests
+
+```bash
+SMOKE_TESTS=1 pytest tests/smoke/test_owui_tool_pipeline.py -v
+```
+
+Covers: model config correctness, date filter active+global, LiteLLM MCP reachable, date actually injected (live model call), praetor dispatch end-to-end, SearXNG reachable.
+
+---
+
 ## How It Fits Together
 
 All agent dispatch goes through OpenWebUI. The model calls `lm_praetor_dispatch` which hits
