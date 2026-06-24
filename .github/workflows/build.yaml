@@ -61,7 +61,7 @@ jobs:
           fetch-depth: 2
       - id: detect
         run: |
-          STATIC_COMPONENTS=(coder research pipeline webhook qa reviewer benchmark)
+          STATIC_COMPONENTS=(coder research pipeline feature-pipeline webhook qa reviewer benchmark)
 
           # Discover factory-created agents (agents/*/Dockerfile, depth=1 only)
           FACTORY_AGENTS=()
@@ -92,7 +92,8 @@ jobs:
             else
               echo "$CHANGED" | grep -qE '^(agents/coder/|Dockerfile\.coder-worker)' && REBUILD+=(coder)
               echo "$CHANGED" | grep -qE '^(agents/research/|Dockerfile\.research-worker)' && REBUILD+=(research)
-              echo "$CHANGED" | grep -qE '^(pipelines/|Dockerfile\.pipeline-worker)' && REBUILD+=(pipeline)
+              echo "$CHANGED" | grep -qE '^(pipelines/research_then_code\.py|pipelines/worker\.py|Dockerfile\.pipeline-worker)' && REBUILD+=(pipeline)
+              echo "$CHANGED" | grep -qE '^(pipelines/feature_pipeline\.py|Dockerfile\.feature-pipeline-worker)' && REBUILD+=(feature-pipeline)
               echo "$CHANGED" | grep -qE '^(webhooks/|Dockerfile\.webhook-adapter)' && REBUILD+=(webhook)
               echo "$CHANGED" | grep -qE '^(agents/qa/|Dockerfile\.qa-worker)' && REBUILD+=(qa)
               echo "$CHANGED" | grep -qE '^(agents/pr_reviewer/|Dockerfile\.reviewer-worker)' && REBUILD+=(reviewer)
@@ -157,11 +158,12 @@ jobs:
           TAG: ${{ needs.set-tag.outputs.tag }}
           REBUILD: ${{ needs.detect-changes.outputs.rebuild }}
         run: |
-          STATIC_COMPONENTS=(coder research pipeline webhook qa reviewer benchmark)
+          STATIC_COMPONENTS=(coder research pipeline feature-pipeline webhook qa reviewer benchmark)
 
           for entry in \
             "coder:Dockerfile.coder-worker:amerenda/praetor-coder" \
             "pipeline:Dockerfile.pipeline-worker:amerenda/praetor-pipeline" \
+            "feature-pipeline:Dockerfile.feature-pipeline-worker:amerenda/praetor-feature-pipeline" \
             "research:Dockerfile.research-worker:amerenda/praetor-research" \
             "webhook:Dockerfile.webhook-adapter:amerenda/praetor-webhook" \
             "qa:Dockerfile.qa-worker:amerenda/praetor-qa" \
@@ -217,9 +219,9 @@ jobs:
           TAG: ${{ needs.set-tag.outputs.tag }}
           REBUILD: ${{ needs.detect-changes.outputs.rebuild }}
         run: |
-          STATIC_COMPONENTS=(coder pipeline research webhook qa reviewer benchmark)
+          STATIC_COMPONENTS=(coder pipeline feature-pipeline research webhook qa reviewer benchmark)
 
-          for IMAGE in praetor-coder praetor-pipeline praetor-research praetor-webhook praetor-qa praetor-reviewer praetor-benchmark; do
+          for IMAGE in praetor-coder praetor-pipeline praetor-feature-pipeline praetor-research praetor-webhook praetor-qa praetor-reviewer praetor-benchmark; do
             COMPONENT=$(echo "$IMAGE" | sed 's/praetor-//')
 
             if ! python3 -c "import sys,json; c=json.loads(sys.argv[1]); sys.exit(0 if sys.argv[2] in c else 1)" "$REBUILD" "$COMPONENT"; then
@@ -308,12 +310,13 @@ jobs:
           BRANCH="deploy/praetor-${TAG}"
           git checkout -b "${BRANCH}"
 
-          STATIC_COMPONENTS=(coder research pipeline webhook qa reviewer benchmark)
+          STATIC_COMPONENTS=(coder research pipeline feature-pipeline webhook qa reviewer benchmark)
 
           # Update image tags only for rebuilt components
           for entry in \
             "coder|amerenda/praetor-coder|apps/praetor/coder-worker/deployment.yaml" \
             "pipeline|amerenda/praetor-pipeline|apps/praetor/pipeline-worker/deployment.yaml" \
+            "feature-pipeline|amerenda/praetor-feature-pipeline|apps/praetor/feature-pipeline-worker/deployment.yaml" \
             "research|amerenda/praetor-research|apps/praetor/research-worker/deployment.yaml" \
             "webhook|amerenda/praetor-webhook|apps/praetor/webhook-adapter/deployment.yaml" \
             "qa|amerenda/praetor-qa|apps/praetor/qa-worker/deployment.yaml" \

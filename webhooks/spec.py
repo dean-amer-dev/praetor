@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from common.dispatch import dispatch_agent
+from common.dispatch import EVENT_MAP, dispatch_agent
 from common.memory_tools import search_memory
 
 logger = logging.getLogger(__name__)
@@ -78,14 +78,13 @@ async def execute_spec(req: SpecExecuteRequest) -> SpecExecuteResponse:
     task_id = int(time.time())
 
     if task_type == "new_app" and "app_factory" in agents:
-        return await _route_new_app(spec, title, task_id)
+        return await _route_new_app(spec, title, task_id, req.spec_toml)
     else:
         return await _route_dispatch(spec, task_type, title, task_id, req.spec_toml)
 
 
-async def _route_new_app(spec: dict, title: str, task_id: int) -> SpecExecuteResponse:
+async def _route_new_app(spec: dict, title: str, task_id: int, raw_toml: str) -> SpecExecuteResponse:
     """Route new_app specs to the app_factory handler."""
-    import httpx
     from .app_factory import AppPlan
 
     repos = spec.get("repos", {})
@@ -129,12 +128,14 @@ async def _route_new_app(spec: dict, title: str, task_id: int) -> SpecExecuteRes
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"repo creation failed: {exc}")
 
-    asyncio.ensure_future(_provision_and_dispatch(plan, task_id))
-    logger.info("spec new_app routed to app_factory: name=%s task_id=%s", name, task_id)
+    # Pass raw_toml so _provision_and_dispatch can use feature_pipeline for multi-feature specs
+    asyncio.ensure_future(_provision_and_dispatch(plan, task_id, raw_toml if len(features) > 1 else None))
+    logger.info("spec new_app routed to app_factory: name=%s task_id=%s features=%d", name, task_id, len(features))
 
+    event = "pipeline:feature_decompose" if len(features) > 1 else "agent:code"
     return SpecExecuteResponse(
         task_id=task_id,
-        event="agent:code",
+        event=event,
         hatchet_url="https://hatchet.amer.dev",
         routing="app_factory",
     )
@@ -143,12 +144,20 @@ async def _route_new_app(spec: dict, title: str, task_id: int) -> SpecExecuteRes
 async def _route_dispatch(
     spec: dict, task_type: str, title: str, task_id: int, raw_toml: str
 ) -> SpecExecuteResponse:
-    """Route modify_app and fix_pr specs to direct coder dispatch."""
+    """Route modify_app and fix_pr specs. Multi-feature modify_app uses feature_pipeline."""
     description = f"```toml\n{raw_toml}\n```"
 
-    events = dispatch_agent(task_id, title, description, "code")
-    event = events[0] if events else "agent:code"
-    logger.info("spec %s dispatched as %s task_id=%s", task_type, event, task_id)
+    app = spec.get("app", {})
+    features = app.get("features") or app.get("changes") or []
+
+    if task_type == "modify_app" and len(features) > 1:
+        agent_type = "feature_pipeline"
+    else:
+        agent_type = "code"
+
+    events = dispatch_agent(task_id, title, description, agent_type)
+    event = events[0] if events else EVENT_MAP.get(agent_type, "agent:code")
+    logger.info("spec %s dispatched as %s task_id=%s features=%d", task_type, event, task_id, len(features))
 
     return SpecExecuteResponse(
         task_id=task_id,

@@ -148,8 +148,12 @@ def _build_coder_description(plan: AppPlan) -> str:
 # Background task: provision + dispatch
 # ---------------------------------------------------------------------------
 
-async def _provision_and_dispatch(plan: AppPlan, task_id: int) -> None:
-    """Call infra-mcp to provision k3s manifests and CI runner, then dispatch coder."""
+async def _provision_and_dispatch(plan: AppPlan, task_id: int, spec_toml: str | None = None) -> None:
+    """Call infra-mcp to provision k3s manifests and CI runner, then dispatch coder.
+
+    If spec_toml is provided (multi-feature new_app), dispatches feature_pipeline instead
+    of a single coder run so each feature gets a clean context window.
+    """
     async with httpx.AsyncClient(timeout=360) as client:
         try:
             resp = await client.post(
@@ -175,12 +179,18 @@ async def _provision_and_dispatch(plan: AppPlan, task_id: int) -> None:
         except Exception as exc:
             logger.error("infra-mcp /app/create error for %s: %s", plan.name, exc)
 
-    description = _build_coder_description(plan)
+    title = f"Initial implementation of {plan.name}"
     try:
-        dispatch_agent(task_id, f"Initial implementation of {plan.name}", description, "code")
-        logger.info("coder dispatched for task_id=%s app=%s", task_id, plan.name)
+        if spec_toml:
+            description = f"```toml\n{spec_toml}\n```"
+            dispatch_agent(task_id, title, description, "feature_pipeline")
+            logger.info("feature_pipeline dispatched for task_id=%s app=%s", task_id, plan.name)
+        else:
+            description = _build_coder_description(plan)
+            dispatch_agent(task_id, title, description, "code")
+            logger.info("coder dispatched for task_id=%s app=%s", task_id, plan.name)
     except Exception as exc:
-        logger.error("coder dispatch failed for task %s app=%s: %s", task_id, plan.name, exc)
+        logger.error("dispatch failed for task %s app=%s: %s", task_id, plan.name, exc)
 
 
 # ---------------------------------------------------------------------------
