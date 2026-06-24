@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from webhooks.agent_factory import (
     _agent_py,
+    _argocd_app_yaml,
     _deployment_yaml,
     _dockerfile,
     _externalsecret_yaml,
@@ -48,6 +49,8 @@ def _all_mocks_happy():
         patch("webhooks.agent_factory._get_main_sha", new=AsyncMock(return_value="abc1234567")),
         patch("webhooks.agent_factory._create_branch", new=AsyncMock()),
         patch("webhooks.agent_factory._create_file", new=AsyncMock()),
+        patch("webhooks.agent_factory._get_file", new=AsyncMock(return_value=("existing root-app content", "file-sha-abc"))),
+        patch("webhooks.agent_factory._update_file", new=AsyncMock()),
         patch("webhooks.agent_factory._create_pr", new=AsyncMock(return_value="https://github.com/amerenda/praetor/pull/42")),
         patch("webhooks.agent_factory._merge_pr", new=AsyncMock(return_value="deadbeef1234567")),
         patch("webhooks.agent_factory._wait_for_pr_ci", new=AsyncMock(return_value=True)),
@@ -162,6 +165,8 @@ class TestCreateAgent:
             patch("webhooks.agent_factory._get_main_sha", new=AsyncMock(return_value="abc1234567")),
             patch("webhooks.agent_factory._create_branch", new=AsyncMock()),
             patch("webhooks.agent_factory._create_file", new=AsyncMock()),
+            patch("webhooks.agent_factory._get_file", new=AsyncMock(return_value=("root content", "sha-abc"))),
+            patch("webhooks.agent_factory._update_file", new=AsyncMock()),
             patch("webhooks.agent_factory._create_pr", new=AsyncMock(return_value="https://github.com/amerenda/praetor/pull/42")),
             patch("webhooks.agent_factory._merge_pr", new=AsyncMock(return_value="deadbeef1234567")),
             patch("webhooks.agent_factory._wait_for_pr_ci", new=AsyncMock(return_value=True)),
@@ -203,7 +208,7 @@ class TestCreateAgent:
     def test_create_agent_pod_not_ready(self, client):
         patches = _all_mocks_happy()
         # Override pod status
-        patches[10] = patch("webhooks.agent_factory._wait_for_pod", new=AsyncMock(return_value="not_ready"))
+        patches[12] = patch("webhooks.agent_factory._wait_for_pod", new=AsyncMock(return_value="not_ready"))
         ctx_managers = [p.__enter__() for p in patches]
         try:
             resp = client.post("/api/v1/agent/create", json=_req(), headers=_auth())
@@ -219,7 +224,7 @@ class TestCreateAgent:
     def test_create_agent_langfuse_fail_nonfatal(self, client):
         patches = _all_mocks_happy()
         # Override create_prompt to fail
-        patches[12] = patch("webhooks.agent_factory.create_prompt", return_value=False)
+        patches[14] = patch("webhooks.agent_factory.create_prompt", return_value=False)
         ctx_managers = [p.__enter__() for p in patches]
         try:
             resp = client.post("/api/v1/agent/create", json=_req(), headers=_auth())
@@ -235,7 +240,7 @@ class TestCreateAgent:
     def test_create_agent_smoke_fail_nonfatal(self, client):
         patches = _all_mocks_happy()
         # Override smoke test to fail
-        patches[11] = patch("webhooks.agent_factory._smoke_test", new=AsyncMock(return_value="failed"))
+        patches[13] = patch("webhooks.agent_factory._smoke_test", new=AsyncMock(return_value="failed"))
         ctx_managers = [p.__enter__() for p in patches]
         try:
             resp = client.post("/api/v1/agent/create", json=_req(), headers=_auth())
@@ -390,6 +395,30 @@ class TestExternalSecretYaml:
     def test_externalsecret_namespace(self):
         out = _externalsecret_yaml("foo")
         assert "namespace: praetor" in out
+
+
+class TestArgoCDAppYaml:
+    def test_argocd_app_name(self):
+        out = _argocd_app_yaml("my-agent")
+        assert "name: app-praetor-my-agent-worker" in out
+
+    def test_argocd_app_path(self):
+        out = _argocd_app_yaml("my-agent")
+        assert "path: apps/praetor/my-agent-worker" in out
+
+    def test_argocd_app_namespace(self):
+        out = _argocd_app_yaml("my-agent")
+        assert "namespace: praetor" in out
+
+    def test_argocd_app_project(self):
+        out = _argocd_app_yaml("my-agent")
+        assert "project: application" in out
+
+    def test_argocd_app_automated_sync(self):
+        out = _argocd_app_yaml("my-agent")
+        assert "automated:" in out
+        assert "prune: true" in out
+        assert "selfHeal: true" in out
 
 
 class TestScaffoldPrFiles:
