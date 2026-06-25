@@ -255,7 +255,7 @@ def _deployment_yaml(name: str, image_tag: str) -> str:
         f"  name: praetor-{name}-worker\n"
         f"  namespace: praetor\n"
         f"spec:\n"
-        f"  replicas: 1\n"
+        f"  replicas: 0\n"
         f"  selector:\n"
         f"    matchLabels:\n"
         f"      app: praetor-{name}-worker\n"
@@ -354,6 +354,57 @@ def _argocd_app_yaml(name: str) -> str:
         f"        duration: 5s\n"
         f"        factor: 2\n"
         f"        maxDuration: 3m\n"
+    )
+
+
+
+def _scaled_object_yaml(name: str, task_name: str) -> str:
+    hatchet_api_base_url = os.environ.get("HATCHET_API_BASE_URL", "")
+    url = f"{hatchet_api_base_url}/task-stats?taskNames={task_name}"
+    value_location = f"{task_name}.queued.total"
+    return (
+        f"apiVersion: keda.sh/v1alpha1
+"
+        f"kind: ScaledObject
+"
+        f"metadata:
+"
+        f"  name: praetor-{name}-worker-scaledobject
+"
+        f"  namespace: praetor
+"
+        f"spec:
+"
+        f"  scaleTargetRef:
+"
+        f"    name: praetor-{name}-worker
+"
+        f"  minReplicaCount: 0
+"
+        f"  maxReplicaCount: 3
+"
+        f"  cooldownPeriod: 120
+"
+        f"  pollingInterval: 15
+"
+        f"  triggers:
+"
+        f"    - type: metrics-api
+"
+        f"      authenticationRef:
+"
+        f"        name: hatchet-api-auth
+"
+        f"        kind: ClusterTriggerAuthentication
+"
+        f'      metadata:
+'
+        f"        url: "{url}"
+"
+        f"        valueLocation: "{value_location}"
+"
+        f"        authMode: "bearer"
+"
     )
 
 
@@ -835,6 +886,13 @@ async def create_agent(req: AgentCreateRequest) -> AgentCreateResponse:
             f"apps/praetor/{req.name}-worker/deployment.yaml",
             _deployment_yaml(req.name, image_tag),
             f"feat(agent-factory): add {req.name} deployment",
+            manifest_branch,
+        )
+        await _create_file(
+            gh, token, GITOPS_REPO,
+            f"apps/praetor/{req.name}-worker/scaledobject.yaml",
+            _scaled_object_yaml(req.name, req.name),
+            f"feat(agent-factory): add {req.name} ScaledObject (KEDA)",
             manifest_branch,
         )
         await _create_file(

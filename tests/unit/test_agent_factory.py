@@ -12,6 +12,7 @@ from webhooks.agent_factory import (
     _deployment_yaml,
     _dockerfile,
     _externalsecret_yaml,
+    _scaled_object_yaml,
     _worker_py,
 )
 
@@ -444,3 +445,51 @@ class TestScaffoldPrFiles:
         assert "agents/foo-agent/agent.py" in paths
         assert "agents/foo-agent/worker.py" in paths
         assert "agents/foo-agent/Dockerfile" in paths
+
+
+class TestScaledObjectYaml:
+    def test_scaled_object_yaml_contains_task_name(self):
+        out = _scaled_object_yaml("my-agent", "my-agent")
+        assert "my-agent.queued.total" in out
+        assert "task-stats?taskNames=my-agent" in out
+
+    def test_scaled_object_yaml_kind(self):
+        out = _scaled_object_yaml("test-agent", "test-agent")
+        assert "kind: ScaledObject" in out
+        assert "apiVersion: keda.sh/v1alpha1" in out
+
+    def test_scaled_object_scale_target_ref(self):
+        out = _scaled_object_yaml("my-agent", "my-agent")
+        assert "name: praetor-my-agent-worker" in out
+
+    def test_scaled_object_replica_counts(self):
+        out = _scaled_object_yaml("test-agent", "test-agent")
+        assert "minReplicaCount: 0" in out
+        assert "maxReplicaCount: 3" in out
+
+    def test_scaled_object_cooldown_and_polling(self):
+        out = _scaled_object_yaml("test-agent", "test-agent")
+        assert "cooldownPeriod: 120" in out
+        assert "pollingInterval: 15" in out
+
+    def test_scaled_object_trigger_type(self):
+        out = _scaled_object_yaml("test-agent", "test-agent")
+        assert "type: metrics-api" in out
+
+    def test_scaled_object_auth_ref(self):
+        out = _scaled_object_yaml("test-agent", "test-agent")
+        assert "name: hatchet-api-auth" in out
+        assert "kind: ClusterTriggerAuthentication" in out
+
+    def test_scaled_object_value_location(self):
+        out = _scaled_object_yaml("my-agent", "my-agent")
+        assert 'valueLocation: "my-agent.queued.total"' in out
+
+    def test_scaled_object_auth_mode(self):
+        out = _scaled_object_yaml("test-agent", "test-agent")
+        assert "authMode: "bearer"" in out
+
+    def test_scaled_object_namespace(self):
+        out = _scaled_object_yaml("test-agent", "test-agent")
+        assert "namespace: praetor" in out
+
