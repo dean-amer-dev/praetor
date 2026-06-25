@@ -18,6 +18,29 @@ router = APIRouter()
 _bearer = HTTPBearer(auto_error=False)
 
 
+async def _is_coder_busy() -> bool:
+    """Return True if a coder task is currently queued or running in Hatchet."""
+    base = os.environ.get("HATCHET_API_BASE_URL", "").rstrip("/")
+    token = os.environ.get("HATCHET_CLIENT_TOKEN", "")
+    if not base or not token:
+        return False  # can't check — allow dispatch
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                f"{base}/task-stats",
+                params={"taskNames": "coder"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            resp.raise_for_status()
+            stats = resp.json().get("coder", {})
+            queued = stats.get("queued", {}).get("total", 0)
+            running = stats.get("running", {}).get("total", 0)
+            return (queued + running) > 0
+    except Exception as exc:
+        logger.warning("coder busy check failed: %s", exc)
+        return False  # fail open — don't block dispatches on API errors
+
+
 def _check_auth(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
     expected = os.environ.get("PRAETOR_API_KEY", "")
     if not expected:
@@ -52,6 +75,12 @@ class StatusResponse(BaseModel):
 
 @router.post("/api/v1/dispatch", response_model=DispatchResponse, dependencies=[Depends(_check_auth)])
 async def dispatch(req: DispatchRequest) -> DispatchResponse:
+    if req.type == "code" and await _is_coder_busy():
+        raise HTTPException(
+            status_code=423,
+            detail="coder is busy — a task is already queued or running. Retry when idle.",
+        )
+
     task_id = int(time.time())
     vikunja_task_id: int | None = None
     vikunja_task_url: str | None = None
