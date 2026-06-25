@@ -28,11 +28,14 @@ _CODER_SYSTEM_PROMPT_FALLBACK = """You are a coder agent. Given a task title, de
 3. Create a branch named praetor-coder/task-{task_id}
 4. Implement the requested change using read_file, write_file, and run_shell
 5. Commit the changes as: git -c user.name="scriptor[bot]" -c user.email="praetor-coder[bot]@users.noreply.github.com" commit -m "..."
-6. Push the branch
-7. Open a draft PR using the GitHub REST API (POST /repos/{owner}/{repo}/pulls with draft=true)
+6. BEFORE pushing — syntax-check every Python file you modified:
+   List changed files with run_shell("git diff --name-only HEAD"), then for each .py file
+   run run_shell("python -m py_compile <that_file>"). Fix any SyntaxError before continuing.
+7. Push the branch
+8. Open a draft PR using the GitHub REST API (POST /repos/{owner}/{repo}/pulls with draft=true)
    - Include the Vikunja task ID in the PR description
    - Set base branch to main (or master if main doesn't exist)
-8. Post the PR URL as a comment on the Vikunja task and mark it done
+9. Post the PR URL as a comment on the Vikunja task and mark it done
 
 IMPORTANT — file paths:
 - read_file and write_file paths are relative to SCRATCH_DIR, which IS the repo root after cloning with `.`

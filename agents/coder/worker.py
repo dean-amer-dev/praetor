@@ -123,13 +123,15 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
         repo = repo_match.group(1)
         memory_agent_id = f"coder-{repo}"
 
-        pr_match     = re.search(r"pr:\s*(\d+)",       input.task_description)
-        branch_match = re.search(r"branch:\s*(\S+)",   input.task_description)
-        attempt_match = re.search(r"attempt:\s*(\d+)", input.task_description)
+        pr_match       = re.search(r"pr:\s*(\d+)",       input.task_description)
+        branch_match   = re.search(r"branch:\s*(\S+)",   input.task_description)
+        attempt_match  = re.search(r"attempt:\s*(\d+)",  input.task_description)
+        feedback_match = re.search(r"feedback:\s*(.+)",  input.task_description, re.DOTALL)
 
         pr_number = pr_match.group(1)            if pr_match      else None
         branch    = branch_match.group(1)        if branch_match  else None
         attempt   = int(attempt_match.group(1))  if attempt_match else 0
+        feedback  = feedback_match.group(1).strip() if feedback_match else ""
         request_limit = 50
 
         prior = await search_memory(f"{input.task_title} {input.task_description}", memory_agent_id)
@@ -142,6 +144,8 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
                 f"DO NOT create a new branch. Check out '{branch}' and push your fixes to it.\n"
                 f"DO NOT open a new PR. The PR already exists at #{pr_number}.\n"
             )
+            if feedback:
+                mode_block += f"Review feedback to address:\n{feedback}\n"
         else:
             mode_block = (
                 f"Create branch praetor-coder/task-{input.task_id}, implement, commit, push, "
