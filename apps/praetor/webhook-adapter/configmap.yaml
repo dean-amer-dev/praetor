@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webhook-adapter-config
+  namespace: praetor
+data:
+  HATCHET_API_BASE_URL: "https://hatchet.amer.dev/api/v1/tenants/707d0855-80ab-4e1f-a156-f1c4546cbf52"
