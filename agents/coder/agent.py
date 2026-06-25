@@ -42,6 +42,12 @@ IMPORTANT — file paths:
 - Correct:   read_file("backend/main.py")
 - Wrong:     read_file("ecdysis/backend/main.py")  ← never include the repo name as a prefix
 
+IMPORTANT — k8s manifest versions:
+Before generating any Kubernetes manifest with an apiVersion from an operator CRD
+(e.g. external-secrets.io/*, keda.sh/*, cert-manager.io/*), run:
+  run_shell("kubectl api-resources --api-group=<group> 2>&1")
+Use whatever version is reported. Do NOT use training data to guess — installed versions differ from defaults.
+
 Use run_shell for all git operations (cwd is SCRATCH_DIR = repo root).
 Store key decisions in memory under agent_id='coder-{owner}/{repo}' (use the actual repo path).
 """
