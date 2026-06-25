@@ -363,51 +363,28 @@ def _scaled_object_yaml(name: str, task_name: str) -> str:
     url = f"{hatchet_api_base_url}/task-stats?taskNames={task_name}"
     value_location = f"{task_name}.queued.total"
     return (
-        f"apiVersion: keda.sh/v1alpha1
-"
-        f"kind: ScaledObject
-"
-        f"metadata:
-"
-        f"  name: praetor-{name}-worker-scaledobject
-"
-        f"  namespace: praetor
-"
-        f"spec:
-"
-        f"  scaleTargetRef:
-"
-        f"    name: praetor-{name}-worker
-"
-        f"  minReplicaCount: 0
-"
-        f"  maxReplicaCount: 3
-"
-        f"  cooldownPeriod: 120
-"
-        f"  pollingInterval: 15
-"
-        f"  triggers:
-"
-        f"    - type: metrics-api
-"
-        f"      authenticationRef:
-"
-        f"        name: hatchet-api-auth
-"
-        f"        kind: ClusterTriggerAuthentication
-"
-        f'      metadata:
-'
-        f"        url: "{url}"
-"
-        f"        valueLocation: "{value_location}"
-"
-        f"        authMode: "bearer"
-"
+        f"apiVersion: keda.sh/v1alpha1\n"
+        f"kind: ScaledObject\n"
+        f"metadata:\n"
+        f"  name: praetor-{name}-worker-scaledobject\n"
+        f"  namespace: praetor\n"
+        f"spec:\n"
+        f"  scaleTargetRef:\n"
+        f"    name: praetor-{name}-worker\n"
+        f"  minReplicaCount: 0\n"
+        f"  maxReplicaCount: 3\n"
+        f"  cooldownPeriod: 120\n"
+        f"  pollingInterval: 15\n"
+        f"  triggers:\n"
+        f"    - type: metrics-api\n"
+        f"      authenticationRef:\n"
+        f"        name: hatchet-api-auth\n"
+        f"        kind: ClusterTriggerAuthentication\n"
+        f"      metadata:\n"
+        f'        url: "{url}"\n'
+        f'        valueLocation: "{value_location}"\n'
+        f'        authMode: "bearer"\n'
     )
-
-
 def _externalsecret_yaml(name: str, include_coder_creds: bool = False) -> str:
     secret_name = f"praetor-{name}-secrets"
     keys = list(_BASE_SECRET_KEYS)
