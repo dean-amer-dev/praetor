@@ -1,4 +1,5 @@
 """Hatchet worker: handles agent:echo events."""
+import logging
 import time
 from datetime import timedelta
 
@@ -10,6 +11,8 @@ from .agent import build_agent
 from common.langfuse_tools import langfuse_context, observe
 from common.memory_tools import add_memory, search_memory
 from common.metrics import start_metrics_server, task_invocations, task_active, task_duration
+
+logger = logging.getLogger(__name__)
 
 _agent = None
 _AGENT_NAME = "echo-agent"
@@ -46,8 +49,10 @@ async def _run_echo_agent(input: EchoAgentInput, context: Context) -> dict:
         langfuse_context.update_current_trace(output=result.output)
         await add_memory(f"{input.task_title}: {result.output}", "echo-agent")
         return {"result": result.output}
-    except Exception:
+    except Exception as exc:
         task_invocations.labels(agent=_AGENT_NAME, status="error").inc()
+        langfuse_context.update_current_trace(error=exc)
+        logger.error("echo-agent failed", exc_info=True)
         raise
     finally:
         task_active.labels(agent=_AGENT_NAME).dec()
