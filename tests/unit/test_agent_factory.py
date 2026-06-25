@@ -487,7 +487,7 @@ class TestScaledObjectYaml:
 
     def test_scaled_object_auth_mode(self):
         out = _scaled_object_yaml("test-agent", "test-agent")
-        assert "authMode: "bearer"" in out
+        assert 'authMode: "bearer"' in out
 
     def test_scaled_object_namespace(self):
         out = _scaled_object_yaml("test-agent", "test-agent")
