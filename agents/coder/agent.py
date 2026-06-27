@@ -58,7 +58,7 @@ def _scratch(path: str) -> str:
     """Resolve path relative to SCRATCH_DIR, blocking traversal."""
     if Path(path).is_absolute():
         raise ValueError(
-            f"absolute path not allowed: '{path}'. "
+            f"path traversal blocked: absolute path '{path}'. "
             "Use a relative path (e.g. 'patch.py' or 'scripts/fix.py'), not '/tmp/...'."
         )
     resolved = (Path(SCRATCH_DIR) / path).resolve()
