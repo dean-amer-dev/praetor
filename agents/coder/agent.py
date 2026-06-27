@@ -1,6 +1,7 @@
 """PydanticAI coder agent: clones repos, implements tasks, opens draft PRs."""
 import asyncio
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -55,6 +56,11 @@ Store key decisions in memory under agent_id='coder-{owner}/{repo}' (use the act
 
 def _scratch(path: str) -> str:
     """Resolve path relative to SCRATCH_DIR, blocking traversal."""
+    if Path(path).is_absolute():
+        raise ValueError(
+            f"absolute path not allowed: '{path}'. "
+            "Use a relative path (e.g. 'patch.py' or 'scripts/fix.py'), not '/tmp/...'."
+        )
     resolved = (Path(SCRATCH_DIR) / path).resolve()
     base = Path(SCRATCH_DIR).resolve()
     if not str(resolved).startswith(str(base)):
@@ -109,9 +115,9 @@ def write_file(path: str, content: str) -> str:
 @observe()
 async def run_shell(cmd: str) -> str:
     """Run a shell command with cwd=SCRATCH_DIR. Returns stdout+stderr."""
-    if ".." in cmd and ("/" in cmd or "\\" in cmd):
-        # Block path-traversal patterns like ../../etc
-        raise ValueError("path traversal blocked in shell command")
+    if re.search(r'\.\.[/\\]', cmd):
+        # Block path-traversal patterns like ../../etc (but allow git range notation: HEAD..main)
+        raise ValueError("path traversal blocked in shell command: avoid '../' sequences")
     Path(SCRATCH_DIR).mkdir(parents=True, exist_ok=True)
 
     def _run() -> str:
