@@ -270,7 +270,7 @@ def _fetch_langfuse_prompt(client: httpx.Client) -> str:
         lf = Langfuse(
             host="https://langfuse.amer.dev",
             public_key="pk-lf-81e47ee35f7e4b18afcee1a9d3f17204",
-            secret_key="sk-lf-482a7960b7734e2cbf9b2b70",
+            secret_key="sk-lf-482a7960b77347cf92764e2cbf9b2b70",
         )
         prompt = lf.get_prompt("planner-system", label="production")
         return prompt.prompt if hasattr(prompt, "prompt") else str(prompt)
