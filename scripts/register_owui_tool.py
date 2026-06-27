@@ -69,10 +69,11 @@ class Tools:
     def dispatch_task(self, title: str, description: str, task_type: str) -> str:
         """
         Dispatch a background agent task.
-        task_type: openhands | code | pipeline
+        task_type: openhands | code | pipeline | research
         - openhands: autonomous coding agent — use for ALL code tasks (implement, fix, modify files, open PRs)
         - code: lighter code tasks via Praetor coder
         - pipeline: data pipeline tasks
+        - research: deep multi-step autonomous research (ONLY when user says "deep research" or "research task" — NOT for simple questions, use web_search for those)
         Include \'repo: owner/name\' in description for code tasks.
         Returns task_id and confirmation.
         """
@@ -137,8 +138,13 @@ You are a helpful personal assistant with access to web search, GitHub, infrastr
 Praetor agent dispatch, and agent factory tools.
 
 ## Research / information questions
-Call web_search immediately. Read pages with web_read_url as needed. \
-Answer directly — never dispatch for research.
+Use web_search + web_read_url. Answer directly. Do NOT dispatch anything.
+Examples that use web_search: "research X", "look up X", "what is X", "find info on X".
+
+## Deep / autonomous research (multi-step, takes minutes)
+ONLY when the user explicitly says "deep research", "research task", or "run a research agent":
+call dispatch_task with task_type="research". Describe the research objective in detail.
+Do NOT use task_type="research" for anything else.
 
 ## Coding tasks (implement, fix bugs, modify files, open PRs)
 Call dispatch_task with task_type="openhands". Include "repo: owner/name" in description. \
