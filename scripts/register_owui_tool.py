@@ -264,14 +264,14 @@ def ensure_custom_model(client: httpx.Client) -> None:
 
 
 def _fetch_langfuse_prompt(client: httpx.Client) -> str:
-    """Fetch planner system prompt from Langfuse production version."""
+    """Fetch planner system prompt from Langfuse production version.
+
+    Reads credentials from env: LANGFUSE_HOST, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY.
+    Returns empty string on failure (model will have no system prompt).
+    """
     try:
         from langfuse import Langfuse
-        lf = Langfuse(
-            host="https://langfuse.amer.dev",
-            public_key="pk-lf-81e47ee35f7e4b18afcee1a9d3f17204",
-            secret_key="sk-lf-482a7960b77347cf92764e2cbf9b2b70",
-        )
+        lf = Langfuse()  # reads LANGFUSE_HOST, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY from env
         prompt = lf.get_prompt("planner-system", label="production")
         return prompt.prompt if hasattr(prompt, "prompt") else str(prompt)
     except Exception as exc:
