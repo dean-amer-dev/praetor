@@ -442,6 +442,13 @@ class TestDeleteEndpoint:
         with (
             patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value=registry)),
             patch("webhooks.mcp_factory._save_registry", new=save_mock),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._list_gitops_dir", new=AsyncMock(return_value=[])),
+            patch("webhooks.mcp_factory._delete_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("", "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
         ):
             resp = client.delete("/api/v1/mcp/old-mcp", headers=_auth())
         assert resp.status_code == 200

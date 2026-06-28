@@ -297,32 +297,28 @@ async def _get_or_create_pr(gh: str, token: str, title: str, body: str, head: st
 # ---------------------------------------------------------------------------
 
 def _upsert_litellm_config(cm_content: str, reg: McpRegistration) -> tuple[str, bool]:
-    """Insert or update a {name} entry in the mcp_servers block of the LiteLLM configmap.
+    """Insert or replace the MCP entry in the mcp_servers block. Returns (content, changed).
 
-    Placement is idempotent and correct — between existing entries and litellm_settings.
+    - If the entry already exists: replace its url/transport lines in-place (idempotent).
+    - If not: insert it immediately before the litellm_settings block.
+    - Fallback (no litellm_settings marker): append to end.
     """
-    marker = "\n    litellm_settings:"
     new_entry = _litellm_mcp_entry(reg)
+    entry_key = f"      {reg.name}:"  # 6-space indent matches mcp_servers children
 
-    # Check if entry already exists
-    for line in cm_content.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith(f"{reg.name}:") and "url:" not in stripped:
-            return cm_content, False  # Entry already present
-
-    # Find the mcp_servers block and insert after existing entries
     lines = cm_content.split("\n")
     for i, line in enumerate(lines):
-        if "mcp_servers:" in line and not line.strip().startswith("#"):
-            # Found mcp_servers — find last entry (consecutive 8-space-indented lines)
+        if line == entry_key:
+            # Consume this line + all following 8-space-indented lines (url, transport, etc.)
             end = i + 1
             while end < len(lines) and lines[end].startswith("        "):
                 end += 1
-            new_lines = lines[:end] + [new_entry.rstrip("\n")] + lines[end:]
+            new_lines = lines[:i] + new_entry.rstrip("\n").split("\n") + lines[end:]
             new_content = "\n".join(new_lines)
             return new_content, new_content != cm_content
 
     # Entry absent — insert before litellm_settings
+    marker = "\n    litellm_settings:"
     if marker in cm_content:
         updated = cm_content.replace(marker, "\n" + new_entry + "    litellm_settings:", 1)
         return updated, True
@@ -701,8 +697,11 @@ async def _pre_review_loop(
             if fname in manifests:
                 manifests[fname] = fixed_content
 
-    warning = "pre-review was not approved after %d iterations" % _MAX_REVIEW_ITERATIONS
-    logger.warning("mcp-factory: %s — last issues: %s", warning, last_issues)
+    warning = (
+        f"Pre-review did not approve after {_MAX_REVIEW_ITERATIONS} iterations. "
+        f"Last issues: {'; '.join(last_issues[:3])}"
+    )
+    logger.warning("mcp-factory: %s", warning)
     return manifests, warning
 
 
@@ -715,14 +714,20 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
     """Register a new MCP server. Creates manifests + ArgoCD app in gitops repo."""
 
     registry = await _load_registry()
-    if reg.name in registry:
-        raise HTTPException(status_code=409, detail=f"MCP '{reg.name}' is already registered")
+    if reg.name in registry and not reg.skip_manifests:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"MCP '{reg.name}' is already registered. "
+                "Pass skip_manifests=true to update the LiteLLM entry only."
+            ),
+        )
 
     gh = os.environ.get("GITHUB_APP_LOGIN", "praetor-coder")
     token = get_installation_token()
 
-    # --- Smoke test the MCP endpoint (only for pre-existing services) ---
-    if reg.skip_manifests:
+    # --- Smoke test the MCP endpoint (only in-cluster, only for pre-existing services) ---
+    if reg.skip_manifests and _k8s_token():
         mcp_url = f"http://{reg.name}-server.mcp-{reg.name}.svc.cluster.local:{reg.port}/mcp"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -762,7 +767,7 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
             path = f"apps/mcp/{reg.name}/{fname}"
             message = f"feat(mcp-factory): add {fname} for {reg.name}"
             if fname.endswith(".yaml") or fname.endswith(".yml"):
-                await _create_file(gh, token, path, content + "\n", message, branch)
+                await _create_file(gh, token, path, content, message, branch)
 
         # Create the ArgoCD application entry in root-app.yaml
         root_app, root_sha = await _get_file(gh, token, "root-app.yaml", branch)
@@ -836,19 +841,27 @@ async def list_mcps() -> McpListResponse:
 # Delete MCP endpoint — full GitOps deregistration
 # ---------------------------------------------------------------------------
 
-async def _delete_file(client: httpx.AsyncClient, token: str, path: str, sha: str, message: str, branch: str) -> None:
+async def _delete_file(token: str, path: str, sha: str, message: str, branch: str) -> None:
     """Delete a file from the gitops repo via GitHub Contents API."""
     url = f"{GITHUB_API}/repos/{GITOPS_REPO}/contents/{path}"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
-    body = {
-        "message": message,
-        "sha": sha,
-        "branch": branch,
-    }
-
-    resp = await client.delete(url, headers=headers, json=body)
-    if resp.status_code not in (200, 201, 404):
+    body = {"message": message, "sha": sha, "branch": branch}
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.delete(url, headers=headers, json=body)
+    if resp.status_code not in (200, 201, 204, 404):
         logger.warning("mcp-factory: delete_file failed (%s %s): %s", path, resp.status_code, resp.text[:200])
+
+
+async def _list_gitops_dir(token: str, path: str, branch: str) -> list[tuple[str, str]]:
+    """List files in a gitops repo directory. Returns [(path, sha), ...] or [] if not found."""
+    url = f"{GITHUB_API}/repos/{GITOPS_REPO}/contents/{path}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, params={"ref": branch}, headers=headers)
+    if resp.status_code == 404:
+        return []
+    resp.raise_for_status()
+    return [(f["path"], f["sha"]) for f in resp.json() if f.get("type") == "file"]
 
 
 def _remove_argocd_block(content: str, name: str) -> str:
@@ -878,35 +891,17 @@ async def delete_mcp(name: str) -> dict:
 
     gh = os.environ.get("GITHUB_APP_LOGIN", "praetor-coder")
     token = get_installation_token()
-
     branch = f"feat/mcp-deregister-{name}"
-    # Create the branch from main
-    main_sha = await _get_main_sha(gh, token)
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{GITHUB_API}/repos/{GITOPS_REPO}/git/refs",
-            json={"ref": f"refs/heads/{branch}", "sha": main_sha}, headers=headers,
+
+    await _create_branch(gh, token, branch)
+
+    for fpath, fsha in await _list_gitops_dir(token, f"apps/mcp/{name}", branch):
+        await _delete_file(
+            token, fpath, fsha,
+            f"chore(mcp-factory): remove {fpath} for deregistered MCP '{name}'",
+            branch,
         )
-        if resp.status_code == 422:
-            pass  # branch already exists — ok
-        else:
-            resp.raise_for_status()
 
-    # Delete all files under apps/mcp/{name}/
-    async with httpx.AsyncClient(timeout=15) as client:
-        contents_url = f"{GITHUB_API}/repos/{GITOPS_REPO}/contents/apps/mcp/{name}"
-        resp = await client.get(contents_url, params={"ref": branch}, headers=headers)
-        if resp.status_code == 200:
-            files = resp.json()
-            for file_info in files:
-                fpath = file_info["path"]
-                fsha = file_info["sha"]
-                await _delete_file(client, token, fpath, fsha,
-                                   f"chore(mcp-factory): remove {fpath} for deregistered MCP '{name}'",
-                                   branch)
-
-    # Remove ArgoCD Application block from root-app.yaml
     root_app, root_sha = await _get_file(gh, token, "root-app.yaml", branch)
     cleaned_root = _remove_argocd_block(root_app, name)
     if cleaned_root != root_app:
@@ -914,7 +909,6 @@ async def delete_mcp(name: str) -> dict:
                            f"chore(mcp-factory): remove ArgoCD block for '{name}'",
                            branch, root_sha)
 
-    # Remove LiteLLM mcp_servers entry from configmap
     cm_path = "apps/litellm/server/configmap.yaml"
     cm_content, cm_sha = await _get_file(gh, token, cm_path, branch)
     cleaned_cm = _remove_litellm_mcp_entry(cm_content, name)
@@ -923,15 +917,19 @@ async def delete_mcp(name: str) -> dict:
                            f"chore(mcp-factory): remove '{name}' from LiteLLM mcp_servers",
                            branch, cm_sha)
 
-    # Open PR
     pr_url = await _get_or_create_pr(
         gh, token,
         f"chore(mcp): deregister {name}",
-        f"Auto-generated by praetor MCP factory.\n\nDeregisters `{name}` MCP:\n- Removes all manifests under `apps/mcp/{name}/`\n- Removes ArgoCD Application block from root-app.yaml\n- Removes LiteLLM mcp_servers entry",
+        (
+            f"Auto-generated by praetor MCP factory.\n\n"
+            f"Deregisters `{name}` MCP:\n"
+            f"- Removes all manifests under `apps/mcp/{name}/`\n"
+            f"- Removes ArgoCD Application block from root-app.yaml\n"
+            f"- Removes LiteLLM mcp_servers entry"
+        ),
         branch,
     )
 
-    # Remove from registry
     del registry[name]
     await _save_registry(registry)
 
