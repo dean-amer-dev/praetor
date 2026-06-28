@@ -705,6 +705,25 @@ async def _pre_review_loop(
     return manifests, warning
 
 
+async def _smoke_test_mcp_endpoint(url: str) -> None:
+    """Validate that a service has a working /mcp endpoint. Raises HTTPException(422) on failure."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+        if resp.status_code == 404:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"MCP server at {url} returned 404 — server has no /mcp endpoint. "
+                    "Register via REST or add an MCP adapter first."
+                ),
+            )
+    except httpx.ConnectError as exc:
+        raise HTTPException(status_code=422, detail=f"MCP server at {url} not reachable: {exc}")
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=422, detail=f"MCP server at {url} timed out: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Register MCP endpoint
 # ---------------------------------------------------------------------------
@@ -726,27 +745,9 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
     gh = os.environ.get("GITHUB_APP_LOGIN", "praetor-coder")
     token = get_installation_token()
 
-    # --- Smoke test the MCP endpoint (only in-cluster, only for pre-existing services) ---
-    if reg.skip_manifests and _k8s_token():
+    if reg.skip_manifests:
         mcp_url = f"http://{reg.name}-server.mcp-{reg.name}.svc.cluster.local:{reg.port}/mcp"
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(mcp_url)
-            if resp.status_code == 404:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"MCP server at {mcp_url} returned 404 — server has no /mcp endpoint. Register via REST or add an MCP adapter first.",
-                )
-        except httpx.ConnectError as exc:
-            raise HTTPException(
-                status_code=422,
-                detail=f"MCP server at {mcp_url} not reachable: {exc}",
-            )
-        except httpx.TimeoutException as exc:
-            raise HTTPException(
-                status_code=422,
-                detail=f"MCP server at {mcp_url} not reachable: {exc}",
-            )
+        await _smoke_test_mcp_endpoint(mcp_url)
 
     branch = f"feat/mcp-register-{reg.name}"
     pr_url = ""
