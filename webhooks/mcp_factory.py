@@ -719,7 +719,7 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
         raise HTTPException(status_code=409, detail=f"MCP '{reg.name}' is already registered")
 
     gh = os.environ.get("GITHUB_APP_LOGIN", "praetor-coder")
-    token = await get_installation_token(gh)
+    token = get_installation_token()
 
     # --- Smoke test the MCP endpoint (only for pre-existing services) ---
     if reg.skip_manifests:
@@ -745,6 +745,7 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
 
     branch = f"feat/mcp-register-{reg.name}"
     pr_url = ""
+    warning = None
 
     if not reg.skip_manifests:
         # Generate manifests (possibly with LLM review fixes)
@@ -876,7 +877,7 @@ async def delete_mcp(name: str) -> dict:
         raise HTTPException(status_code=404, detail=f"MCP '{name}' not found in registry")
 
     gh = os.environ.get("GITHUB_APP_LOGIN", "praetor-coder")
-    token = await get_installation_token(gh)
+    token = get_installation_token()
 
     branch = f"feat/mcp-deregister-{name}"
     # Create the branch from main
