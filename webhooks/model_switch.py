@@ -61,7 +61,7 @@ async def switch_model(
         )
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=360) as client:
             resp = await client.post(
                 f"{_LLM_SWITCH_URL}/switch",
                 json={"model": req.model},
@@ -79,8 +79,11 @@ async def switch_model(
         logger.error("model switch error: %s", exc)
         raise HTTPException(status_code=502, detail=f"model-switcher unreachable: {exc}")
 
-    return ModelSwitchResponse(
-        status=data.get("status", "switching"),
-        model=req.model,
-        message=data.get("note", "Model switch initiated — server loading in background."),
-    )
+    status = data.get("status", "unknown")
+    if status == "ready":
+        message = f"Model {req.model} is loaded and ready."
+    elif status == "timeout":
+        message = f"Model {req.model} started but did not become healthy within 5 minutes."
+    else:
+        message = data.get("note", "Model switch in progress.")
+    return ModelSwitchResponse(status=status, model=req.model, message=message)
