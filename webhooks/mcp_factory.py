@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -77,6 +78,36 @@ def _check_auth(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -
 # Models
 # ---------------------------------------------------------------------------
 
+_SECRET_TIERS: dict[str, dict[str, str]] = {
+    "tier-base": {
+        "hatchet-worker-api-token": "hatchet-token",
+        "litellm-master-key": "litellm-api-key",
+        "praetor-db-password": "db-password",
+    },
+    "tier-standard": {
+        "hatchet-worker-api-token": "hatchet-token",
+        "litellm-master-key": "litellm-api-key",
+        "praetor-db-password": "db-password",
+        "mem0-admin-api-key": "mem0-api-key",
+        "langfuse-public-key": "langfuse-public-key",
+        "langfuse-secret-key": "langfuse-secret-key",
+        "vikjuna-api-key-full-access": "vikunja-token",
+    },
+    "tier-github": {
+        "hatchet-worker-api-token": "hatchet-token",
+        "litellm-master-key": "litellm-api-key",
+        "praetor-db-password": "db-password",
+        "mem0-admin-api-key": "mem0-api-key",
+        "langfuse-public-key": "langfuse-public-key",
+        "langfuse-secret-key": "langfuse-secret-key",
+        "vikjuna-api-key-full-access": "vikunja-token",
+        "github-amerenda-coder-app-id": "coder-app-id",
+        "github-amerenda-coder-private-key": "coder-private-key",
+        "github-amerenda-coder-installation-id": "coder-installation-id",
+    },
+}
+
+
 class McpRegistration(BaseModel):
     name: str
     image: str
@@ -91,6 +122,7 @@ class McpRegistration(BaseModel):
     skip_pre_review: bool = False            # bypass inline LLM review loop
     skip_manifests: bool = False             # skip k8s manifest + ArgoCD steps; only upsert LiteLLM entry
     host_rewrite: bool = False               # when True, inject nginx sidecar to rewrite Host header
+    secret_tiers: list[str] = []            # e.g. ["tier-standard"] expands to standard Praetor secrets
 
 
 class McpStatusEntry(BaseModel):
@@ -102,6 +134,26 @@ class McpStatusEntry(BaseModel):
     status: str = "pending"
     service_account_name: str | None = None
     cluster_role: str | None = None
+    registered_at: str | None = None
+
+
+class McpHistoryEntry(BaseModel):
+    name: str
+    image: str
+    port: int
+    transport: str
+    pr_url: str | None = None
+    status: str = "pending"
+    service_account_name: str | None = None
+    cluster_role: str | None = None
+    registered_at: str | None = None
+    deregistered_at: str | None = None
+
+
+class McpHistoryResponse(BaseModel):
+    name: str
+    current: McpStatusEntry
+    history: list[McpHistoryEntry]
 
 
 class McpRegisterResponse(BaseModel):
@@ -132,6 +184,13 @@ def _k8s_verify():
     return True  # fallback to system CAs (e.g. localhost proxy)
 
 
+def _migrate_entry(entry: dict) -> dict:
+    """Promote a flat (pre-history) registry entry to versioned schema."""
+    if "current" in entry:
+        return entry
+    return {"current": entry, "history": []}
+
+
 async def _load_registry() -> dict[str, Any]:
     token = _k8s_token()
     if not token:
@@ -145,7 +204,7 @@ async def _load_registry() -> dict[str, Any]:
             if resp.status_code == 404:
                 return {}
             resp.raise_for_status()
-            return json.loads(resp.json().get("data", {}).get("registry", "{}"))
+            return {k: _migrate_entry(v) for k, v in json.loads(resp.json().get("data", {}).get("registry", "{}")).items()}
     except Exception as exc:
         logger.warning("failed to load mcp registry: %s", exc)
         return {}
@@ -428,7 +487,7 @@ def _deployment_yaml(reg: McpRegistration) -> str:
         f"  name: {reg.name}-server\n"
         f"  namespace: mcp-{reg.name}\n"
         f"spec:\n"
-        f"  replicas: 0\n"
+        f"  replicas: 1\n"
         f"  selector:\n"
         f"    matchLabels:\n"
         f"      app: {reg.name}-server\n"
@@ -599,7 +658,7 @@ def _nginx_configmap_yaml(reg: McpRegistration) -> str:
         f"        proxy_set_header Host localhost;\n\n"
         f"        # HTTP/1.1 + empty Connection header = keep-alive to upstream\n"
         f"        proxy_http_version 1.1;\n"
-        f'        proxy_set_header Connection ""\n'
+        f'        proxy_set_header Connection "";\n'
         f"\n"
         f"        # Accommodate long-running tool calls (list/watch, logs)\n"
         f"        proxy_read_timeout 300s;\n"
@@ -742,6 +801,20 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
             ),
         )
 
+    if reg.secret_tiers:
+        merged: dict[str, str] = {}
+        for tier_name in reg.secret_tiers:
+            tier = _SECRET_TIERS.get(tier_name)
+            if tier is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Unknown secret tier: {tier_name!r}. Valid: {list(_SECRET_TIERS)}",
+                )
+            for bws_name, secret_key in tier.items():
+                env_var = secret_key.upper().replace("-", "_")
+                merged[env_var] = bws_name
+        reg = reg.model_copy(update={"env_secrets": {**merged, **reg.env_secrets}})
+
     gh = os.environ.get("GITHUB_APP_LOGIN", "praetor-coder")
     token = get_installation_token()
 
@@ -798,7 +871,10 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
         f"- Image: `{reg.image}`\n"
         f"- Port: `{reg.port}`\n"
         f"- Transport: `{reg.transport}`\n"
+        f"- Initial replicas: `1` (set to 0 to pause)\n"
     )
+    if reg.image.endswith(":latest"):
+        pr_body += "\n⚠️ **Image pinning:** `image` ends in `:latest` — consider pinning to a digest for reproducible rollbacks.\n"
     if warning:
         pr_body += f"\n---\n⚠️ **Pre-review warning:** {warning}\n"
 
@@ -809,15 +885,26 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
         branch,
     )
 
+    existing_entry = registry.get(reg.name, {})
+    old_current = existing_entry.get("current")
+    history = existing_entry.get("history", [])
+    if old_current and old_current.get("image") != reg.image:
+        old_current["deregistered_at"] = datetime.now(timezone.utc).isoformat()
+        history = [old_current] + history
+
     registry[reg.name] = {
-        "name": reg.name,
-        "image": reg.image,
-        "port": reg.port,
-        "transport": reg.transport,
-        "pr_url": pr_url,
-        "status": "pending",
-        "service_account_name": reg.service_account_name,
-        "cluster_role": reg.cluster_role,
+        "current": {
+            "name": reg.name,
+            "image": reg.image,
+            "port": reg.port,
+            "transport": reg.transport,
+            "pr_url": pr_url,
+            "status": "pending",
+            "service_account_name": reg.service_account_name,
+            "cluster_role": reg.cluster_role,
+            "registered_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "history": history,
     }
     try:
         await _save_registry(registry)
@@ -835,7 +922,45 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
 @router.get("/api/v1/mcp", response_model=McpListResponse, dependencies=[Depends(_check_auth)])
 async def list_mcps() -> McpListResponse:
     registry = await _load_registry()
-    return McpListResponse(mcps=[McpStatusEntry(**v) for v in registry.values()])
+    return McpListResponse(mcps=[McpStatusEntry(**v["current"]) for v in registry.values()])
+
+
+@router.get("/api/v1/mcp/{name}/history", dependencies=[Depends(_check_auth)])
+async def get_mcp_history(name: str) -> McpHistoryResponse:
+    registry = await _load_registry()
+    if name not in registry:
+        raise HTTPException(status_code=404, detail=f"MCP '{name}' not found in registry")
+    entry = registry[name]
+    return McpHistoryResponse(
+        name=name,
+        current=McpStatusEntry(**entry["current"]),
+        history=[McpHistoryEntry(**h) for h in entry.get("history", [])],
+    )
+
+
+@router.post("/api/v1/mcp/{name}/rollback", dependencies=[Depends(_check_auth)])
+async def rollback_mcp(name: str) -> McpRegisterResponse:
+    """Re-register using the most recent history entry's image."""
+    registry = await _load_registry()
+    if name not in registry:
+        raise HTTPException(status_code=404, detail=f"MCP '{name}' not found in registry")
+    entry = registry[name]
+    history = entry.get("history", [])
+    if not history:
+        raise HTTPException(status_code=409, detail=f"MCP '{name}' has no rollback history")
+
+    prev = history[0]
+    del registry[name]
+    await _save_registry(registry)
+
+    rollback_reg = McpRegistration(
+        name=name,
+        image=prev["image"],
+        port=prev.get("port", 8000),
+        transport=prev.get("transport", "http"),
+        skip_pre_review=True,
+    )
+    return await register_mcp(rollback_reg)
 
 
 # ---------------------------------------------------------------------------
