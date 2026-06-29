@@ -9,11 +9,16 @@ from fastapi.testclient import TestClient
 
 from webhooks.mcp_factory import (
     McpRegistration,
+    _NGINX_PROXY_PORT,
+    _SECRET_TIERS,
     _argocd_application_yaml,
+    _build_manifests,
     _cluster_role_binding_yaml,
     _deployment_yaml,
     _externalsecret_yaml,
     _litellm_mcp_entry,
+    _migrate_entry,
+    _nginx_configmap_yaml,
     _service_account_yaml,
     _service_yaml,
     _upsert_litellm_config,
@@ -52,6 +57,7 @@ class TestDeploymentYaml:
         assert "image: example/foo:latest" in yaml
         assert "containerPort: 8000" in yaml
         assert "cpu: 10m" in yaml
+        assert "replicas: 1" in yaml
 
     def test_env_secrets_injected(self):
         reg = McpRegistration(
@@ -116,6 +122,120 @@ class TestDeploymentYaml:
         assert "tcpSocket:" in yaml
         assert "httpGet:" not in yaml
         assert "path:" not in yaml
+
+
+# ---------------------------------------------------------------------------
+# nginx config syntax helpers (no extra dependencies)
+# ---------------------------------------------------------------------------
+
+def _extract_nginx_conf(configmap_yaml: str) -> str:
+    """Pull the embedded nginx config out of the ConfigMap block scalar."""
+    marker = "  default.conf: |\n"
+    idx = configmap_yaml.index(marker) + len(marker)
+    lines = []
+    for line in configmap_yaml[idx:].splitlines():
+        if not line.startswith("    "):
+            break
+        lines.append(line[4:])
+    return "\n".join(lines)
+
+
+def _directive_lines_missing_semicolons(nginx_conf: str) -> list[str]:
+    """Return lines that look like nginx directives but lack a trailing semicolon."""
+    bad = []
+    for raw in nginx_conf.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        if stripped in ("{", "}"):
+            continue
+        if stripped.endswith("{"):
+            continue
+        if not stripped.endswith(";"):
+            bad.append(raw)
+    return bad
+
+
+# ---------------------------------------------------------------------------
+# host_rewrite manifest tests
+# ---------------------------------------------------------------------------
+
+class TestHostRewriteManifests:
+    def _hr_reg(self, port: int = 8000) -> McpRegistration:
+        return McpRegistration(name="kube", image="flux159/mcp-server-kubernetes:latest",
+                               port=port, host_rewrite=True)
+
+    def test_deployment_includes_nginx_sidecar(self):
+        yaml = _deployment_yaml(self._hr_reg())
+        assert "name: host-proxy" in yaml
+        assert "image: nginx:alpine" in yaml
+        assert f"containerPort: {_NGINX_PROXY_PORT}" in yaml
+
+    def test_deployment_mounts_nginx_configmap_volume(self):
+        yaml = _deployment_yaml(self._hr_reg())
+        assert "nginx-conf" in yaml
+        assert "kube-nginx-proxy" in yaml
+        assert "/etc/nginx/conf.d" in yaml
+
+    def test_deployment_without_host_rewrite_has_no_sidecar(self):
+        reg = McpRegistration(name="kube", image="img:1")
+        yaml = _deployment_yaml(reg)
+        assert "host-proxy" not in yaml
+        assert "nginx" not in yaml
+        assert "nginx-conf" not in yaml
+
+    def test_service_routes_to_nginx_port_when_host_rewrite(self):
+        yaml = _service_yaml(self._hr_reg())
+        assert f"targetPort: {_NGINX_PROXY_PORT}" in yaml
+
+    def test_service_routes_to_app_port_without_host_rewrite(self):
+        reg = McpRegistration(name="foo", image="img:1", port=9000)
+        yaml = _service_yaml(reg)
+        assert "targetPort: 9000" in yaml
+        assert f"targetPort: {_NGINX_PROXY_PORT}" not in yaml
+
+    def test_build_manifests_includes_nginx_configmap(self):
+        manifests = _build_manifests(self._hr_reg())
+        assert "nginx-proxy-configmap.yaml" in manifests
+
+    def test_build_manifests_without_host_rewrite_excludes_nginx_configmap(self):
+        reg = McpRegistration(name="foo", image="img:1")
+        manifests = _build_manifests(reg)
+        assert "nginx-proxy-configmap.yaml" not in manifests
+
+
+class TestNginxConfigMap:
+    def _reg(self, port: int = 8000) -> McpRegistration:
+        return McpRegistration(name="kube", image="img:1", port=port, host_rewrite=True)
+
+    def test_structure(self):
+        yaml = _nginx_configmap_yaml(self._reg())
+        assert "kind: ConfigMap" in yaml
+        assert "name: kube-nginx-proxy" in yaml
+        assert "namespace: mcp-kube" in yaml
+        assert "default.conf:" in yaml
+
+    def test_proxies_to_correct_app_port(self):
+        nginx_conf = _extract_nginx_conf(_nginx_configmap_yaml(self._reg(port=9123)))
+        assert "proxy_pass http://127.0.0.1:9123" in nginx_conf
+
+    def test_listens_on_proxy_port(self):
+        nginx_conf = _extract_nginx_conf(_nginx_configmap_yaml(self._reg()))
+        assert f"listen {_NGINX_PROXY_PORT}" in nginx_conf
+
+    def test_rewrites_host_to_localhost(self):
+        nginx_conf = _extract_nginx_conf(_nginx_configmap_yaml(self._reg()))
+        assert "proxy_set_header Host localhost" in nginx_conf
+
+    def test_all_directives_have_semicolons(self):
+        nginx_conf = _extract_nginx_conf(_nginx_configmap_yaml(self._reg()))
+        bad = _directive_lines_missing_semicolons(nginx_conf)
+        assert bad == [], f"nginx directives missing semicolons:\n" + "\n".join(bad)
+
+
+# ---------------------------------------------------------------------------
 
 
 class TestServiceAccountYaml:
@@ -416,7 +536,10 @@ class TestListEndpoint:
 
     def test_returns_registered_mcps(self, client):
         registry = {
-            "searxng": {"name": "searxng", "image": "img:1", "port": 8000, "transport": "http", "status": "pending"},
+            "searxng": {
+                "current": {"name": "searxng", "image": "img:1", "port": 8000, "transport": "http", "status": "pending"},
+                "history": [],
+            },
         }
         with patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value=registry)):
             resp = client.get("/api/v1/mcp", headers=_auth())
@@ -631,3 +754,162 @@ class TestPreReviewViaRoute:
         # args: (gh_client, token, path, content, message, branch)
         pushed = {call.args[2]: call.args[3] for call in create_file_mock.await_args_list}
         assert pushed.get("apps/mcp/test-mcp/deployment.yaml") == fixed_deployment
+
+
+# ---------------------------------------------------------------------------
+# Version history
+# ---------------------------------------------------------------------------
+
+class TestVersionHistory:
+    def test_migrate_entry_promotes_flat_to_versioned(self):
+        flat = {"name": "foo", "image": "img:1", "port": 8000, "transport": "http", "status": "pending"}
+        result = _migrate_entry(flat)
+        assert result["current"] == flat
+        assert result["history"] == []
+
+    def test_migrate_entry_passthrough_when_already_versioned(self):
+        versioned = {"current": {"name": "foo"}, "history": []}
+        assert _migrate_entry(versioned) is versioned
+
+    def test_history_endpoint_returns_entry(self, client):
+        registry = {
+            "foo": {
+                "current": {"name": "foo", "image": "img:2", "port": 8000,
+                            "transport": "http", "status": "pending"},
+                "history": [{"name": "foo", "image": "img:1", "port": 8000,
+                              "transport": "http", "status": "pending",
+                              "registered_at": "2026-01-01T00:00:00+00:00",
+                              "deregistered_at": "2026-06-01T00:00:00+00:00"}],
+            }
+        }
+        with patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value=registry)):
+            resp = client.get("/api/v1/mcp/foo/history", headers=_auth())
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["name"] == "foo"
+        assert data["current"]["image"] == "img:2"
+        assert len(data["history"]) == 1
+        assert data["history"][0]["image"] == "img:1"
+
+    def test_history_endpoint_not_found(self, client):
+        with patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})):
+            resp = client.get("/api/v1/mcp/nonexistent/history", headers=_auth())
+        assert resp.status_code == 404
+
+    def test_rollback_with_no_history_returns_409(self, client):
+        registry = {
+            "foo": {"current": {"name": "foo", "image": "img:2", "port": 8000,
+                                "transport": "http", "status": "pending"}, "history": []}
+        }
+        with patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value=registry)):
+            resp = client.post("/api/v1/mcp/foo/rollback", headers=_auth())
+        assert resp.status_code == 409
+
+    def test_rollback_not_found_returns_404(self, client):
+        with patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})):
+            resp = client.post("/api/v1/mcp/nonexistent/rollback", headers=_auth())
+        assert resp.status_code == 404
+
+    def test_latest_image_warning_in_pr_body(self, client):
+        pr_mock = AsyncMock(return_value="https://github.com/pr/1")
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="tok"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=pr_mock),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register",
+                json={"name": "foo", "image": "foo:latest", "skip_pre_review": True},
+                headers=_auth(),
+            )
+        assert resp.status_code == 200
+        body = pr_mock.call_args.args[3]
+        assert ":latest" in body
+        assert "pinning" in body.lower()
+
+    def test_pinned_image_no_latest_warning(self, client):
+        pr_mock = AsyncMock(return_value="https://github.com/pr/1")
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="tok"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=pr_mock),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register",
+                json={"name": "foo", "image": "foo:sha-abc1234", "skip_pre_review": True},
+                headers=_auth(),
+            )
+        assert resp.status_code == 200
+        body = pr_mock.call_args.args[3]
+        assert "pinning" not in body.lower()
+
+
+# ---------------------------------------------------------------------------
+# Secret tiers
+# ---------------------------------------------------------------------------
+
+class TestSecretTiers:
+    def test_known_tier_base_expands_correctly(self):
+        tier = _SECRET_TIERS["tier-base"]
+        assert "hatchet-worker-api-token" in tier
+        assert "litellm-master-key" in tier
+
+    def test_tier_standard_is_superset_of_base(self):
+        base_keys = set(_SECRET_TIERS["tier-base"])
+        std_keys = set(_SECRET_TIERS["tier-standard"])
+        assert base_keys.issubset(std_keys)
+
+    def test_tier_github_is_superset_of_standard(self):
+        std_keys = set(_SECRET_TIERS["tier-standard"])
+        gh_keys = set(_SECRET_TIERS["tier-github"])
+        assert std_keys.issubset(gh_keys)
+
+    def test_unknown_tier_returns_422(self, client):
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="tok"),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register",
+                json={"name": "foo", "image": "img:1", "skip_pre_review": True,
+                      "secret_tiers": ["tier-does-not-exist"]},
+                headers=_auth(),
+            )
+        assert resp.status_code == 422
+        assert "tier-does-not-exist" in resp.json()["detail"]
+
+    def test_tier_standard_generates_externalsecret(self, client):
+        create_file_mock = AsyncMock()
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="tok"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=create_file_mock),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=("content\n", "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register",
+                json={"name": "myagent", "image": "img:1", "skip_pre_review": True,
+                      "secret_tiers": ["tier-standard"]},
+                headers=_auth(),
+            )
+        assert resp.status_code == 200
+        paths = [call.args[2] for call in create_file_mock.await_args_list]
+        assert any("externalsecret" in p for p in paths), f"no externalsecret in pushed files: {paths}"
