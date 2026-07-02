@@ -94,7 +94,7 @@ jobs:
               echo "$CHANGED" | grep -qE '^(agents/research/|Dockerfile\.research-worker)' && REBUILD+=(research)
               echo "$CHANGED" | grep -qE '^(pipelines/research_then_code\.py|pipelines/worker\.py|Dockerfile\.pipeline-worker)' && REBUILD+=(pipeline)
               echo "$CHANGED" | grep -qE '^(pipelines/feature_pipeline\.py|Dockerfile\.feature-pipeline-worker)' && REBUILD+=(feature-pipeline)
-              echo "$CHANGED" | grep -qE '^(webhooks/|Dockerfile\.webhook-adapter)' && REBUILD+=(webhook)
+              echo "$CHANGED" | grep -qE '^(webhooks/|scripts/|Dockerfile\.webhook-adapter)' && REBUILD+=(webhook)
               echo "$CHANGED" | grep -qE '^(agents/qa/|Dockerfile\.qa-worker)' && REBUILD+=(qa)
               echo "$CHANGED" | grep -qE '^(agents/pr_reviewer/|Dockerfile\.reviewer-worker)' && REBUILD+=(reviewer)
               echo "$CHANGED" | grep -qE '^(agents/benchmark/|Dockerfile\.benchmark-worker)' && REBUILD+=(benchmark)
@@ -319,6 +319,7 @@ jobs:
             "feature-pipeline|amerenda/praetor-feature-pipeline|apps/praetor/feature-pipeline-worker/deployment.yaml" \
             "research|amerenda/praetor-research|apps/praetor/research-worker/deployment.yaml" \
             "webhook|amerenda/praetor-webhook|apps/praetor/webhook-adapter/deployment.yaml" \
+            "webhook|amerenda/praetor-webhook|apps/praetor/webhook-adapter/job.yaml" \
             "qa|amerenda/praetor-qa|apps/praetor/qa-worker/deployment.yaml" \
             "reviewer|amerenda/praetor-reviewer|apps/praetor/reviewer-worker/deployment.yaml" \
             "benchmark|amerenda/praetor-benchmark|apps/praetor/benchmark-worker/deployment.yaml"; do
