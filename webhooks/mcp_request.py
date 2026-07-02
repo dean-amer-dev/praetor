@@ -66,6 +66,7 @@ class McpResearchResult(BaseModel):
     requires_k8s_sa: bool = False            # needs in-cluster Kubernetes service account
     env_vars: dict[str, str] = {}            # non-secret env vars required by the server
     env_secrets: dict[str, str] = {}         # {env_var_name: bws_secret_key} pairs
+    args: list[str] = []                     # container entrypoint args (e.g. ["fastmcp","run","config.json"])
 
 
 class McpRequestResponse(BaseModel):
@@ -120,6 +121,11 @@ KNOWN PRODUCTION-READY MCP SERVERS — use these exact values:
   env_vars={"HOST":"0.0.0.0","ENABLE_UNSAFE_STREAMABLE_HTTP_TRANSPORT":"true","ALLOW_ONLY_READONLY_TOOLS":"true"}
 - GitHub repository operations:
   image="ghcr.io/github/github-mcp-server:latest", port=8080
+- Home Assistant (entity states, events, automations, error logs):
+  image="ghcr.io/homeassistant-ai/ha-mcp:4.12.0", port=8086,
+  args=["fastmcp","run","fastmcp-http.json"],
+  env_vars={"HOMEASSISTANT_URL": "<ha_url>"},
+  env_secrets={"HOMEASSISTANT_TOKEN": "<bws_key_for_ha_token>"}
 - Web search (SearXNG): internal deployment only, do not suggest a public image
 
 Return ONLY a JSON object with these exact fields:
@@ -132,7 +138,8 @@ Return ONLY a JSON object with these exact fields:
   "port": <container port as integer, or null if unknown>,
   "requires_k8s_sa": <true if MCP needs in-cluster Kubernetes API access, otherwise false>,
   "env_vars": <object of non-secret env var name→value pairs, e.g. {"HOST":"0.0.0.0"}, or {}>,
-  "env_secrets": <object of {env_var_name: bws_secret_key} for secrets the server needs, e.g. {"API_TOKEN": "my-service-token"}, or {}>
+  "env_secrets": <object of {env_var_name: bws_secret_key} for secrets the server needs, e.g. {"API_TOKEN": "my-service-token"}, or {}>,
+  "args": <list of container entrypoint args if required, e.g. ["fastmcp","run","fastmcp-http.json"], or []>
 }
 
 For "env_secrets": if the capability description mentions a token, password, or credential needed by the server,
@@ -190,6 +197,8 @@ async def _research_mcp(capability: str) -> McpResearchResult:
         env_vars = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
         raw_secrets = data.get("env_secrets") or {}
         env_secrets = {str(k): str(v) for k, v in raw_secrets.items()} if isinstance(raw_secrets, dict) else {}
+        raw_args = data.get("args") or []
+        args = [str(a) for a in raw_args] if isinstance(raw_args, list) else []
         return McpResearchResult(
             found=bool(data.get("found", False)),
             confidence=float(data.get("confidence", 0.0)),
@@ -200,6 +209,7 @@ async def _research_mcp(capability: str) -> McpResearchResult:
             requires_k8s_sa=bool(data.get("requires_k8s_sa", False)),
             env_vars=env_vars,
             env_secrets=env_secrets,
+            args=args,
         )
     except Exception as exc:
         logger.error("failed to parse LLM research response: %s", exc)
@@ -225,6 +235,7 @@ async def _register_existing(research: McpResearchResult, req: McpRequest, api_k
         port=research.port or 8000,
         env_vars=research.env_vars,
         env_secrets=research.env_secrets,
+        args=research.args,
         service_account_name=sa_name,
         cluster_role=cluster_role,
     )

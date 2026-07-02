@@ -397,6 +397,45 @@ def test_request_mcp_register_conflict_propagated(client):
 # env_secrets propagation
 # ---------------------------------------------------------------------------
 
+def test_request_mcp_args_forwarded_to_register(client):
+    """args from McpResearchResult must be passed through to mcp/register."""
+    result_with_args = McpResearchResult(
+        found=True,
+        confidence=0.95,
+        image="ghcr.io/homeassistant-ai/ha-mcp:4.12.0",
+        name="homeassistant",
+        notes="Home Assistant MCP found.",
+        port=8086,
+        args=["fastmcp", "run", "fastmcp-http.json"],
+    )
+    pr_url = "https://github.com/amerenda/k3s-dean-gitops/pull/999"
+    captured_body: dict = {}
+    mock_cm = AsyncMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"name": "homeassistant", "pr_url": pr_url, "message": "ok"}
+
+    async def capture_post(url, *, json=None, headers=None):
+        captured_body.update(json or {})
+        return ok_resp
+
+    mock_cm.post = capture_post
+    with (
+        patch("webhooks.mcp_request._load_registry", new=AsyncMock(return_value={})),
+        patch("webhooks.mcp_request._research_mcp", new=AsyncMock(return_value=result_with_args)),
+        patch("webhooks.mcp_request.httpx.AsyncClient", return_value=mock_cm),
+    ):
+        resp = client.post(
+            "/api/v1/mcp/request",
+            headers=AUTH,
+            json={"capability": "Query Home Assistant entity states and events."},
+        )
+    assert resp.status_code == 200
+    assert captured_body.get("args") == ["fastmcp", "run", "fastmcp-http.json"]
+
+
 def test_request_mcp_env_secrets_forwarded_to_register(client):
     """env_secrets from McpResearchResult must be passed through to mcp/register."""
     result_with_secrets = McpResearchResult(
