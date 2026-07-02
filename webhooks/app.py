@@ -15,6 +15,7 @@ from .agent_factory import router as agent_factory_router
 from .spec import router as spec_router
 from .skills import router as skills_router
 from .model_switch import router as model_switch_router
+from .model_benchmark import router as model_benchmark_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -38,6 +39,7 @@ app.include_router(agent_factory_router)
 app.include_router(spec_router)
 app.include_router(skills_router)
 app.include_router(model_switch_router)
+app.include_router(model_benchmark_router)
 
 
 @app.get("/healthz")
