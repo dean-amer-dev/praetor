@@ -1,150 +1,102 @@
 # Phase 25 — Agent Factory
 
-**Goal:** Go from "I want a new agent that does X" to a running, smoke-tested Hatchet worker with a Langfuse system prompt — in one API call or one conversation turn in OpenWebUI. Phase 11 (Scaffold Worker) opens the PR. Phase 25 closes the loop: merge, build, deploy, wire the event, create the prompt, verify it works.
+## You are implementing Phase 25 of the Praetor platform.
+
+**You are allowed to merge PRs for this session.**
 
 ---
 
-## Pre-conditions
+## Context
 
-- Phase 24 complete
-- Phase 11 complete (scaffold-worker live, `agent:scaffold` event working, Jinja templates in `praetor/templates/agent/`)
-- Phase 16 complete (deploy PR pipeline proven — CI creates k3s-dean-gitops PR after image build)
-- Langfuse API accessible for programmatic prompt creation
+You are working on the `amerenda/praetor` monorepo. The platform runs on a k3s cluster (GitOps via `amerenda/k3s-dean-gitops`, synced by ArgoCD). Secrets come exclusively from Bitwarden Secrets Manager (BWS) — never hardcode secrets, never put them in Git, never create them anywhere except via BWS. The MCP server registry and tool exposure are managed via `amerenda/dean-mcp`.
+
+### What already exists
+
+- **Phase 11** — `agent:scaffold` Hatchet event → scaffold-worker opens draft PRs with agent skeletons on `amerenda/praetor`
+- **Phase 16** — after CI builds an image, it opens a deploy PR on `k3s-dean-gitops`
+- **Phase 15** — `POST /api/v1/mcp/register` deploys MCP servers end-to-end
+- **Phase 17** — `lm_praetor_request_mcp` tool in praetor-mcp exposes MCP factory to OWU
+- All existing agents (coder, research, reviewer, qa, scaffold) are running workers in the `praetor` k3s namespace
+
+### What is missing
+
+There is no way to go from "I want a new agent that does X" to a running, smoke-tested worker in one call. Currently each agent requires manual: scaffold dispatch → PR review → merge → CI → deploy PR → merge → Langfuse prompt creation → smoke test. Phase 25 automates all of it.
 
 ---
 
-## What Gets Built
+## Your constraints
 
-### New endpoint: `POST /api/v1/agent/create`
+**GitOps only.** Every change to running infrastructure must go through a PR on `k3s-dean-gitops` (for k3s) or `komodo-dean-gitops` (for Komodo/stateful). No `kubectl apply`, no direct edits to running pods, no one-off patches. If something can't be done via GitOps, that is a design problem to solve — not a reason to bypass the pipeline.
+
+**BWS is the single source of truth for all secrets.** No exceptions. No secrets in Git. No secrets in env vars set manually. Every secret the new agent needs must be in BWS and pulled at runtime via the ExternalSecret/BWS provider already wired in the cluster.
+
+**Ansible-playbooks for infrastructure only.** If a change requires installing a system package, configuring a node, or setting up a new host — and it truly cannot be done via k3s/Komodo — add it to `amerenda/ansible-playbooks`. Do not run ad-hoc commands on nodes.
+
+**No auto-merge of production app PRs.** The agent factory itself auto-merges scaffold PRs and deploy PRs for new agents it creates (that's its job). But any PR that touches the existing praetor platform production config requires human review.
+
+---
+
+## What to build
+
+### 1. `POST /api/v1/agent/create` in `webhooks/agent_factory.py`
 
 ```python
 class AgentCreateRequest(BaseModel):
     name: str           # kebab-case, e.g. "grafana-monitor"
-    description: str    # natural language: what it does, what it has access to
+    description: str    # what it does, what tools it needs
     event: str          # Hatchet event name, e.g. "agent:grafana-monitor"
-    tools: list[str] = []   # optional: hint which shared tools to wire (e.g. "search_memory", "web_search")
+    tools: list[str] = []   # hint which shared tools to wire
 ```
 
-The endpoint orchestrates the full lifecycle — it does not return until the agent is running (or it times out with a status URL).
+The endpoint orchestrates the full lifecycle. It returns a status URL while work proceeds async via Hatchet.
 
-### Lifecycle
+**Lifecycle:**
 
-```
-POST /api/v1/agent/create
-    │
-    ├─ 1. Dispatch agent:scaffold → scaffold-worker opens draft PR on amerenda/praetor
-    │       PR includes: agents/{name}/agent.py, agents/{name}/worker.py, Dockerfile.{name}-worker
-    │       PR also patches: webhook-adapter event routing to include the new event name
-    │       PR also patches: CI detect-changes matrix to include the new component
-    │
-    ├─ 2. Merge the scaffold PR (auto-merge since it's a known-good skeleton)
-    │
-    ├─ 3. CI builds image → creates deploy PR on k3s-dean-gitops (existing pipeline)
-    │
-    ├─ 4. Auto-merge the deploy PR → ArgoCD rolls out the new worker pod
-    │
-    ├─ 5. Create Langfuse system prompt
-    │       Name: {name}-system
-    │       Initial content: generated from description + standard agent template
-    │       (editable from UI immediately — the worker fetches it at startup)
-    │
-    ├─ 6. Smoke test
-    │       Dispatch a test task to agent:{name} with a canary payload
-    │       Poll Hatchet for up to 60s — verify the run completes (not errors)
-    │
-    └─ 7. Return status: { "agent": name, "event": event, "pod": ..., "langfuse_prompt": ..., "smoke_test": "passed" }
-```
+1. Dispatch `agent:scaffold` with name/description/event/tools → scaffold-worker opens a draft PR on `amerenda/praetor` containing:
+   - `agents/{name}/__init__.py`, `agent.py`, `worker.py`
+   - `Dockerfile.{name}-worker`
+   - Patch to webhook-adapter event routing (adds new event → worker mapping)
+   - Patch to `.github/workflows/build.yaml` detect-changes matrix (adds new component)
+2. Merge the scaffold PR (auto-merge — it is a known-good Jinja skeleton, not custom logic)
+3. CI builds the image → opens a deploy PR on `k3s-dean-gitops` (existing CI pattern)
+4. Merge the deploy PR → ArgoCD rolls out the new worker pod
+5. Create a Langfuse system prompt named `{name}-system` via the Langfuse API using the existing `langfuse_tools.py` pattern
+6. Smoke test: dispatch `{"title": "smoke-{name}", "description": "Respond OK.", "type": name}` via Hatchet, poll up to 60s for a clean completion
+7. Return `{ agent, event, pod_status, langfuse_prompt_url, smoke_test }`
 
-### Auto-merge policy
+**Idempotency:** If `name` already exists in the k8s namespace as a running deployment, skip scaffold + deploy and return current status.
 
-Steps 2 and 4 auto-merge because the scaffold output is deterministic (Jinja template) and the deploy PR contains only image tag changes — both are structurally safe to merge without human review. This matches the reasoning behind Phase 16's app pipeline.
+### 2. `lm_praetor_create_agent` tool in `dean-mcp/praetor-mcp/server.py`
 
-If auto-merge is disabled or either PR fails CI, the endpoint returns a partial status with the PR URLs for manual completion.
-
-### Scaffold PR content (what the scaffold-worker generates)
-
-```
-agents/{name}/
-├── __init__.py
-├── agent.py          ← PydanticAI Agent, tools wired from `tools` param
-└── worker.py         ← Hatchet worker, event={event}, concurrency=1, retries=1
-
-Dockerfile.{name}-worker   ← copies from Dockerfile.coder-worker pattern
-
-# Patches to existing files:
-webhook-adapter/router.py      ← adds event → worker mapping
-.github/workflows/ci.yml       ← adds {name} to detect-changes component matrix
-k3s/apps/praetor/{name}/       ← deployment + service manifests (new dir in scaffold PR)
-```
-
-### Langfuse prompt creation
-
-Uses the Langfuse API to create a new prompt version:
+Expose the new endpoint as an MCP tool at the praetor-mcp server, following the same pattern as `lm_praetor_dispatch` and `lm_praetor_request_mcp`. This makes agent creation available from any OWU conversation.
 
 ```python
-langfuse.create_prompt(
-    name=f"{name}-system",
-    prompt=render_template("system_prompt.jinja", name=name, description=description, tools=tools),
-    labels=["production"],
-)
+def lm_praetor_create_agent(name: str, description: str, event: str, tools: list[str] = []) -> dict
 ```
 
-The template produces a prompt in the same style as `coder-system` and `research-system` — it's immediately editable in the Langfuse UI without a redeploy.
+### 3. Unit tests
 
-### Smoke test
-
-The smoke test dispatches:
-```python
-{"title": f"smoke-test-{name}", "description": "Verify the agent is reachable. Respond with OK.", "type": name}
-```
-to `agent:{name}` via Hatchet. A pass means the worker picked it up and returned a result within 60 seconds without erroring. The agent doesn't need to produce meaningful output — it just needs to not crash.
+Add tests in `tests/unit/test_agent_factory.py` covering:
+- Idempotent name check
+- Scaffold dispatch payload construction
+- Langfuse prompt name derivation
 
 ---
 
-## OpenWebUI flow (via praetor-mcp)
+## Deployment
 
-```
-User: "I need an agent that monitors Grafana alerts and creates Vikunja tasks"
+Both `praetor` (webhook-adapter) and `dean-mcp` (praetor-mcp) deploy via their existing CI pipelines. When you open PRs on those repos, CI builds images and opens deploy PRs on `k3s-dean-gitops`. Merge those deploy PRs to get the changes live.
 
-Model: calls lm_praetor_create_agent({
-    "name": "grafana-monitor",
-    "description": "Monitors Grafana webhook alerts. On alert: searches mem0 for known remediation, creates a Vikunja task with severity + runbook link.",
-    "event": "agent:grafana-monitor",
-    "tools": ["search_memory", "add_memory"]
-})
-
-Model: "Agent grafana-monitor is live. Hatchet event: agent:grafana-monitor.
-        System prompt at langfuse.amer.dev (grafana-monitor-system) — edit it to add
-        the actual alert logic. Smoke test: passed."
-```
+All secrets needed by new agents must be created in BWS first, then referenced in the scaffold template's ExternalSecret. Do not invent new secrets — use existing ones where the pattern already exists (e.g. `hatchet-worker-api-token`, `litellm-master-key`).
 
 ---
 
-## What Gets Added to `praetor-mcp`
+## Done when
 
-New tool exposed at `/mcp`:
-
-```
-lm_praetor_create_agent(name, description, event, tools=[]) → status dict
-```
-
-This makes agent creation available from any OpenWebUI conversation, identical to how `lm_praetor_dispatch` triggers tasks and `lm_praetor_request_mcp` registers MCP servers.
-
----
-
-## What Does NOT Get Built
-
-- **Tool implementation** — the scaffold produces stubs. The model or human still fills in the actual tool logic. The factory wires the harness; it doesn't write the domain-specific code.
-- **Eval dataset** — Phase 14 pattern (create eval dataset + baseline run) is not automated here. Phase 25 creates the agent and verifies it boots; ongoing quality tracking is a separate concern.
-- **Removing agents** — no `DELETE /api/v1/agent` in this phase. Teardown is a manual k3s + GitHub operation.
-
----
-
-## Ready Conditions
-
-1. `POST /api/v1/agent/create` with a valid name + description returns within 5 minutes with a running pod
-2. The new agent's Hatchet event (`agent:{name}`) is routable — dispatching to it reaches the correct worker
-3. Langfuse shows `{name}-system` prompt, editable without a redeploy
-4. Smoke test passes: the agent picks up the canary task and returns a result without crashing
-5. `lm_praetor_create_agent` tool available in OpenWebUI via praetor-mcp — agent creation works from a chat message
-6. A second call with the same `name` is idempotent: detects the existing agent, skips scaffold + deploy, returns current status
+1. `POST /api/v1/agent/create` with `name="phase25-canary"`, a description, and `event="agent:phase25-canary"` completes within 5 minutes and returns `smoke_test: "passed"`
+2. The new agent's k3s Deployment exists in the `praetor` namespace — pod is `Running`
+3. ArgoCD shows the `praetor` application as `Healthy` and `Synced`
+4. `lm_praetor_create_agent` is listed in the praetor-mcp tool manifest (`GET /mcp/tools`)
+5. praetor-mcp pod in k3s is `Running`, ArgoCD application is `Healthy` and `Synced`
+6. A second call with `name="phase25-canary"` is idempotent — returns current status, opens no new PRs
+7. `GET https://praetor.amer.dev/api/v1/agent/phase25-canary` returns the agent's registered state
