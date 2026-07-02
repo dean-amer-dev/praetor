@@ -55,7 +55,7 @@ class TestSecondaryRepoInjection:
 
     async def test_no_secondary_no_injection(self):
         prompt = await self._run_with_captured_prompt(_make_description("amerenda/ecdysis"))
-        assert "/tmp/secondary-scratch" not in prompt
+        assert "secondary-scratch" not in prompt
         assert "Secondary repos" not in prompt
 
     async def test_secondary_repo_injected(self):
@@ -63,7 +63,7 @@ class TestSecondaryRepoInjection:
             _make_description("amerenda/ecdysis", secondary=["amerenda/k3s-dean-gitops"])
         )
         assert "amerenda/k3s-dean-gitops" in prompt
-        assert "/tmp/secondary-scratch" in prompt
+        assert "secondary-scratch" in prompt
         assert "praetor-coder/task-99" in prompt
 
     async def test_multiple_secondary_repos_all_injected(self):
