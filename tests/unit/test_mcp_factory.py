@@ -523,6 +523,36 @@ class TestRegisterEndpoint:
         assert not any("clusterrolebinding" in p for p in paths)
 
 
+    def test_argocd_entry_not_duplicated_when_branch_exists(self, client):
+        """register_mcp must not append a second ArgoCD Application if it already exists in root-app.yaml."""
+        update_file_mock = AsyncMock()
+        existing_root = "content\n  name: app-test-mcp-server\n"  # entry already present
+
+        def get_file_side_effect(gh, token, path, branch):
+            if path == "root-app.yaml":
+                return existing_root, "sha-root"
+            return _MOCK_CM, "sha-cm"
+
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc123")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(side_effect=get_file_side_effect)),
+            patch("webhooks.mcp_factory._update_file", new=update_file_mock),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+        ):
+            resp = client.post("/api/v1/mcp/register", json=_minimal_reg(), headers=_auth())
+        assert resp.status_code == 200
+        # root-app.yaml must NOT have been updated (entry already present)
+        root_app_updates = [
+            call for call in update_file_mock.await_args_list if "root-app.yaml" in call.args[2]
+        ]
+        assert len(root_app_updates) == 0, "root-app.yaml must not be updated when ArgoCD entry already exists"
+
+
 class TestListEndpoint:
     def test_auth_required(self, client):
         resp = client.get("/api/v1/mcp")

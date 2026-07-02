@@ -844,14 +844,16 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
             if fname.endswith(".yaml") or fname.endswith(".yml"):
                 await _create_file(gh, token, path, content, message, branch)
 
-        # Create the ArgoCD application entry in root-app.yaml
+        # Create the ArgoCD application entry in root-app.yaml (idempotent)
         root_app, root_sha = await _get_file(gh, token, "root-app.yaml", branch)
-        await _update_file(
-            gh, token, "root-app.yaml",
-            root_app + _argocd_application_yaml(reg),
-            f"feat(mcp-factory): register {reg.name} in ArgoCD",
-            branch, root_sha,
-        )
+        argocd_entry = _argocd_application_yaml(reg)
+        if f"name: app-{reg.name}-server" not in root_app:
+            await _update_file(
+                gh, token, "root-app.yaml",
+                root_app + argocd_entry,
+                f"feat(mcp-factory): register {reg.name} in ArgoCD",
+                branch, root_sha,
+            )
 
     # Always upsert the LiteLLM configmap entry — idempotent, correct placement.
     cm_path = "apps/litellm/server/configmap.yaml"

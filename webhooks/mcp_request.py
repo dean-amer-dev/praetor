@@ -65,6 +65,7 @@ class McpResearchResult(BaseModel):
     port: int | None = None                  # container port (if known)
     requires_k8s_sa: bool = False            # needs in-cluster Kubernetes service account
     env_vars: dict[str, str] = {}            # non-secret env vars required by the server
+    env_secrets: dict[str, str] = {}         # {env_var_name: bws_secret_key} pairs
 
 
 class McpRequestResponse(BaseModel):
@@ -130,8 +131,14 @@ Return ONLY a JSON object with these exact fields:
   "notes": "<2-3 sentence summary of what you found or why nothing matched>",
   "port": <container port as integer, or null if unknown>,
   "requires_k8s_sa": <true if MCP needs in-cluster Kubernetes API access, otherwise false>,
-  "env_vars": <object of non-secret env var name→value pairs required by the server, or {}>
+  "env_vars": <object of non-secret env var name→value pairs, e.g. {"HOST":"0.0.0.0"}, or {}>,
+  "env_secrets": <object of {env_var_name: bws_secret_key} for secrets the server needs, e.g. {"API_TOKEN": "my-service-token"}, or {}>
 }
+
+For "env_secrets": if the capability description mentions a token, password, or credential needed by the server,
+extract it as {ENV_VAR_NAME: bws-secret-key}. Parse bws key from "from BWS <key>" or "BWS key: <key>" patterns.
+Example: if capability says "HOMEASSISTANT_TOKEN from BWS home-assistant-access-token", output:
+  "env_secrets": {"HOMEASSISTANT_TOKEN": "home-assistant-access-token"}
 
 IMPORTANT: Only return images you are certain exist on public container registries. \
 Do NOT guess or hallucinate image names — return null if you are not confident. \
@@ -181,6 +188,8 @@ async def _research_mcp(capability: str) -> McpResearchResult:
         data = json.loads(content)
         raw_env = data.get("env_vars") or {}
         env_vars = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
+        raw_secrets = data.get("env_secrets") or {}
+        env_secrets = {str(k): str(v) for k, v in raw_secrets.items()} if isinstance(raw_secrets, dict) else {}
         return McpResearchResult(
             found=bool(data.get("found", False)),
             confidence=float(data.get("confidence", 0.0)),
@@ -190,6 +199,7 @@ async def _research_mcp(capability: str) -> McpResearchResult:
             port=int(data["port"]) if data.get("port") else None,
             requires_k8s_sa=bool(data.get("requires_k8s_sa", False)),
             env_vars=env_vars,
+            env_secrets=env_secrets,
         )
     except Exception as exc:
         logger.error("failed to parse LLM research response: %s", exc)
@@ -214,6 +224,7 @@ async def _register_existing(research: McpResearchResult, req: McpRequest, api_k
         image=research.image,
         port=research.port or 8000,
         env_vars=research.env_vars,
+        env_secrets=research.env_secrets,
         service_account_name=sa_name,
         cluster_role=cluster_role,
     )
