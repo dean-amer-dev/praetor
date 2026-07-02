@@ -336,10 +336,13 @@ async def _get_or_create_pr(gh: str, token: str, title: str, body: str, head: st
         if resp.status_code == 200 and resp.json():
             return resp.json()[0]["html_url"]
 
+        # Branches are pushed directly to GITOPS_REPO, not a fork — head must use
+        # the repo org, not the GitHub App login (which is a different account).
+        org = GITOPS_REPO.split("/")[0]
         body_params = {
             "title": title,
             "body": body,
-            "head": f"{gh}:{head}",
+            "head": f"{org}:{head}",
             "base": "main",
             "draft": True,
         }
