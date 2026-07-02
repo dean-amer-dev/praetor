@@ -52,7 +52,7 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
     for item in scratch.iterdir():
         shutil.rmtree(item) if item.is_dir() else item.unlink()
 
-    secondary_scratch = Path("/tmp/secondary-scratch")
+    secondary_scratch = scratch / "secondary-scratch"
     secondary_scratch.mkdir(parents=True, exist_ok=True)
     for item in secondary_scratch.iterdir():
         shutil.rmtree(item) if item.is_dir() else item.unlink()
@@ -163,7 +163,7 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
         sec_lines = ["\nSecondary repos — also make changes here after finishing the primary repo:"]
         for sec in secondary_repos:
             safe = sec.replace("/", "-")
-            sec_dir = f"/tmp/secondary-scratch/{safe}"
+            sec_dir = str(secondary_scratch / safe)
             sec_lines.append(
                 f"- {sec}: clone into {sec_dir} using get_github_token(repo='{sec}'), "
                 f"create branch praetor-coder/task-{input.task_id}, make the relevant changes, "
