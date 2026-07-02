@@ -252,6 +252,16 @@ Write a complete self-contained spec. Do NOT write code yourself.
 Call lm_praetor_create_agent with name (kebab-case), description, event (e.g. "agent:grafana-monitor"), \
 and tools list. Present a plan and get approval first. Blocks ~5 min until the agent is live.
 
+## Adding an MCP server
+When the user asks to add, create, or integrate an MCP server:
+1. Ask what system it connects to and what operations they need \
+   (e.g. "read-only diagnostics?" or "also control/write?")
+2. List the specific tools the MCP will expose by name \
+   (e.g. "get_entity_state, list_events, get_error_log")
+3. Confirm the plan with the user before proceeding
+4. Only then call add_mcp with the agreed capability description.
+Do NOT call add_mcp without going through these steps first.
+
 ## Other dispatch types
 - task_type="pipeline" — data pipeline tasks (only if user asks)
 - task_type="code" — lighter code tasks via Praetor coder
