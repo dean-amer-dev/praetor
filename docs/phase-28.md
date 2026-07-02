@@ -1,253 +1,143 @@
 # Phase 28 — Control Plane UI
 
-**Goal:** A purpose-built React dashboard at `praetor.amer.dev` for platform operations — trigger agents, monitor live runs, watch OpenHands sessions, inspect dispatch state, edit prompts, run benchmarks, manage MCPs, and scaffold new components. Replaces tab-switching between Hatchet, Langfuse, and OpenWebUI for routine platform tasks.
+## You are implementing Phase 28 of the Praetor platform.
 
-## Pre-conditions
-
-- Phase 27 complete (voice dispatch working — all dispatch paths confirmed stable)
-- `POST /api/v1/dispatch` and `GET /api/v1/status/{task_id}` live
-- Benchmark runner from Phase 14 working (UI wraps existing backend)
-- Scaffold worker from Phase 11 working (UI wraps existing `agent:scaffold` event)
-- MCP factory from Phase 15 working (UI wraps `POST /api/v1/mcp/register`)
-- Phase 12 health check passing (platform must be fully verified before adding UI complexity)
-
-## Design Principles
-
-This is a **control plane**, not a chat interface. OpenWebUI (`bot.amer.dev`) stays for conversation. Praetor UI (`praetor.amer.dev`) is for platform operations only.
-
-Do not re-implement what Hatchet or Langfuse already do well. Link out to them for deep drill-downs.
-
-**Status and health data comes from direct REST API calls — never via MCP.** MCP is for LLM-to-tool calls. The UI hits the praetor API (and thin proxy endpoints) over HTTP directly, the same as any dashboard would.
-
-## Stack
-
-| Layer | Choice | Why |
-|-------|--------|-----|
-| Frontend | React + Vite | Already in stack (ecdysis uses React) |
-| Backend | FastAPI | Already in `praetor/webhooks/app.py` — extend with new router |
-| Auth | Existing amer.dev SSO | No new auth infra |
-
-New code lives in:
-- `praetor/ui/` — React app (built by CI → nginx serves static assets)
-- `praetor/webhooks/ui_api.py` — new FastAPI router for UI-specific endpoints, mounted on existing app
-
-## Feature Areas
-
-### Panel 1: Run Dashboard
-
-Unified live view of recent agent runs across Hatchet + Langfuse.
-
-```
-Last 20 runs                                          [auto-refresh: 10s]
-┌──────────┬──────────────────────────┬──────────┬──────────┬───────────┐
-│ Agent    │ Task                     │ Status   │ Duration │ Trace     │
-├──────────┼──────────────────────────┼──────────┼──────────┼───────────┤
-│ openhands│ Implement auth refresh   │ ● Live   │ 4m 12s   │ [Watch]   │
-│ coder    │ Fix null pointer #1233   │ ✓ Done   │ 8m 45s   │ [View]    │
-│ research │ Tailscale ACL research   │ ✓ Done   │ 3m 02s   │ [View]    │
-│ reviewer │ PR #88 review            │ ✗ Failed │ 1m 02s   │ [View]    │
-└──────────┴──────────────────────────┴──────────┴──────────┴───────────┘
-```
-
-Backend: `GET /api/ui/runs` — calls Hatchet API for recent workflow runs, merges with Langfuse trace IDs. "View" links go to `hatchet.amer.dev` or `langfuse.amer.dev`. "Watch" on live runs opens the OpenHands live view (Panel 2) or dispatch stream (Panel 3).
-
-Auto-refreshes every 10s.
+**You are allowed to merge PRs for this session.**
 
 ---
 
-### Panel 2: OpenHands Live View
+## Context
 
-When an `openhands` task is running, show what the agent is actually doing.
+You are working across `amerenda/praetor` (backend + React frontend) and `amerenda/k3s-dean-gitops` (k3s GitOps). The platform runs on a k3s cluster managed by ArgoCD. Secrets come exclusively from BWS. `praetor.amer.dev` is already an active ingress pointing to the webhook-adapter — you are adding a UI that sits behind the same domain.
 
-```
-OpenHands — task #1234 "Implement auth refresh"              [4m 12s]
-────────────────────────────────────────────────────────────────────────
-🔧 read_file: src/auth/token.py
-📝 edit_file: src/auth/token.py  (lines 42–67)
-🔧 run_shell: pytest tests/test_auth.py
-   → 3 passed, 1 failed (test_refresh_expired_token)
-📝 edit_file: src/auth/token.py  (line 55)
-🔧 run_shell: pytest tests/test_auth.py
-   → 4 passed
-🔧 run_shell: git diff --stat
-   → 2 files changed, 18 insertions(+), 4 deletions(-)
-⏳ Waiting for next action...
-────────────────────────────────────────────────────────────────────────
-[ Open in OpenHands ↗ ]    [ View Hatchet Run ↗ ]
-```
+### What already exists
 
-Backend: `GET /api/ui/openhands/{task_id}/events` — polls the OpenHands API for conversation history on the active conversation, returns the action log. The openhands worker stores the `conversation_id` in Mem0 at task-start; this endpoint retrieves it and proxies the OpenHands event stream.
+- `amerenda/praetor` — FastAPI webhook-adapter serving `praetor.amer.dev/api/` and `/webhooks/`
+- `GET /api/v1/mcp` — MCP registry
+- `POST /api/v1/mcp/register`, `DELETE /api/v1/mcp/{name}` — MCP factory
+- `GET /api/v1/status/{task_id}` — dispatch status (Mem0 + done flag)
+- `POST /api/v1/dispatch` — agent dispatch
+- `GET /api/v1/skills`, `GET /api/v1/agents` — skills API
+- `POST /api/v1/benchmark/run` — benchmark runner (Phase 14)
+- Hatchet at `https://hatchet.amer.dev`, Langfuse at `https://langfuse.amer.dev`
+- Kubernetes MCP registered in LiteLLM — agents can query k8s, but the UI must NOT use MCP for status; it calls APIs directly
 
-Frontend polls every 3s while status is live, stops when the worker writes its Mem0 completion summary.
+### What is missing
 
----
+There is no control plane UI. Operators must tab between Hatchet, Langfuse, curl commands, and OWU to do routine platform work. Phase 28 builds `praetor.amer.dev/` as a unified operations dashboard.
 
-### Panel 3: Dispatch Status Stream
+### Architecture principle: no MCP in the UI
 
-Live view of any in-flight dispatch — not just OpenHands.
-
-```
-Task #1235 — coder "Fix null pointer"                        [2m 30s]
-────────────────────────────────────────────────────────────────────────
-Hatchet run: abc123   [ View in Hatchet ↗ ]
-Mem0 summary: (pending — task still running)
-
-Last heartbeat: 12s ago
-────────────────────────────────────────────────────────────────────────
-```
-
-Backend: `GET /api/ui/status/{task_id}` — wraps the existing `GET /api/v1/status/{task_id}` (Mem0 poll) and adds the Hatchet run URL + elapsed time. Returns `{ task_id, done, mem0_summary, hatchet_url, elapsed_seconds, last_heartbeat }`.
-
-Frontend auto-polls every 5s while `done=false`.
+**MCP is for LLM-to-tool calls. The UI talks to REST APIs directly.** Pod health comes from the k8s API. Tool counts come from LiteLLM. Run history comes from Hatchet. OpenHands session state comes from the OpenHands API. All aggregation happens server-side in `webhooks/ui_api.py` — the React frontend gets single merged responses.
 
 ---
 
-### Panel 4: Trigger Panel
+## Your constraints
 
-Dispatch any agent without opening Vikunja or crafting a curl command.
+**GitOps only.** All k3s manifest changes go through `k3s-dean-gitops` PRs. No `kubectl apply`. The new `praetor-ui` component deploys the same way every other praetor component does — CI builds the image, opens a deploy PR, you merge it, ArgoCD syncs.
 
-```
-Agent type: [ openhands ▾ ]
-Repo:       [ amerenda/praetor ]
-Title:      [ Fix null pointer in token refresh ]
-Description:
-  ┌─────────────────────────────────────────────┐
-  │ The token refresh handler throws a NPE when │
-  │ the refresh token is expired. See #88.      │
-  └─────────────────────────────────────────────┘
-[ Trigger → ]
-```
+**BWS is the single source of truth for all secrets.** The React app has no secrets. The `ui_api.py` backend uses secrets already available in the webhook-adapter pod (`LITELLM_API_KEY`, `PRAETOR_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `HATCHET_CLIENT_TOKEN`). No new BWS secrets needed unless a new dependency is introduced.
 
-Posts to `POST /api/v1/dispatch`. Response shows task_id and links to Hatchet run. New run appears in Run Dashboard within 10s.
+**No secrets in Git.** No API keys, tokens, or passwords in any committed file.
+
+**Ansible-playbooks for infrastructure only.** This phase requires no host-level changes.
 
 ---
 
-### Panel 5: MCP Registry
+## What to build
 
-View and manage registered MCPs. Health status comes from a direct k8s API call, tool count from LiteLLM — not via MCP.
+### 1. `praetor/webhooks/ui_api.py` — new FastAPI router
+
+Mount at `/api/ui/` in `webhooks/app.py`. All endpoints require the same `PRAETOR_API_KEY` bearer auth as the rest of the API.
 
 ```
-Registered MCPs                                       [+ Register MCP]
-┌──────────────────────┬──────────┬──────────┬────────────────────────┐
-│ Name                 │ Status   │ Tools    │ Actions                │
-├──────────────────────┼──────────┼──────────┼────────────────────────┤
-│ mcp-searxng          │ ✓ Running│ 3        │ [History] [Remove]     │
-│ github-mcp           │ ✓ Running│ 12       │ [History] [Remove]     │
-│ kubernetes-readonly  │ ✓ Running│ 8        │ [History] [Remove]     │
-│ kubernetes-rw        │ ⚠ Pending│ —        │ [History] [Remove]     │
-└──────────────────────┴──────────┴──────────┴────────────────────────┘
+GET  /api/ui/runs                        last 20 Hatchet workflow runs + Langfuse trace IDs
+GET  /api/ui/status/{task_id}            dispatch status + Hatchet run URL + elapsed_seconds
+GET  /api/ui/openhands/{task_id}/events  OpenHands conversation action log (live poll)
+GET  /api/ui/mcp                         MCP registry + k8s pod phase + LiteLLM tool count
+GET  /api/ui/prompts                     Langfuse prompt list (proxied)
+POST /api/ui/benchmark                   dispatch benchmark suite, SSE progress stream
+POST /api/ui/scaffold                    dispatch scaffold worker
 ```
 
-Backend: `GET /api/ui/mcp` — aggregates:
-- Registry entries from `GET /api/v1/mcp` (name, image, pr_url)
-- Pod phase from k8s API (`GET /api/v1/namespaces/mcp-{name}/pods`) — returns Running / Pending / Failed
-- Tool count from LiteLLM `GET /mcp/{name}/tools`
+**`GET /api/ui/mcp`** aggregates server-side:
+- Registry entries from the existing `_load_registry()` function
+- Pod phase: `GET {K8S_API}/api/v1/namespaces/mcp-{name}/pods` using the in-cluster service account token
+- Tool count: `GET {LITELLM_BASE}/mcp/{name}/tools` (returns list of tool names)
 
-All three calls happen server-side in `ui_api.py`; the frontend gets a single merged response. Register form posts to `POST /api/v1/mcp/register`.
+Returns one merged list per MCP entry: `{ name, image, status (Running/Pending/Failed/Unknown), tool_count, pr_url, registered_at }`
+
+**`GET /api/ui/openhands/{task_id}/events`** — reads `conversation_id` from Mem0 under key `openhands-{task_id}-conversation`, then proxies the OpenHands conversation history. Returns ordered list of `{ type, tool, args, result, timestamp }` entries. If no conversation_id is found, returns `{ events: [], status: "no_session" }`.
+
+**`GET /api/ui/status/{task_id}`** — wraps the existing `_poll_mem0` call, adds `hatchet_url`, `elapsed_seconds`, `started_at` (from Mem0 write timestamp if available).
+
+### 2. OpenHands worker change: store `conversation_id` at task-start
+
+In `agents/openhands/worker.py`, immediately after creating the OpenHands conversation and before submitting the task, write to Mem0:
+
+```python
+await _add_memory(
+    f"openhands-{task_id}-conversation",
+    f"conversation_id: {conversation_id}",
+    agent_id="openhands",
+)
+```
+
+This is the only backend change needed to unlock the live view. It is a one-line addition.
+
+### 3. `praetor/ui/` — React + Vite frontend
+
+Tech: React, Vite, Tailwind (or plain CSS — keep it minimal). Build output: `dist/` served by nginx.
+
+**8 panels:**
+
+1. **Run Dashboard** — table of last 20 runs from `GET /api/ui/runs`. Columns: agent, task title, status (● Live / ✓ Done / ✗ Failed), duration, [Watch] or [View] link. Live runs have a [Watch] link that opens Panel 2. Auto-refreshes every 10s.
+
+2. **OpenHands Live View** — polls `GET /api/ui/openhands/{task_id}/events` every 3s. Shows each action as it arrives (tool name, args summary, result snippet). Stops polling when `done=true` from the status endpoint. Shows elapsed time.
+
+3. **Dispatch Status Stream** — polls `GET /api/ui/status/{task_id}` every 5s. Shows Hatchet run URL, elapsed time, Mem0 summary when done.
+
+4. **Trigger Panel** — form that POSTs to `POST /api/v1/dispatch`. Fields: agent type dropdown (openhands, code, research, pipeline), repo (optional), title, description. On submit: shows returned task_id and link to Hatchet.
+
+5. **MCP Registry** — table from `GET /api/ui/mcp`. Columns: name, status badge (Running/Pending/Failed), tool count, [History] and [Remove] buttons. [+ Register MCP] button opens a form that POSTs to `POST /api/v1/mcp/register`.
+
+6. **Prompt Quick-Edit** — table from `GET /api/ui/prompts`. Columns: name, version, last modified. [Open in Langfuse ↗] button per row.
+
+7. **Benchmark Runner** — form: dataset dropdown, model dropdown, prompt dropdown. Submit POSTs to `POST /api/ui/benchmark`. SSE stream shows progress `[N/total]` and final mean score. [View in Langfuse ↗] link on completion.
+
+8. **Scaffold Form** — form: type dropdown (agent, mcp), name, description. Submit POSTs to `POST /api/ui/scaffold`. Shows returned task_id and Hatchet link.
+
+### 4. `Dockerfile.praetor-ui`
+
+Multi-stage build: Node build stage → nginx:alpine serve stage. Nginx config serves the Vite `dist/` output at `/`, proxying nothing (the React app calls `praetor.amer.dev/api/` directly).
+
+### 5. CI + k3s manifests
+
+Add `praetor-ui` to the `detect-changes` matrix in `build.yaml`. CI builds the image and opens a deploy PR on `k3s-dean-gitops` adding `apps/praetor/praetor-ui/deployment.yaml` + `service.yaml`.
+
+Update the existing `praetor.amer.dev` ingress to route:
+- `/ → praetor-ui` Service (nginx)
+- `/api/ → webhook-adapter` Service (existing)
+- `/webhooks/ → webhook-adapter` Service (existing)
 
 ---
-
-### Panel 6: Prompt Quick-Edit
-
-Lists current production prompts from Langfuse.
-
-```
-Prompts
-┌─────────────────────┬─────────┬────────────────┐
-│ Name                │ Version │ Last modified  │
-├─────────────────────┼─────────┼────────────────┤
-│ coder-system        │ v4      │ 2026-06-15     │
-│ research-system     │ v3      │ 2026-06-10     │
-│ reviewer-system     │ v2      │ 2026-06-01     │
-│ scaffold-system     │ v1      │ 2026-06-18     │
-└─────────────────────┴─────────┴────────────────┘
-[ Open in Langfuse ↗ ]
-```
-
-Backend: `GET /api/ui/prompts` proxies `GET /api/public/prompts` from the Langfuse API.
-
----
-
-### Panel 7: Benchmark Runner
-
-Run eval datasets from the UI without the CLI script (Phase 14 backend is reused).
-
-```
-Dataset:  [ research-eval ▾ ]    (5 items)
-Model:    [ qwen3-35b ▾ ]
-Prompt:   [ research-system:v3 ▾ ]
-[ Run Benchmark → ]
-
-Running... [3/5] ██████░░░░ 60%
-
-Results:
-  Mean score: 0.87
-  Min score:  0.72
-  [ View in Langfuse ↗ ]
-```
-
-Backend: `POST /api/ui/benchmark` — dispatches N `agent:benchmark` Hatchet events, streams progress via SSE.
-
----
-
-### Panel 8: Scaffold Form
-
-Form-based scaffold for new agents and MCP servers.
-
-```
-Type:  [ Agent ▾ ]
-Name:  [ grafana-monitor ]
-Description:
-  ┌─────────────────────────────────────────┐
-  │ Monitors Grafana alerts and creates     │
-  │ Vikunja tasks when alerts fire.         │
-  └─────────────────────────────────────────┘
-[ Scaffold → ]
-```
-
-Backend: `POST /api/ui/scaffold` — calls `POST /api/v1/dispatch` with `type=scaffold`.
-
----
-
-## New Backend Endpoints (`webhooks/ui_api.py`)
-
-All endpoints are authenticated (same PRAETOR_API_KEY bearer auth as the rest of the API). These are thin aggregators — they call existing internal APIs and merge the results; no new storage.
-
-```
-GET  /api/ui/runs                    recent Hatchet runs merged with Langfuse trace IDs
-GET  /api/ui/status/{task_id}        dispatch status + Hatchet URL + elapsed time
-GET  /api/ui/openhands/{task_id}/events  OpenHands conversation event log for live tasks
-GET  /api/ui/mcp                     MCP registry + pod health + tool counts
-GET  /api/ui/prompts                 Langfuse prompt list (proxied)
-POST /api/ui/benchmark               dispatch benchmark suite, SSE progress stream
-POST /api/ui/scaffold                dispatch scaffold worker
-```
-
-## OpenHands conversation_id tracking
-
-The openhands worker currently does not persist the OpenHands `conversation_id` anywhere the UI can retrieve it. For Panel 2 to work, `agents/openhands/worker.py` needs one change: write `conversation_id` to Mem0 at task-start (before the agent runs), under the key `"openhands-{task_id}-conversation"`. The `GET /api/ui/openhands/{task_id}/events` endpoint then reads it from Mem0 and proxies the OpenHands API.
 
 ## Deployment
 
-New component in `praetor` repo: `praetor-ui`.
+1. PR on `amerenda/praetor` — all code changes (ui_api.py, openhands worker, Dockerfile.praetor-ui, CI matrix update) → CI builds two images (webhook-adapter + praetor-ui) → opens deploy PR on `k3s-dean-gitops` → merge → ArgoCD syncs
+2. Verify ingress routing is correct before marking done
 
-CI adds a build step for the `praetor-ui` image (nginx serving React static assets).
+---
 
-**k3s manifests:** Add `praetor-ui` Deployment + Service via app-factory. Existing `praetor.amer.dev` ingress routes:
-- `/` → praetor-ui (nginx)
-- `/api/` → webhook-adapter (FastAPI)
-- `/webhooks/` → webhook-adapter (FastAPI, existing)
+## Done when
 
-## Phase 28 Ready Conditions
-
-1. `https://praetor.amer.dev` loads the control plane UI (requires auth)
-2. Run Dashboard shows last 20 runs, auto-refreshing every 10s
-3. Live OpenHands run: clicking [Watch] shows real-time action log polling every 3s
-4. Dispatch status stream: `GET /api/ui/status/{task_id}` returns Hatchet URL + elapsed time
-5. Trigger Panel: dispatch `type=openhands` → run appears in Run Dashboard within 10s
-6. MCP Registry: lists all registered MCPs with actual pod phase and tool count (from k8s + LiteLLM directly, not via MCP)
-7. Prompt Quick-Edit: lists all Langfuse prompts with correct versions
-8. Benchmark Runner: 5-item eval suite completes and shows mean score inline
-9. Scaffold Form: submit agent scaffold → draft PR opens on `amerenda/praetor` within 3 minutes
-10. All existing webhook paths (`/webhooks/vikunja`, `/webhooks/github`, `/api/v1/dispatch`) still work
-11. `praetor-ui` pod Running, multi-arch image built by CI
+1. `https://praetor.amer.dev` loads the control plane dashboard (auth via existing amer.dev SSO if wired, otherwise PRAETOR_API_KEY bearer in the React Valves)
+2. Run Dashboard shows last 20 runs, auto-refreshes every 10s
+3. Live OpenHands run: [Watch] shows real-time action log, polls every 3s
+4. `GET /api/ui/status/{task_id}` returns `hatchet_url` and `elapsed_seconds` alongside the existing fields
+5. MCP Registry shows actual pod phase (Running/Pending/etc.) — not the static "pending" from the registry — and tool count
+6. Trigger Panel: dispatching `type=research` creates a Hatchet run visible in the Run Dashboard within 10s
+7. `praetor-ui` pod in k3s namespace is `Running`
+8. `webhook-adapter` pod in k3s namespace is `Running` (with openhands conversation_id change)
+9. ArgoCD shows `praetor` application as `Healthy` and `Synced`
+10. All existing webhook paths (`/webhooks/vikunja`, `/webhooks/github`, `/api/v1/dispatch`) continue to work — regression test a dispatch call after deploy
