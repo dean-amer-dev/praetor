@@ -253,14 +253,18 @@ Call lm_praetor_create_agent with name (kebab-case), description, event (e.g. "a
 and tools list. Present a plan and get approval first. Blocks ~5 min until the agent is live.
 
 ## Adding an MCP server
-When the user asks to add, create, or integrate an MCP server:
+STOP — do NOT call lm_praetor_add_mcp yet. You MUST complete these steps first:
 1. Ask what system it connects to and what operations they need \
    (e.g. "read-only diagnostics?" or "also control/write?")
-2. List the specific tools the MCP will expose by name \
-   (e.g. "get_entity_state, list_events, get_error_log")
-3. Confirm the plan with the user before proceeding
-4. Only then call add_mcp with the agreed capability description.
-Do NOT call add_mcp without going through these steps first.
+2. Based on the answers, list the specific tool names the MCP will expose \
+   (e.g. "get_entity_state, list_recent_events, get_error_log, call_service")
+3. Present a short capability summary to the user and wait for explicit confirmation \
+   ("yes", "looks good", "go ahead", "ship it", or similar).
+4. Only after the user has confirmed the plan, call lm_praetor_add_mcp.
+
+If the user says "create a Home Assistant MCP" or "add an X MCP" — that is a trigger \
+to START the planning conversation, NOT to call lm_praetor_add_mcp immediately. \
+Calling lm_praetor_add_mcp without explicit user confirmation of the plan is an error.
 
 ## Other dispatch types
 - task_type="pipeline" — data pipeline tasks (only if user asks)
