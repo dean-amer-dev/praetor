@@ -31,7 +31,8 @@ class FeaturePipelineInput(BaseModel):
 
 
 def _parse_features(spec: dict) -> list[str]:
-    return spec.get("app", {}).get("features", [])
+    app = spec.get("app", {})
+    return app.get("features") or app.get("changes") or []
 
 
 def _feature_prompt(spec: dict, feature: str, index: int, total: int, task_id: int) -> str:
@@ -97,7 +98,7 @@ async def _run_feature_pipeline(input: FeaturePipelineInput, context: Context) -
 
     features = _parse_features(spec)
     if not features:
-        raise ValueError(f"spec for task {input.task_id} has no app.features list")
+        raise ValueError(f"spec for task {input.task_id} has no app.features or app.changes list")
 
     task_agent_id = f"task-{input.task_id}"
     request_limit = spec.get("dispatch", {}).get("request_limit", 50)

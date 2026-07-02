@@ -221,7 +221,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY common/ common/
-COPY agents/ agents/
+COPY agents/{name}/ agents/{name_py}/
 RUN mkdir -p /scratch && chown appuser:appuser /scratch
 ENV PYTHONUNBUFFERED=1
 ENV SCRATCH_DIR=/scratch
@@ -255,7 +255,7 @@ def _deployment_yaml(name: str, image_tag: str) -> str:
         f"  name: praetor-{name}-worker\n"
         f"  namespace: praetor\n"
         f"spec:\n"
-        f"  replicas: 1\n"
+        f"  replicas: 0\n"
         f"  selector:\n"
         f"    matchLabels:\n"
         f"      app: praetor-{name}-worker\n"
@@ -319,6 +319,72 @@ def _deployment_yaml(name: str, image_tag: str) -> str:
     )
 
 
+def _argocd_app_yaml(name: str) -> str:
+    return (
+        f"---\n"
+        f"# Application: praetor {name} worker (agent-factory managed)\n"
+        f"apiVersion: argoproj.io/v1alpha1\n"
+        f"kind: Application\n"
+        f"metadata:\n"
+        f"  name: app-praetor-{name}-worker\n"
+        f"  namespace: default\n"
+        f"  annotations:\n"
+        f"    argocd.argoproj.io/sync-wave: \"5\"\n"
+        f"  finalizers:\n"
+        f"    - resources-finalizer.argocd.argoproj.io/background\n"
+        f"spec:\n"
+        f"  project: application\n"
+        f"  source:\n"
+        f"    repoURL: https://github.com/amerenda/k3s-dean-gitops.git\n"
+        f"    targetRevision: main\n"
+        f"    path: apps/praetor/{name}-worker\n"
+        f"  destination:\n"
+        f"    server: https://kubernetes.default.svc\n"
+        f"    namespace: praetor\n"
+        f"  syncPolicy:\n"
+        f"    automated:\n"
+        f"      prune: true\n"
+        f"      selfHeal: true\n"
+        f"    syncOptions:\n"
+        f"      - CreateNamespace=true\n"
+        f"      - PrunePropagationPolicy=foreground\n"
+        f"    retry:\n"
+        f"      limit: 5\n"
+        f"      backoff:\n"
+        f"        duration: 5s\n"
+        f"        factor: 2\n"
+        f"        maxDuration: 3m\n"
+    )
+
+
+
+def _scaled_object_yaml(name: str, task_name: str) -> str:
+    hatchet_api_base_url = os.environ.get("HATCHET_API_BASE_URL", "")
+    url = f"{hatchet_api_base_url}/task-stats?taskNames={task_name}"
+    value_location = f"{task_name}.queued.total"
+    return (
+        f"apiVersion: keda.sh/v1alpha1\n"
+        f"kind: ScaledObject\n"
+        f"metadata:\n"
+        f"  name: praetor-{name}-worker-scaledobject\n"
+        f"  namespace: praetor\n"
+        f"spec:\n"
+        f"  scaleTargetRef:\n"
+        f"    name: praetor-{name}-worker\n"
+        f"  minReplicaCount: 0\n"
+        f"  maxReplicaCount: 3\n"
+        f"  cooldownPeriod: 120\n"
+        f"  pollingInterval: 15\n"
+        f"  triggers:\n"
+        f"    - type: metrics-api\n"
+        f"      authenticationRef:\n"
+        f"        name: hatchet-api-auth\n"
+        f"        kind: ClusterTriggerAuthentication\n"
+        f"      metadata:\n"
+        f'        url: "{url}"\n'
+        f'        valueLocation: "{value_location}"\n'
+        f'        authMode: "bearer"\n'
+    )
 def _externalsecret_yaml(name: str, include_coder_creds: bool = False) -> str:
     secret_name = f"praetor-{name}-secrets"
     keys = list(_BASE_SECRET_KEYS)
@@ -433,6 +499,44 @@ async def _create_file(
     resp.raise_for_status()
 
 
+async def _get_file(
+    client: httpx.AsyncClient, token: str, repo: str, path: str, branch: str = "main"
+) -> tuple[str, str]:
+    """Return (decoded_content, sha) for a file in the repo."""
+    resp = await client.get(
+        f"{GITHUB_API}/repos/{repo}/contents/{path}",
+        headers=_gh_headers(token),
+        params={"ref": branch},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    content = base64.b64decode(data["content"].replace("\n", "")).decode()
+    return content, data["sha"]
+
+
+async def _update_file(
+    client: httpx.AsyncClient,
+    token: str,
+    repo: str,
+    path: str,
+    content: str,
+    message: str,
+    branch: str,
+    file_sha: str,
+) -> None:
+    resp = await client.put(
+        f"{GITHUB_API}/repos/{repo}/contents/{path}",
+        headers=_gh_headers(token),
+        json={
+            "message": message,
+            "content": base64.b64encode(content.encode()).decode(),
+            "sha": file_sha,
+            "branch": branch,
+        },
+    )
+    resp.raise_for_status()
+
+
 async def _create_pr(
     client: httpx.AsyncClient, token: str, repo: str, title: str, body: str, head: str
 ) -> str:
@@ -445,16 +549,44 @@ async def _create_pr(
     return resp.json()["html_url"]
 
 
+async def _get_pr_node_id(
+    client: httpx.AsyncClient, token: str, repo: str, pr_number: int
+) -> str:
+    resp = await client.get(
+        f"{GITHUB_API}/repos/{repo}/pulls/{pr_number}",
+        headers=_gh_headers(token),
+    )
+    resp.raise_for_status()
+    return resp.json()["node_id"]
+
+
 async def _merge_pr(
     client: httpx.AsyncClient, token: str, repo: str, pr_number: int, merge_method: str = "squash"
 ) -> str:
+    """Merge a PR via GraphQL (REST merge endpoint returns 404 for GitHub App tokens)."""
+    node_id = await _get_pr_node_id(client, token, repo, pr_number)
+    gql_method = merge_method.upper()
     resp = await client.post(
-        f"{GITHUB_API}/repos/{repo}/pulls/{pr_number}/merge",
+        f"{GITHUB_API}/graphql",
         headers=_gh_headers(token),
-        json={"merge_method": merge_method},
+        json={
+            "query": (
+                f'mutation {{ mergePullRequest(input: {{pullRequestId: "{node_id}", '
+                f"mergeMethod: {gql_method}}}) "
+                f"{{ pullRequest {{ mergeCommit {{ oid }} }} }} }}"
+            )
+        },
     )
     resp.raise_for_status()
-    return resp.json()["sha"]
+    data = resp.json()
+    if "errors" in data:
+        raise httpx.HTTPStatusError(
+            f"GraphQL merge failed: {data['errors']}",
+            request=resp.request,
+            response=resp,
+        )
+    oid = data["data"]["mergePullRequest"]["pullRequest"]["mergeCommit"]["oid"]
+    return oid
 
 
 # ---------------------------------------------------------------------------
@@ -519,11 +651,19 @@ async def _wait_for_pr_ci(
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        resp = await client.get(
-            f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/check-runs",
-            headers=_gh_headers(token),
-        )
-        resp.raise_for_status()
+        try:
+            resp = await client.get(
+                f"{GITHUB_API}/repos/{repo}/commits/{head_sha}/check-runs",
+                headers=_gh_headers(token),
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                # GitHub App lacks checks:read — wait 90s for CI to likely complete, then proceed
+                logger.warning("checks:read permission missing on GitHub App — waiting 90s for CI then proceeding")
+                await asyncio.sleep(90)
+                return True
+            raise
         runs = resp.json().get("check_runs", [])
         if runs and all(r["status"] == "completed" for r in runs):
             return all(r["conclusion"] == "success" for r in runs)
@@ -536,14 +676,22 @@ async def _wait_for_ci_run_complete(
 ) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        resp = await client.get(
-            f"{GITHUB_API}/repos/{PRAETOR_REPO}/actions/runs",
-            params={"head_sha": merge_sha, "per_page": 5},
-            headers=_gh_headers(token),
-        )
-        for run in resp.json().get("workflow_runs", []):
-            if run["name"] == "Build and Deploy" and run["status"] == "completed":
-                return run["conclusion"] == "success"
+        try:
+            resp = await client.get(
+                f"{GITHUB_API}/repos/{PRAETOR_REPO}/actions/runs",
+                params={"head_sha": merge_sha, "per_page": 5},
+                headers=_gh_headers(token),
+            )
+            if resp.status_code == 403:
+                # GitHub App lacks actions:read — wait remaining timeout as fixed delay
+                logger.warning("actions:read permission missing on GitHub App — waiting for image build timeout")
+                await asyncio.sleep(min(timeout, 240))
+                return True
+            for run in resp.json().get("workflow_runs", []):
+                if run["name"] == "Build and Deploy" and run["status"] == "completed":
+                    return run["conclusion"] == "success"
+        except Exception as exc:
+            logger.warning("_wait_for_ci_run_complete error: %s", exc)
         await asyncio.sleep(15)
     return False
 
@@ -719,17 +867,39 @@ async def create_agent(req: AgentCreateRequest) -> AgentCreateResponse:
         )
         await _create_file(
             gh, token, GITOPS_REPO,
+            f"apps/praetor/{req.name}-worker/scaledobject.yaml",
+            _scaled_object_yaml(req.name, req.name),
+            f"feat(agent-factory): add {req.name} ScaledObject (KEDA)",
+            manifest_branch,
+        )
+        await _create_file(
+            gh, token, GITOPS_REPO,
             f"apps/praetor/{req.name}-worker/externalsecret.yaml",
             _externalsecret_yaml(req.name, req.include_coder_creds),
             f"feat(agent-factory): add {req.name} externalsecret",
             manifest_branch,
         )
+        # Patch root-app.yaml to add ArgoCD Application entry (idempotent)
+        root_app_path = "root-app.yaml"
+        root_app_content, root_app_sha = await _get_file(
+            gh, token, GITOPS_REPO, root_app_path, manifest_branch
+        )
+        argocd_app_block = _argocd_app_yaml(req.name)
+        app_marker = f"app-praetor-{req.name}-worker"
+        if app_marker not in root_app_content:
+            updated_root = root_app_content.rstrip("\n") + "\n" + argocd_app_block
+            await _update_file(
+                gh, token, GITOPS_REPO, root_app_path, updated_root,
+                f"feat(agent-factory): register ArgoCD app for {req.name}",
+                manifest_branch, root_app_sha,
+            )
         manifest_pr_url = await _create_pr(
             gh, token, GITOPS_REPO,
             f"feat(agent-factory): deploy {req.name} agent",
             (
                 f"Gitops manifest for `praetor-{req.name}-worker`.\n\n"
-                f"Image: `amerenda/praetor-{req.name}:{image_tag}`"
+                f"Image: `amerenda/praetor-{req.name}:{image_tag}`\n\n"
+                f"Adds deployment, externalsecret, and ArgoCD Application to root-app.yaml."
             ),
             manifest_branch,
         )

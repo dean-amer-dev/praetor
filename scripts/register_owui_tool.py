@@ -18,15 +18,21 @@ What it does:
        - function_calling=native
        - toolIds: ["praetor_dispatch", "server:mcp:lm"]
        - minimal behavioral system prompt (date line comes from the filter)
-  4. server:mcp:lm (LiteLLM MCP Gateway) is registered by OWU's MCP server config, not here.
+  4. Ensures the praetor-planner OWU custom model exists with:
+       - function_calling=native, base_model=qwen3-35b-think
+       - toolIds: ["server:mcp:lm"]
+       - system prompt fetched dynamically from Langfuse ("planner-system", production)
+  5. server:mcp:lm (LiteLLM MCP Gateway) is registered by OWU's MCP server config, not here.
      This script just ensures the model's toolIds reference it.
 
-LiteLLM MCP tools exposed via server:mcp:lm (as of 2026-06-24):
+LiteLLM MCP tools exposed via server:mcp:lm (as of 2026-06-25):
   web_search, web_read_url,
   infra_scaffold, infra_provision, infra_deploy_pr, infra_add_runner,
   infra_check_secrets, infra_app_status, infra_resolve_secret,
   github_ls, github_read, github_search, github_prs, github_pr_diff,
-  github_commits, github_tree
+  github_commits, github_tree,
+  praetor_dispatch, praetor_create_agent, praetor_create_app, praetor_add_mcp,
+  praetor_status, praetor_memory_search, praetor_execute_spec
 """
 from __future__ import annotations
 
@@ -77,10 +83,11 @@ class Tools:
     def dispatch_task(self, title: str, description: str, task_type: str) -> str:
         """
         Dispatch a background agent task.
-        task_type: openhands | code | pipeline
+        task_type: openhands | code | pipeline | research
         - openhands: autonomous coding agent — use for ALL code tasks (implement, fix, modify files, open PRs)
         - code: lighter code tasks via Praetor coder
         - pipeline: data pipeline tasks
+        - research: deep multi-step autonomous research (ONLY when user says "deep research" or "research task" — NOT for simple questions, use web_search for those)
         Include \'repo: owner/name\' in description for code tasks.
         Returns task_id and confirmation.
         """
@@ -217,18 +224,32 @@ class Filter:
 CUSTOM_MODEL_ID = "qwen3-35b-think-custom"
 CUSTOM_MODEL_NAME = "murderbot-v0"
 BASE_MODEL_ID = "qwen3-35b-think"
+PLANNER_MODEL_ID = "praetor-planner"
+PLANNER_MODEL_NAME = "praetor-planner"
 
 SYSTEM_PROMPT = """\
 You are a helpful personal assistant with access to web search, GitHub, infrastructure, \
-Praetor agent dispatch, and agent skills management tools.
+Praetor agent dispatch, agent factory tools, and agent skills management tools.
 
 ## Research / information questions
-Call web_search immediately. Read pages with web_read_url as needed. \
-Answer directly — never dispatch for research.
+Use web_search + web_read_url. Do NOT dispatch anything.
+Examples: "research X", "look up X", "what is X", "find info on X", "how do I X".
+HARD LIMIT: After 6 tool calls total, you MUST stop calling tools and write your answer. \
+Do not call another tool after 6. Write the answer with what you have.
+Never re-fetch a URL already read in this conversation.
+
+## Deep / autonomous research (multi-step, takes minutes)
+ONLY when the user explicitly says "deep research", "research task", or "run a research agent":
+call dispatch_task with task_type="research". Describe the research objective in detail.
+Do NOT use task_type="research" for anything else.
 
 ## Coding tasks (implement, fix bugs, modify files, open PRs)
 Call dispatch_task with task_type="openhands". Include "repo: owner/name" in description. \
 Write a complete self-contained spec. Do NOT write code yourself.
+
+## Creating a new Praetor agent
+Call lm_praetor_create_agent with name (kebab-case), description, event (e.g. "agent:grafana-monitor"), \
+and tools list. Present a plan and get approval first. Blocks ~5 min until the agent is live.
 
 ## Other dispatch types
 - task_type="pipeline" — data pipeline tasks (only if user asks)
@@ -347,6 +368,63 @@ def ensure_custom_model(client: httpx.Client) -> None:
         print(f"Custom model '{CUSTOM_MODEL_ID}' updated (toolIds now include server:mcp:lm)")
 
 
+def _fetch_langfuse_prompt(client: httpx.Client) -> str:
+    """Fetch planner system prompt from Langfuse production version.
+
+    Reads credentials from env: LANGFUSE_HOST, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY.
+    Returns empty string on failure (model will have no system prompt).
+    """
+    try:
+        from langfuse import Langfuse
+        lf = Langfuse()  # reads LANGFUSE_HOST, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY from env
+        prompt = lf.get_prompt("planner-system", label="production")
+        return prompt.prompt if hasattr(prompt, "prompt") else str(prompt)
+    except Exception as exc:
+        print(f"Warning: could not fetch planner system prompt from Langfuse: {exc}", file=sys.stderr)
+        return ""
+
+
+def ensure_planner_model(client: httpx.Client) -> None:
+    """Ensure the praetor-planner OWU custom model exists."""
+    resp = client.get(f"/api/v1/models/model?id={PLANNER_MODEL_ID}")
+    existing = resp.json() if resp.status_code == 200 else None
+
+    # Fetch system prompt from Langfuse (may be empty string on failure)
+    system_prompt = _fetch_langfuse_prompt(client)
+
+    model_payload = {
+        "id": PLANNER_MODEL_ID,
+        "name": PLANNER_MODEL_NAME,
+        "base_model_id": BASE_MODEL_ID,
+        "params": {"function_calling": "native"},
+        "meta": {
+            "profile_image_url": "",
+            "description": "Praetor Planner — translates requests to TOML specs and dispatches",
+            "capabilities": {
+                "vision": False, "usage": False, "citations": False,
+                "memory": False, "builtin_tools": True,
+            },
+            "builtinTools": {
+                "chats": False, "calendar": False, "tasks": False, "memory": False,
+                "notes": False, "channels": False, "web_search": False,
+                "automations": False, "image_generation": False,
+                "code_interpreter": False, "time": False, "knowledge": False,
+            },
+            # server:mcp:lm provides lm_praetor_memory_search and praetor_execute_spec
+            "toolIds": ["server:mcp:lm"],
+            "system": system_prompt,
+        },
+        "is_active": True,
+        "access_grants": [],
+    }
+
+    if existing is None:
+        client.post("/api/v1/models/create", json=model_payload).raise_for_status()
+        print(f"Created planner model '{PLANNER_MODEL_ID}'")
+    else:
+        client.post("/api/v1/models/model/update", json=model_payload).raise_for_status()
+        print(f"Planner model '{PLANNER_MODEL_ID}' updated")
+
 def main() -> None:
     if not OWUI_ADMIN_PASSWORD:
         print("Error: OWUI_ADMIN_PASSWORD not set", file=sys.stderr)
@@ -358,6 +436,7 @@ def main() -> None:
         ensure_tool(client)
         ensure_filter(client)
         ensure_custom_model(client)
+        ensure_planner_model(client)
         # NOTE: deactivate_base_model was removed — deactivating qwen3-35b-think breaks
         # custom model routing in OWU 0.9.6 (custom models route through their base_model_id,
         # which OWU requires to be active in the model list)

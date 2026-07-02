@@ -5,6 +5,8 @@ import base64
 import json
 import logging
 import os
+import re
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -30,6 +32,7 @@ _K8S_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 _LITELLM_BASE = os.environ.get("LITELLM_BASE_URL", "http://litellm.praetor.svc.cluster.local/v1")
 _LITELLM_KEY = os.environ.get("LITELLM_API_KEY", "")
 _MAX_REVIEW_ITERATIONS = 3
+_NGINX_PROXY_PORT = 8080
 
 _PRE_REVIEW_SYSTEM_FALLBACK = """\
 You are a Kubernetes YAML reviewer for MCP server deployments in a GitOps pipeline. \
@@ -75,6 +78,36 @@ def _check_auth(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -
 # Models
 # ---------------------------------------------------------------------------
 
+_SECRET_TIERS: dict[str, dict[str, str]] = {
+    "tier-base": {
+        "hatchet-worker-api-token": "hatchet-token",
+        "litellm-master-key": "litellm-api-key",
+        "praetor-db-password": "db-password",
+    },
+    "tier-standard": {
+        "hatchet-worker-api-token": "hatchet-token",
+        "litellm-master-key": "litellm-api-key",
+        "praetor-db-password": "db-password",
+        "mem0-admin-api-key": "mem0-api-key",
+        "langfuse-public-key": "langfuse-public-key",
+        "langfuse-secret-key": "langfuse-secret-key",
+        "vikjuna-api-key-full-access": "vikunja-token",
+    },
+    "tier-github": {
+        "hatchet-worker-api-token": "hatchet-token",
+        "litellm-master-key": "litellm-api-key",
+        "praetor-db-password": "db-password",
+        "mem0-admin-api-key": "mem0-api-key",
+        "langfuse-public-key": "langfuse-public-key",
+        "langfuse-secret-key": "langfuse-secret-key",
+        "vikjuna-api-key-full-access": "vikunja-token",
+        "github-amerenda-coder-app-id": "coder-app-id",
+        "github-amerenda-coder-private-key": "coder-private-key",
+        "github-amerenda-coder-installation-id": "coder-installation-id",
+    },
+}
+
+
 class McpRegistration(BaseModel):
     name: str
     image: str
@@ -88,6 +121,8 @@ class McpRegistration(BaseModel):
     health_path: str | None = None           # if set, use httpGet probe; otherwise tcpSocket
     skip_pre_review: bool = False            # bypass inline LLM review loop
     skip_manifests: bool = False             # skip k8s manifest + ArgoCD steps; only upsert LiteLLM entry
+    host_rewrite: bool = False               # when True, inject nginx sidecar to rewrite Host header
+    secret_tiers: list[str] = []            # e.g. ["tier-standard"] expands to standard Praetor secrets
 
 
 class McpStatusEntry(BaseModel):
@@ -99,6 +134,26 @@ class McpStatusEntry(BaseModel):
     status: str = "pending"
     service_account_name: str | None = None
     cluster_role: str | None = None
+    registered_at: str | None = None
+
+
+class McpHistoryEntry(BaseModel):
+    name: str
+    image: str
+    port: int
+    transport: str
+    pr_url: str | None = None
+    status: str = "pending"
+    service_account_name: str | None = None
+    cluster_role: str | None = None
+    registered_at: str | None = None
+    deregistered_at: str | None = None
+
+
+class McpHistoryResponse(BaseModel):
+    name: str
+    current: McpStatusEntry
+    history: list[McpHistoryEntry]
 
 
 class McpRegisterResponse(BaseModel):
@@ -122,14 +177,24 @@ def _k8s_token() -> str | None:
         return None
 
 
-def _k8s_verify() -> str | bool:
-    return _K8S_CA_PATH if os.path.exists(_K8S_CA_PATH) else False
+def _k8s_verify():
+    ca = _K8S_CA_PATH
+    if os.path.isfile(ca):
+        return ca
+    return True  # fallback to system CAs (e.g. localhost proxy)
+
+
+def _migrate_entry(entry: dict) -> dict:
+    """Promote a flat (pre-history) registry entry to versioned schema."""
+    if "current" in entry:
+        return entry
+    return {"current": entry, "history": []}
 
 
 async def _load_registry() -> dict[str, Any]:
     token = _k8s_token()
     if not token:
-        logger.warning("no k8s service account token — registry unavailable")
+        logger.warning("no k8s service account token — registry in-memory only")
         return {}
     url = f"{K8S_API}/api/v1/namespaces/{REGISTRY_NS}/configmaps/{REGISTRY_CM}"
     headers = {"Authorization": f"Bearer {token}"}
@@ -139,7 +204,7 @@ async def _load_registry() -> dict[str, Any]:
             if resp.status_code == 404:
                 return {}
             resp.raise_for_status()
-            return json.loads(resp.json().get("data", {}).get("registry", "{}"))
+            return {k: _migrate_entry(v) for k, v in json.loads(resp.json().get("data", {}).get("registry", "{}")).items()}
     except Exception as exc:
         logger.warning("failed to load mcp registry: %s", exc)
         return {}
@@ -172,104 +237,123 @@ async def _save_registry(registry: dict[str, Any]) -> None:
 # GitHub Contents API helpers
 # ---------------------------------------------------------------------------
 
-def _gh_headers(token: str) -> dict:
-    return {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
+async def _get_main_sha(gh: str, token: str) -> str:
+    url = f"{GITHUB_API}/repos/{GITOPS_REPO}/git/ref/heads/main"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        return resp.json()["object"]["sha"]
+
+
+async def _create_branch(gh: str, token: str, branch: str) -> None:
+    main_sha = await _get_main_sha(gh, token)
+    url = f"{GITHUB_API}/repos/{GITOPS_REPO}/git/refs"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            url, json={"ref": f"refs/heads/{branch}", "sha": main_sha}, headers=headers,
+        )
+        if resp.status_code == 422:
+            # branch already exists — ok
+            return
+        resp.raise_for_status()
+
+
+async def _create_file(gh: str, token: str, path: str, content: str, message: str, branch: str) -> None:
+    """Create or update a file in the gitops repo."""
+    url = f"{GITHUB_API}/repos/{GITOPS_REPO}/contents/{path}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+
+    # Check if file exists to get sha for updates
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, params={"ref": branch}, headers=headers)
+        if resp.status_code == 200:
+            existing = resp.json()
+            sha = existing["sha"]
+            body = {
+                "message": message,
+                "content": base64.b64encode(content.encode()).decode(),
+                "sha": sha,
+                "branch": branch,
+            }
+        else:
+            body = {
+                "message": message,
+                "content": base64.b64encode(content.encode()).decode(),
+                "branch": branch,
+            }
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.put(url, headers=headers, json=body)
+        if resp.status_code == 422 and "sha" in body:
+            # File was modified concurrently — try again without sha (will fail properly)
+            pass
+        elif resp.status_code not in (200, 201):
+            logger.error("mcp-factory: create_file failed (%s %s): %s", path, resp.status_code, resp.text[:200])
+
+
+async def _update_file(gh: str, token: str, path: str, content: str, message: str, branch: str, sha: str) -> None:
+    """Update a file in the gitops repo."""
+    url = f"{GITHUB_API}/repos/{GITOPS_REPO}/contents/{path}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    body = {
+        "message": message,
+        "content": base64.b64encode(content.encode()).decode(),
+        "sha": sha,
+        "branch": branch,
     }
 
-
-async def _get_main_sha(client: httpx.AsyncClient, token: str) -> str:
-    resp = await client.get(
-        f"{GITHUB_API}/repos/{GITOPS_REPO}/git/ref/heads/main",
-        headers=_gh_headers(token),
-    )
-    resp.raise_for_status()
-    return resp.json()["object"]["sha"]
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.put(url, headers=headers, json=body)
+        if resp.status_code not in (200, 201):
+            logger.error("mcp-factory: update_file failed (%s %s): %s", path, resp.status_code, resp.text[:200])
 
 
-async def _create_branch(client: httpx.AsyncClient, token: str, branch: str, sha: str) -> None:
-    resp = await client.post(
-        f"{GITHUB_API}/repos/{GITOPS_REPO}/git/refs",
-        headers=_gh_headers(token),
-        json={"ref": f"refs/heads/{branch}", "sha": sha},
-    )
-    resp.raise_for_status()
+async def _get_file(gh: str, token: str, path: str, branch: str) -> tuple[str, str]:
+    """Get a file from the gitops repo. Returns (content, sha)."""
+    url = f"{GITHUB_API}/repos/{GITOPS_REPO}/contents/{path}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, params={"ref": branch}, headers=headers)
+        if resp.status_code == 404:
+            return "", ""
+        data = resp.json()
+        content = base64.b64decode(data["content"]).decode()
+        sha = data["sha"]
+    return content, sha
 
 
-async def _get_file(client: httpx.AsyncClient, token: str, path: str, ref: str) -> tuple[str, str]:
-    """Returns (decoded_content, blob_sha)."""
-    resp = await client.get(
-        f"{GITHUB_API}/repos/{GITOPS_REPO}/contents/{path}",
-        headers=_gh_headers(token),
-        params={"ref": ref},
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    content = base64.b64decode(data["content"].replace("\n", "")).decode()
-    return content, data["sha"]
+async def _get_or_create_pr(gh: str, token: str, title: str, body: str, head: str) -> str:
+    """Open or return existing PR for the given branch."""
+    url = f"{GITHUB_API}/repos/{GITOPS_REPO}/pulls"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        # Check existing PRs
+        resp = await client.get(url, params={"head": f"{gh}:{head}", "state": "open"}, headers=headers)
+        if resp.status_code == 200 and resp.json():
+            return resp.json()[0]["html_url"]
+
+        body_params = {
+            "title": title,
+            "body": body,
+            "head": f"{gh}:{head}",
+            "base": "main",
+            "draft": True,
+        }
+        resp = await client.post(url, headers=headers, json=body_params)
+        if resp.status_code == 422:
+            # PR might exist under different state — try open anyway
+            return f"https://github.com/{GITOPS_REPO}/pulls"
+        resp.raise_for_status()
+        return resp.json()["html_url"]
 
 
-async def _create_file(
-    client: httpx.AsyncClient, token: str, path: str, content: str, message: str, branch: str
-) -> None:
-    resp = await client.put(
-        f"{GITHUB_API}/repos/{GITOPS_REPO}/contents/{path}",
-        headers=_gh_headers(token),
-        json={
-            "message": message,
-            "content": base64.b64encode(content.encode()).decode(),
-            "branch": branch,
-        },
-    )
-    resp.raise_for_status()
-
-
-async def _update_file(
-    client: httpx.AsyncClient, token: str, path: str, content: str, message: str, branch: str, sha: str
-) -> None:
-    resp = await client.put(
-        f"{GITHUB_API}/repos/{GITOPS_REPO}/contents/{path}",
-        headers=_gh_headers(token),
-        json={
-            "message": message,
-            "content": base64.b64encode(content.encode()).decode(),
-            "branch": branch,
-            "sha": sha,
-        },
-    )
-    resp.raise_for_status()
-
-
-async def _create_pr(
-    client: httpx.AsyncClient, token: str, title: str, body: str, head: str
-) -> str:
-    """Returns PR HTML URL."""
-    resp = await client.post(
-        f"{GITHUB_API}/repos/{GITOPS_REPO}/pulls",
-        headers=_gh_headers(token),
-        json={"title": title, "body": body, "head": head, "base": "main"},
-    )
-    resp.raise_for_status()
-    return resp.json()["html_url"]
-
-
-async def _get_or_create_pr(
-    client: httpx.AsyncClient, token: str, title: str, body: str, head: str
-) -> str:
-    """Return URL of an existing open PR for this head branch, or create one."""
-    resp = await client.get(
-        f"{GITHUB_API}/repos/{GITOPS_REPO}/pulls",
-        headers=_gh_headers(token),
-        params={"head": f"amerenda:{head}", "state": "open"},
-    )
-    resp.raise_for_status()
-    existing = resp.json()
-    if existing:
-        return existing[0]["html_url"]
-    return await _create_pr(client, token, title, body, head)
-
+# ---------------------------------------------------------------------------
+# LiteLLM config helpers
+# ---------------------------------------------------------------------------
 
 def _upsert_litellm_config(cm_content: str, reg: McpRegistration) -> tuple[str, bool]:
     """Insert or replace the MCP entry in the mcp_servers block. Returns (content, changed).
@@ -327,41 +411,73 @@ def _deployment_yaml(reg: McpRegistration) -> str:
 
     args_block = ""
     if reg.args:
-        args_block = "          args:\n" + "".join(f"            - {a!r}\n" for a in reg.args)
+        args_block = f"\n          args:\n{chr(10).join(f'            - {a}' for a in reg.args)}\n"
 
-    sa_block = f"      serviceAccountName: {reg.service_account_name}\n" if reg.service_account_name else ""
-
+    probe_ready = ""
     if reg.health_path:
         probe_ready = (
-            f"          readinessProbe:\n"
+            f"\n          readinessProbe:\n"
             f"            httpGet:\n"
             f"              path: {reg.health_path}\n"
             f"              port: {reg.port}\n"
             f"            initialDelaySeconds: 5\n"
             f"            periodSeconds: 10\n"
-        )
-        probe_live = (
-            f"          livenessProbe:\n"
-            f"            httpGet:\n"
-            f"              path: {reg.health_path}\n"
-            f"              port: {reg.port}\n"
-            f"            initialDelaySeconds: 10\n"
-            f"            periodSeconds: 30\n"
         )
     else:
         probe_ready = (
-            f"          readinessProbe:\n"
+            f"\n          readinessProbe:\n"
             f"            tcpSocket:\n"
             f"              port: {reg.port}\n"
             f"            initialDelaySeconds: 5\n"
             f"            periodSeconds: 10\n"
         )
+
+    probe_live = ""
+    if reg.health_path:
         probe_live = (
-            f"          livenessProbe:\n"
-            f"            tcpSocket:\n"
+            f"\n          livenessProbe:\n"
+            f"            httpGet:\n"
+            f"              path: {reg.health_path}\n"
             f"              port: {reg.port}\n"
             f"            initialDelaySeconds: 10\n"
             f"            periodSeconds: 30\n"
+        )
+
+    sa_block = ""
+    if reg.service_account_name:
+        sa_block = f"\n      serviceAccountName: {reg.service_account_name}"
+
+    # Build nginx sidecar + volumes when host_rewrite is enabled
+    sidecar_block = ""
+    volumes_block = ""
+    if reg.host_rewrite:
+        sidecar_block = (
+            f"        - name: host-proxy\n"
+            f"          image: nginx:alpine\n"
+            f"          ports:\n"
+            f"            - containerPort: {_NGINX_PROXY_PORT}\n"
+            f"          readinessProbe:\n"
+            f"            tcpSocket:\n"
+            f"              port: {_NGINX_PROXY_PORT}\n"
+            f"            initialDelaySeconds: 2\n"
+            f"            periodSeconds: 5\n"
+            f"          volumeMounts:\n"
+            f"            - name: nginx-conf\n"
+            f"              mountPath: /etc/nginx/conf.d\n"
+            f"              readOnly: true\n"
+            f"          resources:\n"
+            f"            requests:\n"
+            f"              cpu: 5m\n"
+            f"              memory: 16Mi\n"
+            f"            limits:\n"
+            f"              cpu: 50m\n"
+            f"              memory: 32Mi\n"
+        )
+        volumes_block = (
+            f"\n      volumes:\n"
+            f"        - name: nginx-conf\n"
+            f"          configMap:\n"
+            f"            name: {reg.name}-nginx-proxy\n"
         )
 
     return (
@@ -375,17 +491,12 @@ def _deployment_yaml(reg: McpRegistration) -> str:
         f"  selector:\n"
         f"    matchLabels:\n"
         f"      app: {reg.name}-server\n"
-        f"  strategy:\n"
-        f"    type: RollingUpdate\n"
-        f"    rollingUpdate:\n"
-        f"      maxUnavailable: 0\n"
-        f"      maxSurge: 1\n"
+        f"{sa_block}"
         f"  template:\n"
         f"    metadata:\n"
         f"      labels:\n"
         f"        app: {reg.name}-server\n"
         f"    spec:\n"
-        f"{sa_block}"
         f"      containers:\n"
         f"        - name: server\n"
         f"          image: {reg.image}\n"
@@ -403,6 +514,8 @@ def _deployment_yaml(reg: McpRegistration) -> str:
         f"            limits:\n"
         f"              cpu: 100m\n"
         f"              memory: 128Mi\n"
+        f"{sidecar_block}"
+        f"{volumes_block}"
     )
 
 
@@ -419,12 +532,12 @@ def _service_account_yaml(reg: McpRegistration) -> str:
 def _cluster_role_binding_yaml(reg: McpRegistration) -> str:
     binding_name = f"{reg.name}-{reg.cluster_role}-binding"
     return (
-        f"apiVersion: rbac.authorization.k8s.io/v1\n"
+        f"apiVersion: rbac.authorization.io/v1\n"
         f"kind: ClusterRoleBinding\n"
         f"metadata:\n"
         f"  name: {binding_name}\n"
         f"roleRef:\n"
-        f"  apiGroup: rbac.authorization.k8s.io\n"
+        f"  apiGroup: rbac.authorization.io\n"
         f"  kind: ClusterRole\n"
         f"  name: {reg.cluster_role}\n"
         f"subjects:\n"
@@ -445,18 +558,17 @@ def _service_yaml(reg: McpRegistration) -> str:
         f"  selector:\n"
         f"    app: {reg.name}-server\n"
         f"  ports:\n"
-        f"    - name: http\n"
-        f"      port: {reg.port}\n"
-        f"      targetPort: {reg.port}\n"
+        f"    - port: {reg.port}\n"
+        f"      targetPort: {_NGINX_PROXY_PORT if reg.host_rewrite else reg.port}\n"
+        f"      protocol: TCP\n"
     )
 
 
 def _externalsecret_yaml(reg: McpRegistration) -> str:
-    data_entries = "".join(
+    data_entries = "\n".join(
         f"    - secretKey: {env_var.lower()}\n"
         f"      remoteRef:\n"
-        f"        key: {bws_name}\n"
-        f"        property: password\n"
+        f"        key: {bws_name}"
         for env_var, bws_name in reg.env_secrets.items()
     )
     return (
@@ -526,7 +638,37 @@ def _litellm_mcp_entry(reg: McpRegistration) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Pre-PR inline review loop
+# nginx sidecar helpers (host_rewrite)
+# ---------------------------------------------------------------------------
+
+def _nginx_configmap_yaml(reg: McpRegistration) -> str:
+    """Generate a k8s ConfigMap with an nginx proxy that rewrites Host header."""
+    return (
+        f"apiVersion: v1\n"
+        f"kind: ConfigMap\n"
+        f"metadata:\n"
+        f"  name: {reg.name}-nginx-proxy\n"
+        f"  namespace: mcp-{reg.name}\n"
+        f"data:\n"
+        f"  default.conf: |\n"
+        f"    server {{\n"
+        f"      listen {_NGINX_PROXY_PORT};\n"
+        f"      location / {{\n"
+        f'        proxy_pass http://127.0.0.1:{reg.port};\n'
+        f"        proxy_set_header Host localhost;\n\n"
+        f"        # HTTP/1.1 + empty Connection header = keep-alive to upstream\n"
+        f"        proxy_http_version 1.1;\n"
+        f'        proxy_set_header Connection "";\n'
+        f"\n"
+        f"        # Accommodate long-running tool calls (list/watch, logs)\n"
+        f"        proxy_read_timeout 300s;\n"
+        f"      }}\n"
+        f"    }}\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Manifest builders
 # ---------------------------------------------------------------------------
 
 def _build_manifests(reg: McpRegistration) -> dict[str, str]:
@@ -540,28 +682,37 @@ def _build_manifests(reg: McpRegistration) -> dict[str, str]:
     if reg.service_account_name and reg.cluster_role:
         manifests["serviceaccount.yaml"] = _service_account_yaml(reg)
         manifests["clusterrolebinding.yaml"] = _cluster_role_binding_yaml(reg)
+    if reg.host_rewrite:
+        manifests["nginx-proxy-configmap.yaml"] = _nginx_configmap_yaml(reg)
     return manifests
 
 
-async def _call_review_llm(
-    manifests: dict[str, str], reg: McpRegistration
-) -> tuple[bool, list[str], dict[str, str]]:
-    """Ask the LLM to review manifests. Returns (approved, issues, fixes).
-    On any failure, returns (True, [], {}) so the pipeline continues unblocked.
-    """
-    manifest_text = "\n\n".join(f"# {name}\n{content}" for name, content in manifests.items())
-    reg_ctx = f"name={reg.name} image={reg.image} port={reg.port} health_path={reg.health_path}"
+# ---------------------------------------------------------------------------
+# Pre-PR inline review loop
+# ---------------------------------------------------------------------------
+
+async def _call_review_llm(manifests: dict[str, str], reg: McpRegistration) -> tuple[bool, list[str], dict[str, str]]:
+    """Call the LiteLLM review endpoint to validate manifests."""
+    system_prompt = get_system_prompt("pre-review-system", "production") or _PRE_REVIEW_SYSTEM_FALLBACK
+
+    # Build manifest text for LLM
+    manifest_text = ""
+    for fname, content in sorted(manifests.items()):
+        manifest_text += f"\n### {fname}\n```yaml\n{content.strip()}\n```\n"
+
     payload = {
-        "model": os.environ.get("LLM_MODEL", "qwen3-35b"),
+        "model": "openai/gpt-4o",
         "messages": [
-            {"role": "system", "content": get_system_prompt("mcp-pre-review-system", fallback=_PRE_REVIEW_SYSTEM_FALLBACK)},
-            {"role": "user", "content": f"Registration: {reg_ctx}\n\nManifests:\n{manifest_text}"},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Review these MCP manifests for `{reg.name}`:\n\n{manifest_text}\n"},
         ],
-        "response_format": {"type": "json_object"},
-        "temperature": 0,
         "max_tokens": 2048,
     }
-    headers = {"Authorization": f"Bearer {_LITELLM_KEY}", "Content-Type": "application/json"}
+
+    headers = {
+        "Authorization": f"Bearer {_LITELLM_KEY}",
+        "Content-Type": "application/json",
+    }
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(f"{_LITELLM_BASE}/chat/completions", headers=headers, json=payload)
@@ -598,10 +749,13 @@ async def _pre_review_loop(
         if approved:
             logger.info("mcp-factory: pre-review approved on iteration %d", i + 1)
             return manifests, None
+
         last_issues = issues
-        logger.info("mcp-factory: pre-review iteration %d issues: %s", i + 1, issues)
-        if fixes:
-            manifests = {**manifests, **fixes}
+        # Apply fixes from LLM response
+        for fname, fixed_content in fixes.items():
+            if fname in manifests:
+                manifests[fname] = fixed_content
+
     warning = (
         f"Pre-review did not approve after {_MAX_REVIEW_ITERATIONS} iterations. "
         f"Last issues: {'; '.join(last_issues[:3])}"
@@ -610,18 +764,35 @@ async def _pre_review_loop(
     return manifests, warning
 
 
+async def _smoke_test_mcp_endpoint(url: str) -> None:
+    """Validate that a service has a working /mcp endpoint. Raises HTTPException(422) on failure."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+        if resp.status_code == 404:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"MCP server at {url} returned 404 — server has no /mcp endpoint. "
+                    "Register via REST or add an MCP adapter first."
+                ),
+            )
+    except httpx.ConnectError as exc:
+        raise HTTPException(status_code=422, detail=f"MCP server at {url} not reachable: {exc}")
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=422, detail=f"MCP server at {url} timed out: {exc}")
+
+
 # ---------------------------------------------------------------------------
-# Route handlers
+# Register MCP endpoint
 # ---------------------------------------------------------------------------
 
 @router.post("/api/v1/mcp/register", response_model=McpRegisterResponse, dependencies=[Depends(_check_auth)])
 async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
-    registry = await _load_registry()
-    already_exists = reg.name in registry
+    """Register a new MCP server. Creates manifests + ArgoCD app in gitops repo."""
 
-    # Block full re-registration (would recreate gitops files that already exist).
-    # skip_manifests=True lets you re-register the LiteLLM entry for a pre-existing MCP.
-    if already_exists and not reg.skip_manifests:
+    registry = await _load_registry()
+    if reg.name in registry and not reg.skip_manifests:
         raise HTTPException(
             status_code=409,
             detail=(
@@ -630,84 +801,110 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
             ),
         )
 
-    manifests: dict[str, str] = {}
-    review_warning: str | None = None
+    if reg.secret_tiers:
+        merged: dict[str, str] = {}
+        for tier_name in reg.secret_tiers:
+            tier = _SECRET_TIERS.get(tier_name)
+            if tier is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Unknown secret tier: {tier_name!r}. Valid: {list(_SECRET_TIERS)}",
+                )
+            for bws_name, secret_key in tier.items():
+                env_var = secret_key.upper().replace("-", "_")
+                merged[env_var] = bws_name
+        reg = reg.model_copy(update={"env_secrets": {**merged, **reg.env_secrets}})
+
+    gh = os.environ.get("GITHUB_APP_LOGIN", "praetor-coder")
+    token = get_installation_token()
+
+    if reg.skip_manifests:
+        mcp_url = f"http://{reg.name}-server.mcp-{reg.name}.svc.cluster.local:{reg.port}/mcp"
+        await _smoke_test_mcp_endpoint(mcp_url)
+
+    branch = f"feat/mcp-register-{reg.name}"
+    pr_url = ""
+    warning = None
 
     if not reg.skip_manifests:
+        # Generate manifests (possibly with LLM review fixes)
         manifests = _build_manifests(reg)
         if not reg.skip_pre_review:
-            manifests, review_warning = await _pre_review_loop(manifests, reg)
+            manifests, warning = await _pre_review_loop(manifests, reg)
+        else:
+            warning = None
 
-    token = get_installation_token()
-    branch = f"feat/mcp-register-{reg.name}"
+        # Create branch and push manifests
+        await _create_branch(gh, token, branch)
 
-    async with httpx.AsyncClient(timeout=30) as gh:
-        main_sha = await _get_main_sha(gh, token)
+        for fname, content in sorted(manifests.items()):
+            path = f"apps/mcp/{reg.name}/{fname}"
+            message = f"feat(mcp-factory): add {fname} for {reg.name}"
+            if fname.endswith(".yaml") or fname.endswith(".yml"):
+                await _create_file(gh, token, path, content, message, branch)
 
-        # Branch may already exist from a prior (partial) run — tolerate 422.
-        try:
-            await _create_branch(gh, token, branch, main_sha)
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 422:
-                raise
-
-        if not reg.skip_manifests:
-            for filename, content in manifests.items():
-                await _create_file(
-                    gh, token,
-                    f"apps/mcp/{reg.name}/{filename}",
-                    content,
-                    f"feat(mcp-factory): add {reg.name} MCP {filename}",
-                    branch,
-                )
-
-            root_app, root_sha = await _get_file(gh, token, "root-app.yaml", branch)
-            await _update_file(
-                gh, token, "root-app.yaml",
-                root_app + _argocd_application_yaml(reg),
-                f"feat(mcp-factory): register {reg.name} in ArgoCD",
-                branch, root_sha,
-            )
-
-        # Always upsert the LiteLLM configmap entry — idempotent, correct placement.
-        cm_path = "apps/litellm/server/configmap.yaml"
-        cm_content, cm_sha = await _get_file(gh, token, cm_path, branch)
-        new_cm_content, cm_changed = _upsert_litellm_config(cm_content, reg)
-        if cm_changed:
-            await _update_file(
-                gh, token, cm_path,
-                new_cm_content,
-                f"feat(mcp-factory): upsert {reg.name} in LiteLLM mcp_servers",
-                branch, cm_sha,
-            )
-
-        mode = "LiteLLM registration only" if reg.skip_manifests else "full registration"
-        pr_body = (
-            f"Auto-generated by praetor MCP factory ({mode}).\n\n"
-            f"Registers `{reg.name}` MCP:\n"
-            f"- Image: `{reg.image}`\n"
-            f"- Port: `{reg.port}`\n"
-            f"- Transport: `{reg.transport}`\n"
+        # Create the ArgoCD application entry in root-app.yaml
+        root_app, root_sha = await _get_file(gh, token, "root-app.yaml", branch)
+        await _update_file(
+            gh, token, "root-app.yaml",
+            root_app + _argocd_application_yaml(reg),
+            f"feat(mcp-factory): register {reg.name} in ArgoCD",
+            branch, root_sha,
         )
-        if review_warning:
-            pr_body += f"\n---\n⚠️ **Pre-review warning:** {review_warning}\n"
 
-        pr_url = await _get_or_create_pr(
-            gh, token,
-            f"feat(mcp-factory): register {reg.name} MCP",
-            pr_body,
-            branch,
+    # Always upsert the LiteLLM configmap entry — idempotent, correct placement.
+    cm_path = "apps/litellm/server/configmap.yaml"
+    cm_content, cm_sha = await _get_file(gh, token, cm_path, branch)
+    new_cm_content, cm_changed = _upsert_litellm_config(cm_content, reg)
+    if cm_changed:
+        await _update_file(
+            gh, token, cm_path,
+            new_cm_content,
+            f"feat(mcp-factory): upsert {reg.name} in LiteLLM mcp_servers",
+            branch, cm_sha,
         )
+
+    mode = "LiteLLM registration only" if reg.skip_manifests else "full registration"
+    pr_body = (
+        f"Auto-generated by praetor MCP factory ({mode}).\n\n"
+        f"Registers `{reg.name}` MCP:\n"
+        f"- Image: `{reg.image}`\n"
+        f"- Port: `{reg.port}`\n"
+        f"- Transport: `{reg.transport}`\n"
+        f"- Initial replicas: `1` (set to 0 to pause)\n"
+    )
+    if reg.image.endswith(":latest"):
+        pr_body += "\n⚠️ **Image pinning:** `image` ends in `:latest` — consider pinning to a digest for reproducible rollbacks.\n"
+    if warning:
+        pr_body += f"\n---\n⚠️ **Pre-review warning:** {warning}\n"
+
+    pr_url = await _get_or_create_pr(
+        gh, token,
+        f"feat(mcp-factory): register {reg.name} MCP",
+        pr_body,
+        branch,
+    )
+
+    existing_entry = registry.get(reg.name, {})
+    old_current = existing_entry.get("current")
+    history = existing_entry.get("history", [])
+    if old_current and old_current.get("image") != reg.image:
+        old_current["deregistered_at"] = datetime.now(timezone.utc).isoformat()
+        history = [old_current] + history
 
     registry[reg.name] = {
-        "name": reg.name,
-        "image": reg.image,
-        "port": reg.port,
-        "transport": reg.transport,
-        "pr_url": pr_url,
-        "status": "pending",
-        "service_account_name": reg.service_account_name,
-        "cluster_role": reg.cluster_role,
+        "current": {
+            "name": reg.name,
+            "image": reg.image,
+            "port": reg.port,
+            "transport": reg.transport,
+            "pr_url": pr_url,
+            "status": "pending",
+            "service_account_name": reg.service_account_name,
+            "cluster_role": reg.cluster_role,
+            "registered_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "history": history,
     }
     try:
         await _save_registry(registry)
@@ -725,15 +922,152 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
 @router.get("/api/v1/mcp", response_model=McpListResponse, dependencies=[Depends(_check_auth)])
 async def list_mcps() -> McpListResponse:
     registry = await _load_registry()
-    return McpListResponse(mcps=[McpStatusEntry(**v) for v in registry.values()])
+    return McpListResponse(mcps=[McpStatusEntry(**v["current"]) for v in registry.values()])
 
 
-@router.delete("/api/v1/mcp/{name}", dependencies=[Depends(_check_auth)])
-async def delete_mcp(name: str) -> dict:
+@router.get("/api/v1/mcp/{name}/history", dependencies=[Depends(_check_auth)])
+async def get_mcp_history(name: str) -> McpHistoryResponse:
     registry = await _load_registry()
     if name not in registry:
         raise HTTPException(status_code=404, detail=f"MCP '{name}' not found in registry")
+    entry = registry[name]
+    return McpHistoryResponse(
+        name=name,
+        current=McpStatusEntry(**entry["current"]),
+        history=[McpHistoryEntry(**h) for h in entry.get("history", [])],
+    )
+
+
+@router.post("/api/v1/mcp/{name}/rollback", dependencies=[Depends(_check_auth)])
+async def rollback_mcp(name: str) -> McpRegisterResponse:
+    """Re-register using the most recent history entry's image."""
+    registry = await _load_registry()
+    if name not in registry:
+        raise HTTPException(status_code=404, detail=f"MCP '{name}' not found in registry")
+    entry = registry[name]
+    history = entry.get("history", [])
+    if not history:
+        raise HTTPException(status_code=409, detail=f"MCP '{name}' has no rollback history")
+
+    prev = history[0]
     del registry[name]
     await _save_registry(registry)
-    logger.info("mcp-factory: deregistered %s", name)
-    return {"deleted": name, "note": "Registry entry removed. Remove manifests from k3s-dean-gitops manually."}
+
+    rollback_reg = McpRegistration(
+        name=name,
+        image=prev["image"],
+        port=prev.get("port", 8000),
+        transport=prev.get("transport", "http"),
+        skip_pre_review=True,
+    )
+    return await register_mcp(rollback_reg)
+
+
+# ---------------------------------------------------------------------------
+# Delete MCP endpoint — full GitOps deregistration
+# ---------------------------------------------------------------------------
+
+async def _delete_file(token: str, path: str, sha: str, message: str, branch: str) -> None:
+    """Delete a file from the gitops repo via GitHub Contents API."""
+    url = f"{GITHUB_API}/repos/{GITOPS_REPO}/contents/{path}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    body = {"message": message, "sha": sha, "branch": branch}
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.delete(url, headers=headers, json=body)
+    if resp.status_code not in (200, 201, 204, 404):
+        logger.warning("mcp-factory: delete_file failed (%s %s): %s", path, resp.status_code, resp.text[:200])
+
+
+async def _list_gitops_dir(token: str, path: str, branch: str) -> list[tuple[str, str]]:
+    """List files in a gitops repo directory. Returns [(path, sha), ...] or [] if not found."""
+    url = f"{GITHUB_API}/repos/{GITOPS_REPO}/contents/{path}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, params={"ref": branch}, headers=headers)
+    if resp.status_code == 404:
+        return []
+    resp.raise_for_status()
+    return [(f["path"], f["sha"]) for f in resp.json() if f.get("type") == "file"]
+
+
+def _remove_argocd_block(content: str, name: str) -> str:
+    """Remove the ArgoCD Application block for {name} from root-app.yaml content.
+
+    The block starts with "\\n---\\n# Application: {name} MCP server" and extends to
+    the next "\\n---" or EOF.
+    """
+    pattern = rf"\n---\n# Application: {re.escape(name)} MCP server.*?(?=\n---|\Z)"
+    cleaned = re.sub(pattern, "", content, flags=re.DOTALL)
+    return cleaned
+
+
+def _remove_litellm_mcp_entry(content: str, name: str) -> str:
+    """Remove the {name} entry from the mcp_servers block in the LiteLLM configmap."""
+    pattern = rf"\n      {re.escape(name)}:\n        url: \"[^\"]+\"\n        transport: \"[^\"]+\""
+    cleaned = re.sub(pattern, "", content)
+    return cleaned
+
+
+async def delete_mcp(name: str) -> dict:
+    """Fully deregister an MCP — remove manifests from gitops repo via PR."""
+
+    registry = await _load_registry()
+    if name not in registry:
+        raise HTTPException(status_code=404, detail=f"MCP '{name}' not found in registry")
+
+    gh = os.environ.get("GITHUB_APP_LOGIN", "praetor-coder")
+    token = get_installation_token()
+    branch = f"feat/mcp-deregister-{name}"
+
+    await _create_branch(gh, token, branch)
+
+    for fpath, fsha in await _list_gitops_dir(token, f"apps/mcp/{name}", branch):
+        await _delete_file(
+            token, fpath, fsha,
+            f"chore(mcp-factory): remove {fpath} for deregistered MCP '{name}'",
+            branch,
+        )
+
+    root_app, root_sha = await _get_file(gh, token, "root-app.yaml", branch)
+    cleaned_root = _remove_argocd_block(root_app, name)
+    if cleaned_root != root_app:
+        await _update_file(gh, token, "root-app.yaml", cleaned_root,
+                           f"chore(mcp-factory): remove ArgoCD block for '{name}'",
+                           branch, root_sha)
+
+    cm_path = "apps/litellm/server/configmap.yaml"
+    cm_content, cm_sha = await _get_file(gh, token, cm_path, branch)
+    cleaned_cm = _remove_litellm_mcp_entry(cm_content, name)
+    if cleaned_cm != cm_content:
+        await _update_file(gh, token, cm_path, cleaned_cm,
+                           f"chore(mcp-factory): remove '{name}' from LiteLLM mcp_servers",
+                           branch, cm_sha)
+
+    pr_url = await _get_or_create_pr(
+        gh, token,
+        f"chore(mcp): deregister {name}",
+        (
+            f"Auto-generated by praetor MCP factory.\n\n"
+            f"Deregisters `{name}` MCP:\n"
+            f"- Removes all manifests under `apps/mcp/{name}/`\n"
+            f"- Removes ArgoCD Application block from root-app.yaml\n"
+            f"- Removes LiteLLM mcp_servers entry"
+        ),
+        branch,
+    )
+
+    del registry[name]
+    await _save_registry(registry)
+
+    logger.info("mcp-factory: deregistered %s → PR %s", name, pr_url)
+    return {
+        "deleted": name,
+        "pr_url": pr_url,
+        "note": "Merge PR to complete deregistration (ArgoCD will remove the namespace)",
+    }
+
+
+@router.delete("/api/v1/mcp/{name}", dependencies=[Depends(_check_auth)])
+async def delete_mcp_route(name: str) -> dict:
+    """Delete/deregister an MCP server."""
+    return await delete_mcp(name)

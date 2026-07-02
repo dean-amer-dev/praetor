@@ -1,11 +1,16 @@
-"""Hatchet DAG worker: research → code pipeline for tasks labeled ai-research + ai-go."""
+"""Hatchet DAG worker: research → code pipeline and research → benchmark pipeline."""
 from datetime import timedelta
 
 from hatchet_sdk import Context, Hatchet
 from hatchet_sdk.types.concurrency import ConcurrencyExpression, ConcurrencyLimitStrategy
 from pydantic import BaseModel
 
-from .research_then_code import CoderNode, PipelineState, ResearchNode
+from .research_then_code import CoderNode, PipelineState, ResearchNode as CodeResearchNode
+from .research_then_benchmark import (
+    BenchmarkNode,
+    ModelEvalState,
+    ResearchNode as BenchmarkResearchNode,
+)
 
 
 class PipelineInput(BaseModel):
@@ -14,7 +19,16 @@ class PipelineInput(BaseModel):
     task_description: str = ""
 
 
+class ModelEvalInput(BaseModel):
+    task_id: int
+    model: str
+    runner: str = "archlinux"
+    quant: str = ""
+
+
 hatchet = Hatchet()
+
+# ── research → code ────────────────────────────────────────────────────────────
 
 pipeline = hatchet.workflow(
     name="research-then-code",
@@ -39,7 +53,7 @@ async def research_step(input: PipelineInput, ctx: Context) -> dict:
         task_title=input.task_title,
         task_description=input.task_description,
     )
-    node = ResearchNode()
+    node = CodeResearchNode()
     try:
         return await node.run(state)
     except Exception as exc:
@@ -68,8 +82,54 @@ async def code_step(input: PipelineInput, ctx: Context) -> dict:
     return await node.run(state, research_output)
 
 
+# ── research → benchmark ───────────────────────────────────────────────────────
+
+model_eval = hatchet.workflow(
+    name="research-then-benchmark",
+    on_events=["pipeline:model_evaluate"],
+    input_validator=ModelEvalInput,
+    concurrency=ConcurrencyExpression(
+        expression="input.model + '-' + input.runner",
+        max_runs=1,
+        limit_strategy=ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
+    ),
+)
+
+
+@model_eval.task(
+    name="research",
+    execution_timeout=timedelta(minutes=15),
+    retries=1,
+)
+async def model_research_step(input: ModelEvalInput, ctx: Context) -> dict:
+    state = ModelEvalState(
+        model=input.model,
+        runner=input.runner,
+        task_id=input.task_id,
+        quant=input.quant,
+    )
+    return await BenchmarkResearchNode().run(state)
+
+
+@model_eval.task(
+    name="benchmark",
+    parents=[model_research_step],
+    execution_timeout=timedelta(minutes=20),
+    retries=0,
+)
+async def model_benchmark_step(input: ModelEvalInput, ctx: Context) -> dict:
+    research_output = ctx.task_output(model_research_step)
+    state = ModelEvalState(
+        model=input.model,
+        runner=input.runner,
+        task_id=input.task_id,
+        quant=input.quant,
+    )
+    return await BenchmarkNode().run(state, research_output)
+
+
 def main() -> None:
-    worker = hatchet.worker("pipeline-worker", workflows=[pipeline])
+    worker = hatchet.worker("pipeline-worker", workflows=[pipeline, model_eval])
     worker.start()
 
 

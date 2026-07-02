@@ -52,12 +52,18 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
     for item in scratch.iterdir():
         shutil.rmtree(item) if item.is_dir() else item.unlink()
 
+    secondary_scratch = Path("/tmp/secondary-scratch")
+    secondary_scratch.mkdir(parents=True, exist_ok=True)
+    for item in secondary_scratch.iterdir():
+        shutil.rmtree(item) if item.is_dir() else item.unlink()
+
     spec = _parse_spec(input.task_description)
 
     if spec:
         # Spec-driven path — extract structured fields
         repos = spec.get("repos", {})
         repo = repos.get("primary", "")
+        secondary_repos = repos.get("secondary", [])
         if not repo:
             err = "spec missing repos.primary"
             task_invocations.labels(agent=_AGENT_NAME, status="error").inc()
@@ -113,6 +119,7 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
             )
     else:
         # Legacy path — parse repo: and pr: from free-form description
+        secondary_repos: list[str] = []
         repo_match = re.search(r"repo:\s*(\S+)", input.task_description)
         if not repo_match:
             err = "no repo reference found in task description — add 'repo: owner/name' to the description"
@@ -123,13 +130,15 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
         repo = repo_match.group(1)
         memory_agent_id = f"coder-{repo}"
 
-        pr_match     = re.search(r"pr:\s*(\d+)",       input.task_description)
-        branch_match = re.search(r"branch:\s*(\S+)",   input.task_description)
-        attempt_match = re.search(r"attempt:\s*(\d+)", input.task_description)
+        pr_match       = re.search(r"pr:\s*(\d+)",       input.task_description)
+        branch_match   = re.search(r"branch:\s*(\S+)",   input.task_description)
+        attempt_match  = re.search(r"attempt:\s*(\d+)",  input.task_description)
+        feedback_match = re.search(r"feedback:\s*(.+)",  input.task_description, re.DOTALL)
 
         pr_number = pr_match.group(1)            if pr_match      else None
         branch    = branch_match.group(1)        if branch_match  else None
         attempt   = int(attempt_match.group(1))  if attempt_match else 0
+        feedback  = feedback_match.group(1).strip() if feedback_match else ""
         request_limit = 50
 
         prior = await search_memory(f"{input.task_title} {input.task_description}", memory_agent_id)
@@ -142,11 +151,26 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
                 f"DO NOT create a new branch. Check out '{branch}' and push your fixes to it.\n"
                 f"DO NOT open a new PR. The PR already exists at #{pr_number}.\n"
             )
+            if feedback:
+                mode_block += f"Review feedback to address:\n{feedback}\n"
         else:
             mode_block = (
                 f"Create branch praetor-coder/task-{input.task_id}, implement, commit, push, "
                 f"then open a draft PR. "
             )
+
+    if secondary_repos:
+        sec_lines = ["\nSecondary repos — also make changes here after finishing the primary repo:"]
+        for sec in secondary_repos:
+            safe = sec.replace("/", "-")
+            sec_dir = f"/tmp/secondary-scratch/{safe}"
+            sec_lines.append(
+                f"- {sec}: clone into {sec_dir} using get_github_token(repo='{sec}'), "
+                f"create branch praetor-coder/task-{input.task_id}, make the relevant changes, "
+                f"commit, push, open a draft PR, include the PR URL in your final summary."
+            )
+        sec_lines.append("Complete the primary repo first, then secondary repos in order listed.")
+        mode_block += "\n".join(sec_lines) + "\n"
 
     prompt = (
         f"Task #{input.task_id}: {input.task_title}\n\n"
@@ -188,6 +212,7 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
                 + (f"hostname={hostname}. " if hostname else "")
                 + (f"namespace={ns}. " if ns else "")
                 + (f"stack={framework}. " if framework else "")
+                + (f"secondary_repos={secondary_repos}. " if secondary_repos else "")
                 + f"task_id={input.task_id}",
                 "planner-global",
             )
