@@ -36,7 +36,7 @@ if not os.environ.get("SMOKE_TESTS"):
 
 OWUI_URL      = os.environ.get("OWUI_URL", "https://bot.amer.dev")
 OWUI_EMAIL    = os.environ.get("OWUI_ADMIN_EMAIL", "alex@amer.dev")
-OWUI_PASSWORD = os.environ.get("OWUI_ADMIN_PASSWORD", "gY2PLulG1s28uAqV93BhBg9x_jY")
+OWUI_PASSWORD = os.environ.get("OWUI_ADMIN_PASSWORD", "foRdJI1ZsEESVrQl5R1l")
 
 LITELLM_URL   = os.environ.get("LITELLM_URL", "https://litellm.amer.dev")
 LITELLM_KEY   = os.environ.get("LITELLM_API_KEY", "fmxVy6bPQTClCDy9QOsjBMN3sfScX38JpjlyUv9Q")
@@ -48,6 +48,10 @@ SEARXNG_URL   = os.environ.get("SEARXNG_URL", "https://searxng.amer.dev")
 
 CUSTOM_MODEL  = "qwen3-35b-think-custom"
 BASE_MODEL    = "qwen3-35b-think"
+
+V1_CUSTOM_MODEL = "qwen3-27b-think-custom"
+V1_BASE_MODEL   = "qwen36-27b-think"
+
 TIMEOUT       = int(os.environ.get("LLM_TIMEOUT", "120"))
 
 
@@ -168,6 +172,7 @@ def _run_tool_loop(
     messages: list[dict],
     tools: list[dict],
     max_tool_turns: int = 5,
+    model: str = CUSTOM_MODEL,
 ) -> tuple[str, list[str], bool]:
     """
     Run a multi-turn tool conversation.
@@ -189,7 +194,7 @@ def _run_tool_loop(
         resp = owui.post(
             "/api/v1/chat/completions",
             json={
-                "model": CUSTOM_MODEL,
+                "model": model,
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": tool_choice,
@@ -223,7 +228,7 @@ def _run_tool_loop(
     resp = owui.post(
         "/api/v1/chat/completions",
         json={
-            "model": CUSTOM_MODEL,
+            "model": model,
             "messages": messages,
             "stream": False,
             "max_tokens": 1000,
@@ -729,3 +734,118 @@ class TestPraetorAPI:
         )
         assert status.status_code == 200
         assert status.json().get("task_id") == task_id
+
+
+# ── murderbot-v1 (Qwen3.6-27B) ───────────────────────────────────────────────
+
+class TestMurderbotV1:
+    """
+    Smoke tests for murderbot-v1 (qwen3-27b-think-custom / qwen36-27b-think).
+
+    Covers tool calling, no XML leakage, and full research loop with real results.
+    """
+
+    def test_v1_model_exists_in_owu(self, owui):
+        resp = owui.get(f"/api/v1/models/model?id={V1_CUSTOM_MODEL}")
+        assert resp.status_code == 200, (
+            f"murderbot-v1 ({V1_CUSTOM_MODEL}) not found: HTTP {resp.status_code}"
+        )
+        assert resp.json().get("name") == "murderbot-v1"
+
+    def test_v1_function_calling_native(self, owui):
+        """function_calling must be 'native' — text injection produces XML blobs in content."""
+        resp = owui.get(f"/api/v1/models/model?id={V1_CUSTOM_MODEL}")
+        assert resp.status_code == 200
+        fc = resp.json().get("params", {}).get("function_calling")
+        assert fc == "native", (
+            f"murderbot-v1 function_calling={fc!r} — must be 'native'. "
+            "XML tool call blobs will leak into content otherwise."
+        )
+
+    def test_v1_base_model_in_litellm(self, litellm):
+        """qwen36-27b-think must be registered in LiteLLM."""
+        resp = litellm.get("/v1/models", headers={"Accept": "application/json"})
+        assert resp.status_code == 200
+        ids = [m["id"] for m in resp.json()["data"]]
+        assert V1_BASE_MODEL in ids, (
+            f"{V1_BASE_MODEL!r} not in LiteLLM: {ids}"
+        )
+
+    def test_v1_no_xml_tool_calls(self, owui, mcp_tool_defs):
+        """
+        Model must return JSON tool_calls, never <function=...> XML in content.
+
+        Uses tool_choice='required' to force a tool call response.
+        """
+        tools = _select_tools(mcp_tool_defs, {"web_search", "web_read_url"})
+        resp = owui.post(
+            "/api/v1/chat/completions",
+            json={
+                "model": V1_CUSTOM_MODEL,
+                "messages": [{"role": "user", "content": "Search for best laptops for elderly people."}],
+                "tools": tools,
+                "tool_choice": "required",
+                "stream": False,
+                "max_tokens": 400,
+            },
+        )
+        assert resp.status_code == 200, f"OWU HTTP {resp.status_code}: {resp.text[:300]}"
+        choice = resp.json()["choices"][0]
+        msg    = choice["message"]
+        content = msg.get("content") or ""
+
+        assert "<function=" not in content, (
+            f"murderbot-v1 produced XML in content:\n{content[:500]}\n"
+            "Set function_calling='native' on the OWU preset."
+        )
+        assert choice["finish_reason"] == "tool_calls", (
+            f"finish_reason={choice['finish_reason']!r}, content={content[:200]!r}"
+        )
+        assert msg.get("tool_calls"), "tool_calls field is empty"
+
+    def test_v1_full_research_with_real_results(self, owui, litellm, mcp_tool_defs):
+        """
+        Full research loop must return ACTUAL CONTENT — not XML, not just tool calls.
+
+        The model must: call web_search → receive real results → synthesize a text answer
+        with specific, real information including actual laptop brand names.
+        """
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        tools = _select_tools(mcp_tool_defs, {"web_search", "web_read_url"})
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"Today's date is {today} (UTC).\n"
+                    "You are a helpful research assistant with access to web search tools. "
+                    "Use tools to search for current information, then write a comprehensive answer. "
+                    "Stop calling tools after 3-5 searches and write your final answer."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "research what are some good laptops to use for elderly parents",
+            },
+        ]
+
+        final, called, had_xml = _run_tool_loop(owui, litellm, messages, tools, max_tool_turns=8, model=V1_CUSTOM_MODEL)
+
+        assert not had_xml, (
+            "murderbot-v1 produced <function=...> XML — native tool calling broken."
+        )
+        assert any(n in ("web_search", "web_read_url") for n in called), (
+            f"No web search tool was called. Tools called: {called}"
+        )
+        assert len(final) > 200, (
+            f"Answer too short ({len(final)} chars) — model did not synthesize real results.\n"
+            f"Answer: {final!r}\nTools: {called}"
+        )
+        real_content_markers = ["lenovo", "dell", "hp", "asus", "acer", "apple", "samsung",
+                                 "chromebook", "macbook", "thinkpad", "inspiron", "laptop"]
+        content_lower = final.lower()
+        assert any(m in content_lower for m in real_content_markers), (
+            f"Answer does not mention any real laptop brands — model did not use search results.\n"
+            f"Answer: {final[:500]!r}\nTools: {called}"
+        )
