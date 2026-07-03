@@ -286,7 +286,9 @@ class TestLLMToolCalling:
                     })
 
         # Synthesis turn: no tools, thinking is ON (this is the path that was broken)
-        resp = _completion(messages, tools=None, max_tokens=4096)
+        # max_tokens=2048 rather than 4096: 27B dense generates ~30 t/s vs 35B MoE ~80 t/s;
+        # 4096 tokens at 30 t/s = ~136s and hits the 120s test timeout.
+        resp = _completion(messages, tools=None, max_tokens=2048)
         assert resp.status_code == 200, f"synthesis HTTP {resp.status_code}: {resp.text[:300]}"
 
         choice  = resp.json()["choices"][0]
