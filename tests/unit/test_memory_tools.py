@@ -100,6 +100,55 @@ class TestSearchMemory:
         assert await search_memory("q", "a") == []
 
 
+class TestDeleteMemory:
+    async def test_searches_then_deletes_each_match(self, mock_http):
+        instance, _ = mock_http
+        search_resp = MagicMock()
+        search_resp.raise_for_status = MagicMock()
+        search_resp.json.return_value = {
+            "results": [{"id": "abc", "memory": "fact1"}, {"id": "def", "memory": "fact2"}]
+        }
+        delete_resp = MagicMock()
+        delete_resp.status_code = 200
+        instance.post.return_value = search_resp
+        instance.delete.return_value = delete_resp
+
+        from common.memory_tools import delete_memory
+        count = await delete_memory("shopping", "planner-global")
+
+        assert count == 2
+        instance.post.assert_called_once_with(
+            "/search", json={"query": "shopping", "agent_id": "planner-global"}
+        )
+        assert instance.delete.call_count == 2
+        instance.delete.assert_any_call("/memories/abc")
+        instance.delete.assert_any_call("/memories/def")
+
+    async def test_returns_zero_when_no_results(self, mock_http):
+        instance, _ = mock_http
+        search_resp = MagicMock()
+        search_resp.raise_for_status = MagicMock()
+        search_resp.json.return_value = {"results": []}
+        instance.post.return_value = search_resp
+
+        from common.memory_tools import delete_memory
+        count = await delete_memory("nonexistent", "a")
+        assert count == 0
+        instance.delete.assert_not_called()
+
+    async def test_skips_entries_without_id(self, mock_http):
+        instance, _ = mock_http
+        search_resp = MagicMock()
+        search_resp.raise_for_status = MagicMock()
+        search_resp.json.return_value = {"results": [{"memory": "no id here"}]}
+        instance.post.return_value = search_resp
+
+        from common.memory_tools import delete_memory
+        count = await delete_memory("q", "a")
+        assert count == 0
+        instance.delete.assert_not_called()
+
+
 class TestGetAllMemories:
     def test_calls_get_memories(self, mock_http):
         instance, _ = mock_http
