@@ -11,7 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from common.dispatch import EVENT_MAP, dispatch_agent
-from common.memory_tools import search_memory
+from common.memory_tools import add_memory, delete_memory, search_memory
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -44,6 +44,22 @@ class MemorySearchRequest(BaseModel):
 
 class MemorySearchResponse(BaseModel):
     results: list[str]
+
+
+class MemoryAddRequest(BaseModel):
+    content: str
+
+
+class MemoryAddResponse(BaseModel):
+    stored: bool = True
+
+
+class MemoryDeleteRequest(BaseModel):
+    query: str
+
+
+class MemoryDeleteResponse(BaseModel):
+    deleted: int
 
 
 @router.post(
@@ -176,3 +192,25 @@ async def memory_search(req: MemorySearchRequest) -> MemorySearchResponse:
     """Search the planner-global Mem0 namespace for context relevant to a query."""
     results = await search_memory(req.query, "planner-global")
     return MemorySearchResponse(results=results)
+
+
+@router.post(
+    "/api/v1/memory/add",
+    response_model=MemoryAddResponse,
+    dependencies=[Depends(_check_auth)],
+)
+async def memory_add(req: MemoryAddRequest) -> MemoryAddResponse:
+    """Add content to the planner-global Mem0 namespace."""
+    await add_memory(req.content, "planner-global")
+    return MemoryAddResponse()
+
+
+@router.post(
+    "/api/v1/memory/delete",
+    response_model=MemoryDeleteResponse,
+    dependencies=[Depends(_check_auth)],
+)
+async def memory_delete_endpoint(req: MemoryDeleteRequest) -> MemoryDeleteResponse:
+    """Delete memories matching a query from the planner-global Mem0 namespace."""
+    deleted = await delete_memory(req.query, "planner-global")
+    return MemoryDeleteResponse(deleted=deleted)

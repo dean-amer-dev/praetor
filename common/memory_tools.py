@@ -64,3 +64,25 @@ def get_all_memories(agent_id: str) -> list[str]:
     resp.raise_for_status()
     results = resp.json().get("results", [])
     return [r["memory"] for r in results]
+
+
+@observe()
+async def delete_memory(query: str, agent_id: str) -> int:
+    """Search for memories matching query and delete them. Returns count deleted."""
+    def _sync() -> int:
+        client = _get_client()
+        resp = client.post(
+            "/search",
+            json={"query": query, "agent_id": agent_id},
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        deleted = 0
+        for r in results:
+            memory_id = r.get("id")
+            if memory_id:
+                del_resp = client.delete(f"/memories/{memory_id}")
+                if del_resp.status_code in (200, 204):
+                    deleted += 1
+        return deleted
+    return await asyncio.to_thread(_sync)
