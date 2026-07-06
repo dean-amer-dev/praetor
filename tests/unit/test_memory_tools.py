@@ -149,6 +149,30 @@ class TestDeleteMemory:
         instance.delete.assert_not_called()
 
 
+
+    async def test_raises_on_delete_failure(self, mock_http):
+        instance, _ = mock_http
+        search_resp = MagicMock()
+        search_resp.raise_for_status = MagicMock()
+        search_resp.json.return_value = {
+            "results": [{"id": "abc", "memory": "fact1"}]
+        }
+        delete_resp = MagicMock()
+        delete_resp.status_code = 500
+        delete_resp.text = 'Internal Server Error'
+        # raise_for_status raises for status >= 400
+        import httpx as _httpx
+        delete_resp.raise_for_status.side_effect = _httpx.HTTPStatusError(
+            "500 Internal", request=MagicMock(), response=delete_resp
+        )
+        instance.post.return_value = search_resp
+        instance.delete.return_value = delete_resp
+
+        from common.memory_tools import delete_memory
+        with pytest.raises(Exception):  # httpx.HTTPStatusError
+            await delete_memory("shopping", "planner-global")
+
+
 class TestGetAllMemories:
     def test_calls_get_memories(self, mock_http):
         instance, _ = mock_http
