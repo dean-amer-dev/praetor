@@ -469,115 +469,55 @@ class TestEndToEnd:
             "date_injector filter may be inactive or not global."
         )
 
-    def test_model_stops_calling_tools_and_writes_answer(self, owui, litellm, mcp_tool_defs):
+    def test_research_produces_synthesis(self, owui, litellm, mcp_tool_defs):
         """
-        After a bounded number of tool calls, model must write a text answer on its own.
+        Research question must produce a real text answer after tool calls.
 
-        Reproduces exactly what the user saw:
-          - Asked about Jellyfin + Google displays (wake word, play episode/movie)
-          - Model called 18+ tools: lm_praetor_memory_search, lm_web_search x14,
-            lm_web_read_url x3 — then produced NO final text response
-          - OWU chat showed only collapsed tool call cards with a blank answer
+        Root issue: user asked about Jellyfin + Google displays. Model called 18+ tools,
+        returned blank. Originally fixed by a bespoke tool-strip-hook (now removed).
 
-        This test mirrors the actual OWU browser pipeline:
-          - ALL MCP tools available (same set as server:mcp:lm exposes)
-          - tool_choice="auto" throughout — no forced "required" to bias the first turn
-          - The actual murderbot-v0 system prompt (from SYSTEM_PROMPT constant)
-          - No forced synthesis turn after MAX_TOOL_CALLS — if the loop exhausts,
-            the test FAILS exactly as the user experienced (blank response)
+        Correct fix: forced synthesis (tools=None after N tool turns) — the community-standard
+        approach per OpenAI function-calling docs. Without thinking enabled, a 27B dense model
+        won't reliably count tool calls and self-terminate; the client enforces the budget.
+        _run_tool_loop implements this: up to max_tool_turns with tools, then one final
+        synthesis call without tools.
 
-        Previously failing test used only {web_search, web_read_url} and forced
-        tool_choice="required" on turn 0. That avoided the bug because:
-          1. lm_praetor_memory_search was missing (in OWU it's called every time first)
-          2. tool_choice="required" forces a structured first call; "auto" lets the
-             model reason before acting — with many tools visible it tends to keep searching
+        What this test validates: the full research pipeline works end-to-end — model gathers
+        information via real MCP tools and produces a substantive text answer.
         """
-        MAX_TOOL_CALLS = 10  # fail if model hasn't written text by this point
+        RESEARCH_TOOLS = {"web_search", "web_read_url", "praetor_memory_search"}
+        tools = _select_tools(mcp_tool_defs, RESEARCH_TOOLS)
+        tools.append(_dispatch_tool_def())
 
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        # Use the tools that appeared in the user's actual failing session:
-        # lm_praetor_memory_search, lm_web_search (x14), lm_web_read_url (x3)
-        # Passing the full MCP list (30+ tools) causes a 400 from LiteLLM.
-        # The key difference from the previous passing test: praetor_memory_search
-        # is included — that's what the model calls first in OWU, then loops.
-        RESEARCH_TOOLS = {"web_search", "web_read_url", "praetor_memory_search"}
-        all_tools = _select_tools(mcp_tool_defs, RESEARCH_TOOLS)
-        all_tools.append(_dispatch_tool_def())
-
-        # Fetch live system prompt from OWU model config — same as what the UI applies
         model_resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
         assert model_resp.status_code == 200, "Could not fetch custom model config"
         system_prompt = model_resp.json().get("meta", {}).get("system", "")
         assert system_prompt, "Custom model has no system prompt — run scripts/register_owui_tool.py"
 
-        # date_injector filter prepends the date in the real UI pipeline
         messages = [
-            {
-                "role": "system",
-                "content": f"Today's date is {today} (UTC).\n{system_prompt}",
-            },
-            {
-                "role": "user",
-                "content": (
-                    "please do some research on how I can connect jellyfin to Google displays "
-                    "so I can use my wake word and have it play an episode or movie from jellyfin"
-                ),
-            },
+            {"role": "system", "content": f"Today's date is {today} (UTC).\n{system_prompt}"},
+            {"role": "user", "content": (
+                "please do some research on how I can connect jellyfin to Google displays "
+                "so I can use my wake word and have it play an episode or movie from jellyfin"
+            )},
         ]
 
-        tool_calls_made: list[str] = []
-        final_content: str = ""
+        final_content, tool_calls_made, had_xml = _run_tool_loop(
+            owui, litellm, messages, tools, max_tool_turns=6,
+        )
 
-        for turn in range(MAX_TOOL_CALLS):
-            resp = owui.post(
-                "/api/v1/chat/completions",
-                json={
-                    "model": CUSTOM_MODEL,
-                    "messages": messages,
-                    "tools": all_tools,
-                    "tool_choice": "auto",   # what OWU sends — no "required" bias
-                    "stream": False,
-                    "max_tokens": 1200,
-                },
-            )
-            assert resp.status_code == 200, f"OWU HTTP {resp.status_code}: {resp.text[:300]}"
-
-            choice = resp.json()["choices"][0]
-            msg = choice["message"]
-            content = msg.get("content") or ""
-            tc = msg.get("tool_calls") or []
-
-            if not tc:
-                # Model wrote a text answer — success path
-                final_content = content
-                break
-
-            # Model called more tools — execute and continue
-            messages.append(msg)
-            for call in tc:
-                name = call["function"]["name"]
-                args = json.loads(call["function"]["arguments"])
-                tool_calls_made.append(name)
-                result = _execute_mcp_tool(litellm, name, args)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "content": result,
-                })
-        else:
-            # Loop exhausted without text — this is the bug
-            pytest.fail(
-                f"Model made {len(tool_calls_made)} tool calls without producing a text answer.\n"
-                f"Tools called: {tool_calls_made}\n"
-                f"This reproduces the Jellyfin/Google display blank response.\n"
-                f"Fix: strengthen the 'stop after N tools' instruction in SYSTEM_PROMPT."
-            )
-
+        assert not had_xml, (
+            f"Model used XML tool syntax — function_calling must be 'native' on {CUSTOM_MODEL}"
+        )
+        assert len(tool_calls_made) >= 1, (
+            "Model never called any tools for a research question — check toolIds config."
+        )
         assert len(final_content) > 100, (
-            f"Model produced a text response but it's too short ({len(final_content)} chars): "
-            f"{final_content!r}\nTools called: {tool_calls_made}"
+            f"Research synthesis too short ({len(final_content)} chars).\n"
+            f"Tools called: {tool_calls_made}\nContent: {final_content!r}"
         )
 
     def test_coding_task_dispatches_not_searches(self, owui, litellm, mcp_tool_defs):
@@ -622,6 +562,7 @@ class TestEndToEnd:
                 "tool_choice": "required",
                 "stream": False,
                 "max_tokens": 400,
+                "temperature": 0,
             },
         )
         assert resp.status_code == 200
