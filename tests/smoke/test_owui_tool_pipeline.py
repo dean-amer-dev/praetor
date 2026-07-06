@@ -224,14 +224,15 @@ def _run_tool_loop(
             result = _execute_mcp_tool(litellm, name, args)
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
 
-    # Model used all tool turns — force it to synthesize now
+    # Model used all tool turns — force it to synthesize now.
+    # max_tokens=2048: no thinking on qwen36-27b-think so 2048 is well within budget.
     resp = owui.post(
         "/api/v1/chat/completions",
         json={
             "model": model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 1000,
+            "max_tokens": 2048,
         },
     )
     assert resp.status_code == 200, f"OWU synthesis turn HTTP {resp.status_code}: {resp.text[:300]}"

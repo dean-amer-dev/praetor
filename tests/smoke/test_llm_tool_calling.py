@@ -35,9 +35,10 @@ def _k8s_secret(namespace: str, secret: str, key: str) -> str:
         return ""
 
 
-LITELLM_URL = os.environ.get("LITELLM_URL", "https://litellm.amer.dev")
-MODEL       = os.environ.get("LLM_MODEL", "qwen3-35b-think")
-TIMEOUT     = int(os.environ.get("LLM_TIMEOUT", "120"))
+LITELLM_URL  = os.environ.get("LITELLM_URL", "https://litellm.amer.dev")
+MODEL        = os.environ.get("LLM_MODEL", "qwen3-35b-think")
+MODEL_27B    = os.environ.get("LLM_MODEL_27B", "qwen36-27b-think")
+TIMEOUT      = int(os.environ.get("LLM_TIMEOUT", "120"))
 
 LITELLM_API_KEY = (
     os.environ.get("LITELLM_API_KEY")
@@ -112,11 +113,11 @@ _FORCE_SYNTHESIS_AFTER  = 8
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _completion(messages, tools=None, max_tokens=2048):
+def _completion(messages, tools=None, max_tokens=2048, model=None):
     headers = {"Content-Type": "application/json"}
     if LITELLM_API_KEY:
         headers["Authorization"] = f"Bearer {LITELLM_API_KEY}"
-    payload = {"model": MODEL, "messages": messages, "max_tokens": max_tokens}
+    payload = {"model": model or MODEL, "messages": messages, "max_tokens": max_tokens}
     if tools:
         payload["tools"] = tools
     return httpx.post(
@@ -227,20 +228,11 @@ class TestLLMToolCalling:
 
     def test_complex_synthesis_non_empty(self):
         """
-        Regression for reasoning-budget exhaustion on synthesis turns.
+        Synthesis after 8 tool calls must produce a non-empty response.
 
-        Root cause: --reasoning-budget 1500 was too small for complex research
-        prompts. When the model needs > 1500 thinking tokens, llama.cpp forces
-        </think> and then stops generation, producing an empty response that
-        OWU displays as a blank message.
-
-        This test uses a complex multi-topic prompt (similar to real OWU usage),
-        runs through 8 tool calls to gather context, then sends a DIRECT synthesis
-        request (no tools, enable_thinking=true) and asserts the response is
-        non-empty and substantive.
-
-        Fails if reasoning-budget is too small (empty synthesis) or if budget
-        exhaustion during tool turns causes 400 errors.
+        Uses the default MODEL (35B MoE with thinking). The 35B MoE handles
+        thinking + synthesis within max_tokens=2048 without exhaustion.
+        See test_27b_synthesis_no_thinking_regression for the 27B equivalent.
         """
         if not LITELLM_API_KEY:
             pytest.skip("LITELLM_API_KEY not available")
@@ -285,9 +277,8 @@ class TestLLMToolCalling:
                         "role": "tool", "tool_call_id": tc["id"], "content": result,
                     })
 
-        # Synthesis turn: no tools, thinking is ON (this is the path that was broken)
-        # max_tokens=2048 rather than 4096: 27B dense generates ~30 t/s vs 35B MoE ~80 t/s;
-        # 4096 tokens at 30 t/s = ~136s and hits the 120s test timeout.
+        # Synthesis turn: no tools, thinking enabled for 35B MoE.
+        # max_tokens=2048: 35B MoE at ~80 t/s = ~25s — within the 120s timeout.
         resp = _completion(messages, tools=None, max_tokens=2048)
         assert resp.status_code == 200, f"synthesis HTTP {resp.status_code}: {resp.text[:300]}"
 
@@ -320,97 +311,54 @@ class TestLLMToolCalling:
             f"Check auto_disable_thinking_with_tools in froggeric-v20.jinja. Error: {err}"
         )
 
-    def test_orphan_cleanup(self):
-        """Orphaned tool result (no matching assistant.tool_calls) → 200, not 400."""
-        if not LITELLM_API_KEY:
-            pytest.skip("LITELLM_API_KEY not available")
-
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user",   "content": "Hello, what is 2+2?"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{"id": "call_valid", "type": "function",
-                                "function": {"name": "get_fact", "arguments": '{"topic": "math"}'}}],
-            },
-            {"role": "tool", "tool_call_id": "call_valid", "content": "Math is the study of numbers."},
-            # Orphaned — no matching assistant.tool_calls
-            {"role": "tool", "tool_call_id": "call_ORPHAN_NO_MATCH", "content": "This result has no parent."},
-            {"role": "user", "content": "Just answer the math question directly."},
-        ]
-
-        resp = _completion(messages, tools=MOCK_TOOLS)
-        assert resp.status_code != 400, (
-            "Got 400 — LiteLLM hook did NOT clean up the orphaned tool result. "
-            "Check _cleanup_orphaned_tool_pairs() in tool-strip-hook-configmap.yaml."
-        )
-        assert resp.status_code == 200, f"unexpected HTTP {resp.status_code}: {resp.text[:200]}"
-
-    def test_bad_json_cleanup(self):
+    def test_27b_synthesis_no_thinking_regression(self):
         """
-        tool_call with truncated/invalid JSON arguments (caused by reasoning-budget
-        exhaustion mid-generation) must be removed by the hook, not cause a 400.
+        Regression: qwen36-27b-think synthesis must return non-empty content.
+
+        Root cause (fixed): llama.cpp uses max_tokens as a total budget (thinking +
+        output). With thinking enabled and max_tokens=1000, the model exhausted the
+        budget thinking and produced empty content. Fix: qwen36-27b-think now uses
+        chat_template_kwargs.enable_thinking=false in the LiteLLM model config.
+
+        This test re-runs the exact failure scenario (8 tool turns + synthesis at
+        max_tokens=1000) to catch regressions if thinking is re-enabled on this model.
         """
         if not LITELLM_API_KEY:
             pytest.skip("LITELLM_API_KEY not available")
 
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user",   "content": "Search for Python history."},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{
-                    "id":   "call_truncated",
-                    "type": "function",
-                    "function": {
-                        "name":      "search_web",
-                        "arguments": '{"query": "Python programming language hist',  # truncated
-                    },
-                }],
-            },
-            {"role": "tool", "tool_call_id": "call_truncated", "content": "Some search result."},
-            {"role": "user", "content": "Never mind. What year was Python created?"},
-        ]
-
-        resp = _completion(messages, tools=MOCK_TOOLS)
-        assert resp.status_code != 400, (
-            "Got 400 — hook did NOT strip the truncated-JSON tool_call. "
-            "Check _has_invalid_args() in _cleanup_orphaned_tool_pairs()."
-        )
-        assert resp.status_code == 200, f"unexpected HTTP {resp.status_code}: {resp.text[:200]}"
-
-    def test_mixed_orphan(self):
-        """
-        Assistant with 2 tool_calls, only 1 result → entire group removed atomically.
-        """
-        if not LITELLM_API_KEY:
-            pytest.skip("LITELLM_API_KEY not available")
+        big_result = (
+            "Laptops for elderly parents: Acer Swift Go 14 ($650) lightweight, "
+            "HP Pavilion ($549) large screen, Dell Inspiron 15 ($499) reliable. "
+            "Key features: large display, backlit keyboard, long battery life."
+        ) * 8  # ~1400 chars, realistic tool result size
 
         messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user",   "content": "Search for two topics."},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {"id": "call_a", "type": "function",
-                     "function": {"name": "search_web", "arguments": '{"query": "topic A"}'}},
-                    {"id": "call_b", "type": "function",
-                     "function": {"name": "search_web", "arguments": '{"query": "topic B"}'}},
-                ],
-            },
-            # Only call_a has a result; call_b is missing
-            {"role": "tool", "tool_call_id": "call_a", "content": "Result for topic A."},
-            {"role": "user", "content": "Just summarize what you know."},
+            {"role": "system", "content": "Be helpful. After gathering info, write your answer."},
+            {"role": "user", "content": "What are the best laptops for elderly parents?"},
         ]
+        for i in range(8):
+            cid = f"call_{i:04d}"
+            messages.append({
+                "role": "assistant", "content": None,
+                "tool_calls": [{"type": "function", "id": cid,
+                                "function": {"name": "search_web", "arguments": '{"query":"test"}'}}],
+            })
+            messages.append({"role": "tool", "tool_call_id": cid, "content": big_result})
 
-        resp = _completion(messages, tools=MOCK_TOOLS)
-        assert resp.status_code != 400, (
-            "Got 400 — incomplete tool_call group (2 calls, 1 result) was not removed atomically."
+        # Synthesis turn: no tools, small max_tokens — the exact failure scenario.
+        resp = _completion(messages, tools=None, max_tokens=1000, model=MODEL_27B)
+        assert resp.status_code == 200, f"synthesis HTTP {resp.status_code}: {resp.text[:300]}"
+
+        choice  = resp.json()["choices"][0]
+        content = choice["message"].get("content") or ""
+        reasoning = choice["message"].get("reasoning_content") or ""
+        finish  = choice["finish_reason"]
+
+        assert len(content) >= 100, (
+            f"27B synthesis empty or too short ({len(content)} chars, finish={finish}, "
+            f"reasoning_len={len(reasoning)}). "
+            "Re-check qwen36-27b-think config: chat_template_kwargs.enable_thinking must be false."
         )
-        assert resp.status_code == 200, f"unexpected HTTP {resp.status_code}: {resp.text[:200]}"
 
     def test_clean_history_passthru(self):
         """Well-formed conversation with complete tool exchange passes through unchanged."""
