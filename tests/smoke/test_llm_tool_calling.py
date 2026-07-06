@@ -113,13 +113,15 @@ _FORCE_SYNTHESIS_AFTER  = 8
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _completion(messages, tools=None, max_tokens=2048, model=None):
+def _completion(messages, tools=None, max_tokens=2048, model=None, tool_choice=None):
     headers = {"Content-Type": "application/json"}
     if LITELLM_API_KEY:
         headers["Authorization"] = f"Bearer {LITELLM_API_KEY}"
     payload = {"model": model or MODEL, "messages": messages, "max_tokens": max_tokens}
-    if tools:
+    if tools is not None:
         payload["tools"] = tools
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
     return httpx.post(
         f"{LITELLM_URL}/v1/chat/completions",
         json=payload,
@@ -156,8 +158,10 @@ def _drive_tool_session(user_prompt, max_turns=15):
     tool_call_count = 0
 
     for turn in range(max_turns):
-        active_tools = MOCK_TOOLS if tool_call_count < _FORCE_SYNTHESIS_AFTER else None
-        resp = _completion(messages, tools=active_tools)
+        force_synthesis = tool_call_count >= _FORCE_SYNTHESIS_AFTER
+        active_tools = MOCK_TOOLS
+        tc_override = "none" if force_synthesis else None
+        resp = _completion(messages, tools=active_tools, tool_choice=tc_override)
 
         if resp.status_code != 200:
             return turn, "error", "", f"HTTP {resp.status_code}: {resp.text[:300]}"
@@ -277,9 +281,10 @@ class TestLLMToolCalling:
                         "role": "tool", "tool_call_id": tc["id"], "content": result,
                     })
 
-        # Synthesis turn: no tools, thinking enabled for 35B MoE.
-        # max_tokens=2048: 35B MoE at ~80 t/s = ~25s — within the 120s timeout.
-        resp = _completion(messages, tools=None, max_tokens=2048)
+        # Synthesis turn: tools visible but tool_choice="none" (community-standard synthesis signal).
+        # Without tool_choice="none", the model sees conversation history with tool calls but no
+        # current tools block — it falls back to generating XML <tool_call> syntax instead of prose.
+        resp = _completion(messages, tools=MOCK_TOOLS, tool_choice="none", max_tokens=2048)
         assert resp.status_code == 200, f"synthesis HTTP {resp.status_code}: {resp.text[:300]}"
 
         choice  = resp.json()["choices"][0]
