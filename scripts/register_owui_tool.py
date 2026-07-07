@@ -407,8 +407,10 @@ _ARCHLINUX_SHARED_META = {
     "toolIds": ["praetor_dispatch", "server:mcp:lm"],
 }
 
-ARCHLINUX_V0_ID = "archlinux-v0"
-ARCHLINUX_UNCENSORED_ID = "archlinux-uncensored-v0"
+ARCHLINUX_V0_ID = "archlinux-v0-custom"
+ARCHLINUX_UNCENSORED_ID = "archlinux-uncensored-v0-custom"
+ARCHLINUX_V0_BASE_ID = "archlinux-v0-base"
+ARCHLINUX_UNCENSORED_BASE_ID = "archlinux-uncensored-v0-base"
 
 ARCHLINUX_V0_SYSTEM = """\
 You are a helpful AI assistant with access to web search, URL reading, memory search, and Praetor agent dispatch tools.
@@ -451,13 +453,16 @@ Call dispatch_task with task_type="openhands". Include "repo: owner/name" in des
 Direct, informative, no-nonsense. No moralizing or unsolicited caveats."""
 
 
-def _ensure_archlinux_model(client: httpx.Client, model_id: str, name: str, description: str, system: str) -> None:
+def _ensure_archlinux_model(
+    client: httpx.Client, model_id: str, name: str, description: str, system: str,
+    base_model_id: str | None = None,
+) -> None:
     resp = client.get(f"/api/v1/models/model?id={model_id}")
     existing = resp.json() if resp.status_code == 200 and resp.json().get("id") else None
     payload = {
         "id": model_id,
         "name": name,
-        "base_model_id": model_id,
+        "base_model_id": base_model_id or model_id,
         "params": {"function_calling": "native"},
         "meta": {**_ARCHLINUX_SHARED_META, "description": description, "system": system},
         "is_active": True,
@@ -528,11 +533,13 @@ def main() -> None:
             client, ARCHLINUX_V0_ID, "archlinux-v0",
             "archlinux qwen3:14b — gated assistant with tool calling",
             ARCHLINUX_V0_SYSTEM,
+            base_model_id=ARCHLINUX_V0_BASE_ID,
         )
         _ensure_archlinux_model(
             client, ARCHLINUX_UNCENSORED_ID, "archlinux-uncensored-v0",
             "archlinux qwen3:14b — ungated assistant with tool calling",
             ARCHLINUX_UNCENSORED_SYSTEM,
+            base_model_id=ARCHLINUX_UNCENSORED_BASE_ID,
         )
         # NOTE: deactivate_base_model was removed — deactivating qwen3-35b-think breaks
         # custom model routing in OWU 0.9.6 (custom models route through their base_model_id,

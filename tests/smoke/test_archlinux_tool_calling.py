@@ -36,8 +36,10 @@ def _k8s_secret(namespace: str, secret: str, key: str) -> str:
 
 
 LITELLM_URL  = os.environ.get("LITELLM_URL", "https://litellm.amer.dev")
-GATED_MODEL  = os.environ.get("ARCHLINUX_MODEL", "archlinux-v0")
-UNCENSORED_MODEL = os.environ.get("ARCHLINUX_UNCENSORED_MODEL", "archlinux-uncensored-v0")
+# LiteLLM base model names (no system prompt). OWU presets archlinux-v0-custom /
+# archlinux-uncensored-v0-custom wrap these and add system prompts + tool config.
+GATED_MODEL  = os.environ.get("ARCHLINUX_MODEL", "archlinux-v0-base")
+UNCENSORED_MODEL = os.environ.get("ARCHLINUX_UNCENSORED_MODEL", "archlinux-uncensored-v0-base")
 TIMEOUT      = int(os.environ.get("LLM_TIMEOUT", "120"))
 
 LITELLM_API_KEY = (
