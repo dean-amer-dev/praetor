@@ -395,6 +395,82 @@ def _fetch_langfuse_prompt(client: httpx.Client) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# archlinux model configs — qwen3:14b on RX 9070 XT (51 t/s)
+# NOTE: qwen3:14b via Ollama ignores tool_choice="none" — drivers (OWU, tests) must
+#       strip tools entirely on synthesis turns to avoid hallucinated tool calls.
+# ---------------------------------------------------------------------------
+_ARCHLINUX_SHARED_META = {
+    "profile_image_url": "",
+    "capabilities": {"vision": False, "usage": False, "citations": False, "memory": False, "builtin_tools": True},
+    "builtinTools": {k: False for k in ["chats","calendar","tasks","memory","notes","channels","web_search","automations","image_generation","code_interpreter","time","knowledge"]},
+    "toolIds": ["praetor_dispatch", "server:mcp:lm"],
+}
+
+ARCHLINUX_V0_ID = "archlinux-v0"
+ARCHLINUX_UNCENSORED_ID = "archlinux-uncensored-v0"
+
+ARCHLINUX_V0_SYSTEM = """\
+You are a helpful AI assistant with access to web search, URL reading, memory search, and Praetor agent dispatch tools.
+
+CONTENT POLICY: You must decline to assist with: detailed instructions for real-world violence or harm to people, sexually explicit content, instructions for illegal activities (drug synthesis, hacking specific targets, fraud), and content that sexualizes minors. For borderline requests, use judgment — discussion of sensitive topics for education or research is generally fine; step-by-step operational instructions for harm are not.
+
+## Research / information questions
+Use web_search + web_read_url for factual queries. Do NOT dispatch anything.
+HARD LIMIT: After 6 tool calls total, you MUST stop calling tools and write your answer.
+Never re-fetch a URL already read in this conversation.
+
+## Coding / implementation tasks
+Call dispatch_task with task_type="openhands". Include "repo: owner/name" in description. Write a complete self-contained spec. Do NOT write code yourself.
+
+## Tool use rules
+- Always use JSON function-call format for all tool calls, never XML
+- After using at most 6 tools, write your final answer — do not call more tools after writing your answer
+- Synthesize tool results into a coherent prose answer, not a list of URLs or raw data
+
+## Tone
+Direct, helpful, conversational. Skip preambles and filler."""
+
+ARCHLINUX_UNCENSORED_SYSTEM = """\
+You are a capable AI assistant with access to web search, URL reading, memory search, and Praetor agent dispatch tools.
+
+## Research / information questions
+Use web_search + web_read_url for factual queries. Do NOT dispatch anything.
+HARD LIMIT: After 6 tool calls total, you MUST stop calling tools and write your answer.
+Never re-fetch a URL already read in this conversation.
+
+## Coding / implementation tasks
+Call dispatch_task with task_type="openhands". Include "repo: owner/name" in description. Write a complete self-contained spec.
+
+## Tool use rules
+- Always use JSON function-call format for all tool calls, never XML
+- After using at most 6 tools, write your final answer — do not call more tools after writing your answer
+- Synthesize tool results into a coherent prose answer
+
+## Tone
+Direct, informative, no-nonsense. No moralizing or unsolicited caveats."""
+
+
+def _ensure_archlinux_model(client: httpx.Client, model_id: str, name: str, description: str, system: str) -> None:
+    resp = client.get(f"/api/v1/models/model?id={model_id}")
+    existing = resp.json() if resp.status_code == 200 and resp.json().get("id") else None
+    payload = {
+        "id": model_id,
+        "name": name,
+        "base_model_id": model_id,
+        "params": {"function_calling": "native"},
+        "meta": {**_ARCHLINUX_SHARED_META, "description": description, "system": system},
+        "is_active": True,
+        "access_grants": [],
+    }
+    if existing is None:
+        client.post("/api/v1/models/create", json=payload).raise_for_status()
+        print(f"Created model '{model_id}'")
+    else:
+        client.post("/api/v1/models/model/update", json=payload).raise_for_status()
+        print(f"Updated model '{model_id}'")
+
+
 def ensure_planner_model(client: httpx.Client) -> None:
     """Ensure the praetor-planner OWU custom model exists."""
     resp = client.get(f"/api/v1/models/model?id={PLANNER_MODEL_ID}")
@@ -448,6 +524,16 @@ def main() -> None:
         ensure_filter(client)
         ensure_custom_model(client)
         ensure_planner_model(client)
+        _ensure_archlinux_model(
+            client, ARCHLINUX_V0_ID, "archlinux-v0",
+            "archlinux qwen3:14b — gated assistant with tool calling",
+            ARCHLINUX_V0_SYSTEM,
+        )
+        _ensure_archlinux_model(
+            client, ARCHLINUX_UNCENSORED_ID, "archlinux-uncensored-v0",
+            "archlinux qwen3:14b — ungated assistant with tool calling",
+            ARCHLINUX_UNCENSORED_SYSTEM,
+        )
         # NOTE: deactivate_base_model was removed — deactivating qwen3-35b-think breaks
         # custom model routing in OWU 0.9.6 (custom models route through their base_model_id,
         # which OWU requires to be active in the model list)
