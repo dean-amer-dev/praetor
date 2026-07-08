@@ -11,7 +11,7 @@ Run:
 What it does:
   1. Ensures the praetor_dispatch Python tool exists (dispatch_task + get_task_status +
      skills management: list_skills, create_skill, assign_skill, remove_skill_assignment;
-     web_search/web_read_url come from the LiteLLM MCP Gateway tool, not here)
+     searxng_search/searxng_read_url come from the LiteLLM MCP Gateway tool, not here)
   2. Ensures the date_injector global Filter exists — prepends "Today is <date>" to every
      system prompt so the model can do date-accurate searches
   3. Ensures the qwen3-35b-think-custom model exists with:
@@ -26,7 +26,7 @@ What it does:
      This script just ensures the model's toolIds reference it.
 
 LiteLLM MCP tools exposed via server:mcp:lm (as of 2026-06-25):
-  web_search, web_read_url,
+  searxng_search, searxng_read_url,
   infra_scaffold, infra_provision, infra_deploy_pr, infra_add_runner,
   infra_check_secrets, infra_app_status, infra_resolve_secret,
   github_ls, github_read, github_search, github_prs, github_pr_diff,
@@ -47,7 +47,7 @@ OWUI_ADMIN_PASSWORD = os.environ.get("OWUI_ADMIN_PASSWORD", "")
 
 # ---------------------------------------------------------------------------
 # praetor_dispatch Python tool — Praetor task dispatch only.
-# web_search / web_read_url intentionally omitted: those come from server:mcp:lm.
+# searxng_search / searxng_read_url intentionally omitted: those come from server:mcp:lm.
 # ---------------------------------------------------------------------------
 TOOL_ID = "praetor_dispatch"
 TOOL_NAME = "Praetor Dispatch"
@@ -88,7 +88,7 @@ class Tools:
         - openhands: autonomous coding agent — use for ALL code tasks (implement, fix, modify files, open PRs)
         - code: lighter code tasks via Praetor coder
         - pipeline: data pipeline tasks
-        - research: deep multi-step autonomous research (ONLY when user says "deep research" or "research task" — NOT for simple questions, use web_search for those)
+        - research: deep multi-step autonomous research (ONLY when user says "deep research" or "research task" — NOT for simple questions, use searxng_search for those)
         Include \'repo: owner/name\' in description for code tasks.
         Returns task_id and confirmation.
         """
@@ -233,7 +233,7 @@ You are a helpful personal assistant with access to web search, GitHub, infrastr
 Praetor agent dispatch, and agent factory tools.
 
 ## Research / information questions
-Use web_search + web_read_url. Do NOT dispatch anything.
+Use searxng_search + searxng_read_url. Do NOT dispatch anything.
 Examples: "research X", "look up X", "what is X", "find info on X", "how do I X".
 HARD LIMIT: After 6 tool calls total, you MUST stop calling tools and write your answer. \
 Do not call another tool after 6. Write the answer with what you have.
@@ -362,7 +362,7 @@ def ensure_custom_model(client: httpx.Client) -> None:
                 "automations": False, "image_generation": False,
                 "code_interpreter": False, "time": False, "knowledge": False,
             },
-            # server:mcp:lm provides: web_search, web_read_url, infra_*, github_*
+            # server:mcp:lm provides: searxng_search, searxng_read_url, infra_*, github_*
             # praetor_dispatch provides: dispatch_task, get_task_status
             "toolIds": ["praetor_dispatch", "server:mcp:lm"],
             "system": SYSTEM_PROMPT,
@@ -418,7 +418,7 @@ You are a helpful AI assistant with access to web search, URL reading, memory se
 CONTENT POLICY: You must decline to assist with: detailed instructions for real-world violence or harm to people, sexually explicit content, instructions for illegal activities (drug synthesis, hacking specific targets, fraud), and content that sexualizes minors. For borderline requests, use judgment — discussion of sensitive topics for education or research is generally fine; step-by-step operational instructions for harm are not.
 
 ## Research / information questions
-Use web_search + web_read_url for factual queries. Do NOT dispatch anything.
+Use searxng_search + searxng_read_url for factual queries. Do NOT dispatch anything.
 HARD LIMIT: After 6 tool calls total, you MUST stop calling tools and write your answer.
 Never re-fetch a URL already read in this conversation.
 
@@ -437,7 +437,7 @@ ARCHLINUX_UNCENSORED_SYSTEM = """\
 You are a capable AI assistant with access to web search, URL reading, memory search, and Praetor agent dispatch tools.
 
 ## Research / information questions
-Use web_search + web_read_url for factual queries. Do NOT dispatch anything.
+Use searxng_search + searxng_read_url for factual queries. Do NOT dispatch anything.
 HARD LIMIT: After 6 tool calls total, you MUST stop calling tools and write your answer.
 Never re-fetch a URL already read in this conversation.
 
@@ -466,7 +466,7 @@ You are a capable AI assistant with access to web search, URL reading, GitHub, \
 infrastructure, Praetor agent dispatch, and agent factory tools.
 
 ## Research / information questions
-Use web_search + web_read_url for factual queries. Do NOT dispatch anything.
+Use searxng_search + searxng_read_url for factual queries. Do NOT dispatch anything.
 HARD LIMIT: After 6 tool calls total, you MUST stop calling tools and write your answer.
 Never re-fetch a URL already read in this conversation.
 
