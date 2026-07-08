@@ -453,6 +453,44 @@ Call dispatch_task with task_type="openhands". Include "repo: owner/name" in des
 Direct, informative, no-nonsense. No moralizing or unsolicited caveats."""
 
 
+# ---------------------------------------------------------------------------
+# murderbot-v1 model configs — Qwen3.6-27B NVFP4 on RTX PRO 4000 Blackwell (vLLM)
+# ---------------------------------------------------------------------------
+MURDERBOT_V1_ID = "murderbot-v1-custom"
+MURDERBOT_V1_BASE_ID = "murderbot-v1-base"
+MURDERBOT_UNCENSORED_V1_ID = "murderbot-uncensored-v1-custom"
+MURDERBOT_UNCENSORED_V1_BASE_ID = "murderbot-uncensored-v1-base"
+
+MURDERBOT_UNCENSORED_V1_SYSTEM = """\
+You are a capable AI assistant with access to web search, URL reading, GitHub, \
+infrastructure, Praetor agent dispatch, and agent factory tools.
+
+## Research / information questions
+Use web_search + web_read_url for factual queries. Do NOT dispatch anything.
+HARD LIMIT: After 6 tool calls total, you MUST stop calling tools and write your answer.
+Never re-fetch a URL already read in this conversation.
+
+## Coding / implementation tasks
+Call dispatch_task with task_type="openhands". Include "repo: owner/name" in description. \
+Write a complete self-contained spec. Do NOT write code yourself.
+
+## Creating a new Praetor agent
+Call lm_praetor_create_agent with name (kebab-case), description, event, and tools list. \
+Present a plan and get approval first.
+
+## Adding an MCP server
+Stop and plan first: ask what it connects to and what tools it needs, get confirmation, \
+then call lm_praetor_add_mcp.
+
+## Tool use rules
+- Always use JSON function-call format for all tool calls, never XML
+- After using at most 6 tools, write your final answer — do not call more tools after writing your answer
+- Synthesize tool results into a coherent prose answer
+
+## Tone
+Direct, informative, no-nonsense. No moralizing or unsolicited caveats."""
+
+
 def _ensure_archlinux_model(
     client: httpx.Client, model_id: str, name: str, description: str, system: str,
     base_model_id: str | None = None,
@@ -540,6 +578,18 @@ def main() -> None:
             "archlinux qwen3:14b — ungated assistant with tool calling",
             ARCHLINUX_UNCENSORED_SYSTEM,
             base_model_id=ARCHLINUX_UNCENSORED_BASE_ID,
+        )
+        _ensure_archlinux_model(
+            client, MURDERBOT_V1_ID, "murderbot-v1",
+            "murderbot Qwen3.6-27B NVFP4 — gated assistant with full tool calling",
+            SYSTEM_PROMPT,
+            base_model_id=MURDERBOT_V1_BASE_ID,
+        )
+        _ensure_archlinux_model(
+            client, MURDERBOT_UNCENSORED_V1_ID, "murderbot-uncensored-v1",
+            "murderbot Qwen3.6-27B NVFP4 — ungated assistant with full tool calling",
+            MURDERBOT_UNCENSORED_V1_SYSTEM,
+            base_model_id=MURDERBOT_UNCENSORED_V1_BASE_ID,
         )
         # NOTE: deactivate_base_model was removed — deactivating qwen3-35b-think breaks
         # custom model routing in OWU 0.9.6 (custom models route through their base_model_id,
