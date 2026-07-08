@@ -267,7 +267,7 @@ class TestModelConfig:
         assert "praetor_dispatch" in tool_ids, f"praetor_dispatch missing from toolIds: {tool_ids}"
 
     def test_server_mcp_lm_in_tool_ids(self, owui):
-        """server:mcp:lm must be in toolIds — this is what provides lm_web_search etc."""
+        """server:mcp:lm must be in toolIds — this is what provides lm_searxng_search etc."""
         resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
         assert resp.status_code == 200
         tool_ids = resp.json().get("meta", {}).get("toolIds", [])
@@ -338,7 +338,7 @@ class TestEndToEnd:
         XML means OWU is in text injection mode. OWU cannot parse or execute XML
         tool calls — they appear as raw text in the chat, silently breaking tool use.
         """
-        tools = _select_tools(mcp_tool_defs, {"web_search", "web_read_url"})
+        tools = _select_tools(mcp_tool_defs, {"searxng_search", "searxng_read_url"})
         resp = owui.post(
             "/api/v1/chat/completions",
             json={
@@ -366,11 +366,11 @@ class TestEndToEnd:
         )
         assert msg.get("tool_calls"), "tool_calls field is empty despite finish_reason='tool_calls'"
 
-    def test_research_uses_web_search_not_dispatch(self, owui, litellm, mcp_tool_defs):
+    def test_research_uses_searxng_search_not_dispatch(self, owui, litellm, mcp_tool_defs):
         """
-        Research question must use web_search and return a real answer, never dispatch.
+        Research question must use searxng_search and return a real answer, never dispatch.
 
-        Verifies the full pipeline: model calls web_search → MCP executes → results
+        Verifies the full pipeline: model calls searxng_search → MCP executes → results
         fed back → model writes a substantive answer with actual content.
 
         Uses tool_choice='required' on the first turn because with 'auto' this model
@@ -383,7 +383,7 @@ class TestEndToEnd:
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        tools = _select_tools(mcp_tool_defs, {"web_search", "web_read_url"})
+        tools = _select_tools(mcp_tool_defs, {"searxng_search", "searxng_read_url"})
         tools.append(_dispatch_tool_def())
 
         # Pass system prompt explicitly — OWU API doesn't guarantee model config
@@ -393,7 +393,7 @@ class TestEndToEnd:
                 "role": "system",
                 "content": (
                     f"Today's date is {today} (UTC).\n"
-                    "You are a helpful assistant. For research questions, call web_search immediately. "
+                    "You are a helpful assistant. For research questions, call searxng_search immediately. "
                     "For coding tasks, call dispatch_task. Never dispatch for research."
                 ),
             },
@@ -408,7 +408,7 @@ class TestEndToEnd:
             f"Model called dispatch_task for a research question. Called: {called}. "
             "System prompt says dispatch is only for coding tasks."
         )
-        assert any(n in ("web_search", "web_read_url") for n in called), (
+        assert any(n in ("searxng_search", "searxng_read_url") for n in called), (
             f"Model did not call any web search tool. Called: {called}. "
             "Check server:mcp:lm is in toolIds and LiteLLM MCP is reachable."
         )
@@ -417,9 +417,9 @@ class TestEndToEnd:
             f"Answer: {final!r}\nTools called: {called}"
         )
 
-    def test_mcp_web_search_executes_and_returns_results(self, litellm, mcp_tool_defs):
+    def test_mcp_searxng_search_executes_and_returns_results(self, litellm, mcp_tool_defs):
         """
-        LiteLLM MCP must actually execute web_search and return non-empty results.
+        LiteLLM MCP must actually execute searxng_search and return non-empty results.
 
         Tests the execution path independently from the model. If this fails, MCP
         tool execution is broken regardless of what the model does.
@@ -428,13 +428,13 @@ class TestEndToEnd:
         results from any major search engine — avoids flaky failures on niche queries
         when SearXNG engines are rate-limited or temporarily down.
         """
-        result = _execute_mcp_tool(litellm, "web_search", {"query": "Python programming language", "max_results": 3})
+        result = _execute_mcp_tool(litellm, "searxng_search", {"query": "Python programming language", "max_results": 3})
         assert result and len(result) > 50, (
-            f"web_search returned no content ({len(result)} chars): {result!r}. "
+            f"searxng_search returned no content ({len(result)} chars): {result!r}. "
             "SearXNG or LiteLLM MCP execution may be broken."
         )
         assert "python" in result.lower(), (
-            f"web_search result doesn't mention 'python' for a python query: {result[:300]!r}"
+            f"searxng_search result doesn't mention 'python' for a python query: {result[:300]!r}"
         )
 
     def test_date_injected_into_system_prompt(self, owui):
@@ -485,7 +485,7 @@ class TestEndToEnd:
         What this test validates: the full research pipeline works end-to-end — model gathers
         information via real MCP tools and produces a substantive text answer.
         """
-        RESEARCH_TOOLS = {"web_search", "web_read_url", "praetor_memory_search"}
+        RESEARCH_TOOLS = {"searxng_search", "searxng_read_url", "praetor_memory_search"}
         tools = _select_tools(mcp_tool_defs, RESEARCH_TOOLS)
         tools.append(_dispatch_tool_def())
 
@@ -530,7 +530,7 @@ class TestEndToEnd:
         System prompt is passed explicitly — see test_research_uses_web_search_not_dispatch
         for why this is required rather than relying on the OWU model config being applied.
         """
-        tools = _select_tools(mcp_tool_defs, {"web_search", "web_read_url"})
+        tools = _select_tools(mcp_tool_defs, {"searxng_search", "searxng_read_url"})
         tools.append(_dispatch_tool_def())
 
         messages = [
@@ -541,7 +541,7 @@ class TestEndToEnd:
                     "For coding tasks (implement features, fix bugs, modify files, open PRs): "
                     "call dispatch_task with task_type='openhands' and include 'repo: owner/name'. "
                     "Do NOT write code yourself. Do NOT search the web for coding tasks. "
-                    "For research questions: call web_search."
+                    "For research questions: call searxng_search."
                 ),
             },
             {
@@ -581,7 +581,7 @@ class TestEndToEnd:
             f"Model called wrong tool(s) for coding task: {called_names}. Expected dispatch_task. "
             "Check the system prompt instructs dispatch for coding tasks."
         )
-        assert "web_search" not in called_names, (
+        assert "searxng_search" not in called_names, (
             f"Model searched instead of dispatching for a coding task: {called_names}"
         )
 
@@ -594,10 +594,10 @@ class TestLiteLLMMCP:
         resp = litellm.post("/mcp/", content=b'{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}')
         assert resp.status_code == 200, f"LiteLLM MCP HTTP {resp.status_code}: {resp.text[:300]}"
 
-    def test_litellm_mcp_exposes_web_search(self, mcp_tool_defs):
+    def test_litellm_mcp_exposes_searxng_search(self, mcp_tool_defs):
         names = {t["name"] for t in mcp_tool_defs}
-        assert "web_search" in names, f"web_search missing from LiteLLM MCP tools: {names}"
-        assert "web_read_url" in names, f"web_read_url missing from LiteLLM MCP tools: {names}"
+        assert "searxng_search" in names, f"searxng_search missing from LiteLLM MCP tools: {names}"
+        assert "searxng_read_url" in names, f"searxng_read_url missing from LiteLLM MCP tools: {names}"
 
     def test_litellm_serves_base_model(self, litellm):
         resp = litellm.get("/v1/models", headers={"Accept": "application/json"})
@@ -607,7 +607,7 @@ class TestLiteLLMMCP:
 
     def test_litellm_native_tool_call_baseline(self, litellm, mcp_tool_defs):
         """Direct LiteLLM call must return tool_calls JSON. If this fails, llama.cpp tool calling is broken."""
-        tools = _select_tools(mcp_tool_defs, {"web_search"})
+        tools = _select_tools(mcp_tool_defs, {"searxng_search"})
         resp = litellm.post(
             "/v1/chat/completions",
             json={
@@ -719,7 +719,7 @@ class TestMurderbotV1:
 
         Uses tool_choice='required' to force a tool call response.
         """
-        tools = _select_tools(mcp_tool_defs, {"web_search", "web_read_url"})
+        tools = _select_tools(mcp_tool_defs, {"searxng_search", "searxng_read_url"})
         resp = owui.post(
             "/api/v1/chat/completions",
             json={
@@ -749,13 +749,13 @@ class TestMurderbotV1:
         """
         Full research loop must return ACTUAL CONTENT — not XML, not just tool calls.
 
-        The model must: call web_search → receive real results → synthesize a text answer
+        The model must: call searxng_search → receive real results → synthesize a text answer
         with specific, real information including actual laptop brand names.
         """
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        tools = _select_tools(mcp_tool_defs, {"web_search", "web_read_url"})
+        tools = _select_tools(mcp_tool_defs, {"searxng_search", "searxng_read_url"})
         messages = [
             {
                 "role": "system",
@@ -777,7 +777,7 @@ class TestMurderbotV1:
         assert not had_xml, (
             "murderbot-v1 produced <function=...> XML — native tool calling broken."
         )
-        assert any(n in ("web_search", "web_read_url") for n in called), (
+        assert any(n in ("searxng_search", "searxng_read_url") for n in called), (
             f"No web search tool was called. Tools called: {called}"
         )
         assert len(final) > 200, (
