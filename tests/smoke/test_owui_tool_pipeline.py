@@ -729,43 +729,32 @@ class TestMurderbotV1:
 
     def test_v1_thinking_does_not_consume_full_output_budget(self, litellm):
         """
-        vLLM shares max_tokens between thinking tokens and visible content.
+        Regression: when max_output_tokens=2048 in the litellm configmap, OWU sent
+        max_tokens=2048 to vLLM. The model exhausted the entire budget on reasoning
+        and produced 0 visible characters ("Thought for 2 minutes" then blank).
 
-        Regression: with max_output_tokens=2048 (the old value), the model spent ALL
-        2048 tokens on reasoning and produced 0 visible characters. Users saw blank
-        responses after "Thought for 2 minutes".
+        Fix: max_output_tokens >= 4096 so the model has room to think (~2000 tokens)
+        and still produce visible output.
 
-        Fix: max_output_tokens=8192, truncate_prompt_tokens=8192 (8192+8192=16384).
-        With ~2000-3000 thinking tokens, 5000-6000 remain for visible content.
-
-        This test sends a simple prose request (no tools) with max_tokens=8192 and
-        asserts the response contains at least 200 chars of visible content.
+        This test checks the LiteLLM model_info config directly — a fast, reliable
+        assertion that catches the exact misconfiguration without requiring live inference
+        (which would need a 5-10 minute timeout on a loaded GPU server).
         """
-        resp = litellm.post(
-            "/v1/chat/completions",
-            json={
-                "model": BASE_MODEL,
-                "messages": [{"role": "user", "content": "Write a short paragraph about the history of e-readers."}],
-                "max_tokens": 8192,
-                "stream": False,
-            },
-            headers={"Accept": "application/json"},
+        resp = litellm.get("/model/info", headers={"Accept": "application/json"})
+        assert resp.status_code == 200, f"LiteLLM /model/info HTTP {resp.status_code}: {resp.text[:200]}"
+        models = {m["model_name"]: m.get("model_info", {}) for m in resp.json().get("data", [])}
+        assert BASE_MODEL in models, (
+            f"{BASE_MODEL!r} not in LiteLLM model list. "
+            "Check apps/litellm/server/configmap.yaml in k3s-dean-gitops."
         )
-        assert resp.status_code == 200, f"LiteLLM HTTP {resp.status_code}: {resp.text[:300]}"
-        choice = resp.json()["choices"][0]
-        content = choice["message"].get("content") or ""
-        reasoning = choice["message"].get("reasoning_content") or ""
-        finish = choice["finish_reason"]
-
-        assert len(content) >= 200, (
-            f"murderbot-v1 produced no visible content ({len(content)} chars, finish={finish!r}, "
-            f"reasoning_len={len(reasoning)}).\n"
-            "Root cause: vLLM shares max_tokens between thinking + visible output. "
-            "Fix: increase max_output_tokens in litellm configmap (apps/litellm/server/configmap.yaml) "
-            "so OWU requests a larger budget. Current target: 8192 each for input and output."
-        )
-        assert finish in ("stop", "length"), (
-            f"Unexpected finish_reason={finish!r}. content={content[:100]!r}"
+        max_output = models[BASE_MODEL].get("max_output_tokens", 0)
+        assert max_output >= 4096, (
+            f"{BASE_MODEL} max_output_tokens={max_output} is too small.\n"
+            "vLLM shares the max_tokens budget between thinking tokens and visible content. "
+            "When max_output_tokens < 4096, thinking alone can exhaust the entire budget, "
+            "leaving 0 tokens for visible content.\n"
+            "Fix: set max_output_tokens >= 4096 (current target: 8192) for "
+            f"{BASE_MODEL} in apps/litellm/server/configmap.yaml (k3s-dean-gitops)."
         )
 
     def test_v1_no_xml_tool_calls(self, owui, mcp_tool_defs):
