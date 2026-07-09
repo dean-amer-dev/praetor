@@ -385,8 +385,9 @@ class TestEndToEnd:
                 "tools": tools,
                 "tool_choice": "required",
                 "stream": False,
-                "max_tokens": 200,
+                "max_tokens": 2048,  # thinking model needs room: ~500-1000 thinking tokens + tool call JSON
             },
+            timeout=300,
         )
         assert resp.status_code == 200
         choice = resp.json()["choices"][0]
@@ -778,8 +779,9 @@ class TestMurderbotV1:
                 "tools": tools,
                 "tool_choice": "required",
                 "stream": False,
-                "max_tokens": 400,
+                "max_tokens": 2048,  # thinking model needs room: ~500-1000 thinking + tool call JSON
             },
+            timeout=300,
         )
         assert resp.status_code == 200, f"OWU HTTP {resp.status_code}: {resp.text[:300]}"
         choice = resp.json()["choices"][0]
