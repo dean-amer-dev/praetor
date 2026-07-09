@@ -225,16 +225,18 @@ def _run_tool_loop(
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
 
     # Model used all tool turns — force it to synthesize now.
-    # max_tokens=2048: vLLM separates thinking tokens from output tokens, so this
-    # applies to the output budget only. Both 35B (qwen3-35b-think) and 27B
-    # (qwen36-27b-think) produce substantive content within 2048 output tokens.
+    # max_tokens=1024: qwen36-27b-think has a 16K context limit. After 5+ real
+    # tool calls, the conversation can grow to ~14K input tokens. Using 2048 here
+    # would push the total to 16385 → 400 ContextWindowExceededError. 1024 keeps
+    # us within budget (14337 + 1024 = 15361 < 16384) while still producing a
+    # substantive answer (the >100 char assertion is easily satisfied at 1024 tokens).
     resp = owui.post(
         "/api/v1/chat/completions",
         json={
             "model": model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 2048,
+            "max_tokens": 1024,
         },
     )
     assert resp.status_code == 200, f"OWU synthesis turn HTTP {resp.status_code}: {resp.text[:300]}"
@@ -454,8 +456,9 @@ class TestEndToEnd:
             "/api/v1/chat/completions",
             json={
                 "model": CUSTOM_MODEL,
+                # No "tools" key — vLLM rejects empty arrays ("tools must not be an
+                # empty array; either provide at least one tool or omit the field").
                 "messages": [{"role": "user", "content": "What ISO date does your system context say it is? Reply with just the date, nothing else."}],
-                "tools": [],
                 "stream": False,
                 "max_tokens": 800,
             },
