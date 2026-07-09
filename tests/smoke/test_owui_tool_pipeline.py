@@ -332,11 +332,16 @@ class TestModelConfig:
         assert f.get("is_active") is True, f"date_injector is disabled (is_active={f.get('is_active')})"
         assert f.get("is_global") is True, f"date_injector is not global (is_global={f.get('is_global')})"
 
-    def test_base_model_active(self, owui):
-        """murderbot-v1-base must be active — OWU 0.9.6 requires base model active to route custom model completions."""
-        resp = owui.get(f"/api/v1/models/model?id={BASE_MODEL}")
-        assert resp.status_code == 200, f"Base model not found: HTTP {resp.status_code}"
-        assert resp.json().get("is_active") is True, f"Base model {BASE_MODEL} is inactive"
+    def test_base_model_visible(self, owui):
+        """murderbot-v1-base must be visible in OWU's model list (fetched from LiteLLM)."""
+        resp = owui.get("/api/v1/models")
+        assert resp.status_code == 200, f"OWU /api/v1/models HTTP {resp.status_code}"
+        models = resp.json() if isinstance(resp.json(), list) else resp.json().get("data", [])
+        model_ids = [m.get("id") for m in models]
+        assert BASE_MODEL in model_ids, (
+            f"{BASE_MODEL!r} not visible in OWU. LiteLLM must serve it and OWU must connect. "
+            f"Present models: {[m for m in model_ids if 'murderbot' in str(m)]}"
+        )
 
     def test_praetor_dispatch_tool_registered(self, owui):
         """praetor_dispatch Python tool must exist with a non-empty API key."""
@@ -491,6 +496,7 @@ class TestEndToEnd:
                 "stream": False,
                 "max_tokens": 800,
             },
+            timeout=300,  # thinking model queues behind other requests; wait up to 5 min
         )
         assert resp.status_code == 200
         choice = resp.json()["choices"][0]
