@@ -225,14 +225,18 @@ def _run_tool_loop(
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
 
     # Model used all tool turns — force it to synthesize now.
-    # max_tokens=2048: no thinking on qwen36-27b-think so 2048 is well within budget.
+    # max_tokens=1024: qwen36-27b-think has a 16K context limit. After 5+ real
+    # tool calls, the conversation can grow to ~14K input tokens. Using 2048 here
+    # would push the total to 16385 → 400 ContextWindowExceededError. 1024 keeps
+    # us within budget (14337 + 1024 = 15361 < 16384) while still producing a
+    # substantive answer (the >100 char assertion is easily satisfied at 1024 tokens).
     resp = owui.post(
         "/api/v1/chat/completions",
         json={
             "model": model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 2048,
+            "max_tokens": 1024,
         },
     )
     assert resp.status_code == 200, f"OWU synthesis turn HTTP {resp.status_code}: {resp.text[:300]}"
@@ -452,8 +456,9 @@ class TestEndToEnd:
             "/api/v1/chat/completions",
             json={
                 "model": CUSTOM_MODEL,
+                # No "tools" key — vLLM rejects empty arrays ("tools must not be an
+                # empty array; either provide at least one tool or omit the field").
                 "messages": [{"role": "user", "content": "What ISO date does your system context say it is? Reply with just the date, nothing else."}],
-                "tools": [],
                 "stream": False,
                 "max_tokens": 800,
             },
@@ -744,6 +749,170 @@ class TestMurderbotV1:
             f"finish_reason={choice['finish_reason']!r}, content={content[:200]!r}"
         )
         assert msg.get("tool_calls"), "tool_calls field is empty"
+
+    def test_v1_model_config(self, owui):
+        """
+        Composite config check for murderbot-v1 — parallels TestModelConfig for v0.
+
+        Catches restart-wipe regressions where OWU loses custom model settings.
+        Checks: model exists, function_calling=native, toolIds have required entries,
+        system prompt present.
+        """
+        resp = owui.get(f"/api/v1/models/model?id={V1_CUSTOM_MODEL}")
+        assert resp.status_code == 200, (
+            f"murderbot-v1 ({V1_CUSTOM_MODEL}) not found: HTTP {resp.status_code}. "
+            "Run scripts/register_owui_tool.py to restore it."
+        )
+        data = resp.json()
+
+        assert data.get("name") == "murderbot-v1", (
+            f"Expected name='murderbot-v1', got {data.get('name')!r}"
+        )
+
+        fc = data.get("params", {}).get("function_calling")
+        assert fc == "native", (
+            f"function_calling={fc!r} on murderbot-v1 — must be 'native'. "
+            "Text injection produces <function=...> XML that OWU cannot execute."
+        )
+
+        tool_ids = data.get("meta", {}).get("toolIds", [])
+        assert "praetor_dispatch" in tool_ids, (
+            f"praetor_dispatch missing from murderbot-v1 toolIds: {tool_ids}"
+        )
+        assert "server:mcp:lm" in tool_ids, (
+            f"server:mcp:lm missing from murderbot-v1 toolIds: {tool_ids}. "
+            "This provides lm_searxng_search and other research tools."
+        )
+
+        system = data.get("meta", {}).get("system", "")
+        assert len(system) > 50, (
+            f"murderbot-v1 system prompt missing or too short ({len(system)} chars)"
+        )
+
+    def test_v1_research_produces_synthesis(self, owui, litellm, mcp_tool_defs):
+        """
+        Research question via murderbot-v1 must produce a substantive text answer.
+
+        This is the test that would have caught the live regression: user sent a
+        research question, model called tools, response returned empty content
+        (finish_reason=stop but no text).
+
+        Root cause hypothesis: qwen36-27b-think exhausts max_tokens budget on thinking
+        during synthesis turn. Fix: enable_thinking=false in LiteLLM model config.
+
+        What this validates end-to-end:
+        - OWU routes qwen3-27b-think-custom → LiteLLM → llama.cpp
+        - Model calls real MCP tools (not mocks)
+        - Synthesis turn returns >100 chars of actual content
+        """
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        RESEARCH_TOOLS = {"searxng_search", "searxng_read_url", "praetor_memory_search"}
+        tools = _select_tools(mcp_tool_defs, RESEARCH_TOOLS)
+        tools.append(_dispatch_tool_def())
+
+        model_resp = owui.get(f"/api/v1/models/model?id={V1_CUSTOM_MODEL}")
+        assert model_resp.status_code == 200, "Could not fetch murderbot-v1 config"
+        system_prompt = model_resp.json().get("meta", {}).get("system", "")
+        assert system_prompt, "murderbot-v1 has no system prompt"
+
+        messages = [
+            {"role": "system", "content": f"Today's date is {today} (UTC).\n{system_prompt}"},
+            {"role": "user", "content": (
+                "please do some research on how I can connect jellyfin to Google displays "
+                "so I can use my wake word and have it play an episode or movie from jellyfin"
+            )},
+        ]
+
+        final_content, tool_calls_made, had_xml = _run_tool_loop(
+            owui, litellm, messages, tools, max_tool_turns=5, model=V1_CUSTOM_MODEL,
+        )
+
+        assert not had_xml, (
+            f"murderbot-v1 used XML tool syntax — function_calling must be 'native' on {V1_CUSTOM_MODEL}"
+        )
+        assert len(tool_calls_made) >= 1, (
+            "murderbot-v1 never called any tools for a research question — check toolIds config."
+        )
+        assert len(final_content) > 100, (
+            f"murderbot-v1 research synthesis too short ({len(final_content)} chars).\n"
+            f"Tools called: {tool_calls_made}\nContent: {final_content!r}\n"
+            "If empty: check qwen36-27b-think has chat_template_kwargs.enable_thinking=false "
+            "in LiteLLM config (apps/litellm/server/configmap.yaml). Thinking exhausts "
+            "max_tokens budget and produces empty content."
+        )
+
+    def test_v1_synthesis_token_budget(self, owui, litellm, mcp_tool_defs):
+        """
+        Diagnose thinking-budget exhaustion: 5 pre-baked tool turns + synthesis at max_tokens=1500.
+
+        Reproduces the exact failure mode: if qwen36-27b-think has thinking enabled,
+        the model spends its entire token budget on <think> blocks and returns empty content.
+        Fix: chat_template_kwargs.enable_thinking=false in LiteLLM config.
+
+        Uses pre-baked tool turns (no live MCP calls) so this test runs fast and
+        isolates the synthesis-budget issue from network/MCP availability.
+        """
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        big_result = (
+            "Laptops for elderly parents: Acer Swift Go 14 ($650) lightweight, "
+            "HP Pavilion ($549) large screen, Dell Inspiron 15 ($499) reliable. "
+            "Key features: large display, backlit keyboard, long battery life, "
+            "simple OS (ChromeOS or Windows), voice assistant support."
+        ) * 5  # ~900 chars, realistic tool result size
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"Today's date is {today} (UTC).\n"
+                    "You are a helpful research assistant. After gathering information, "
+                    "write a comprehensive, well-structured answer for the user."
+                ),
+            },
+            {"role": "user", "content": "What are the best laptops for elderly parents?"},
+        ]
+
+        # Inject 5 pre-baked tool turns — same pattern as test_27b_synthesis_no_thinking_regression
+        for i in range(5):
+            cid = f"call_{i:04d}"
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "type": "function",
+                    "id": cid,
+                    "function": {"name": "searxng_search", "arguments": '{"query":"laptops elderly parents"}'},
+                }],
+            })
+            messages.append({"role": "tool", "tool_call_id": cid, "content": big_result})
+
+        # Synthesis call via OWU: no tools, max_tokens=1500 — tight enough to expose thinking budget exhaustion
+        resp = owui.post(
+            "/api/v1/chat/completions",
+            json={
+                "model": V1_CUSTOM_MODEL,
+                "messages": messages,
+                "stream": False,
+                "max_tokens": 1500,
+            },
+        )
+        assert resp.status_code == 200, f"OWU synthesis HTTP {resp.status_code}: {resp.text[:300]}"
+
+        choice = resp.json()["choices"][0]
+        content = choice["message"].get("content") or ""
+        finish = choice["finish_reason"]
+
+        assert len(content) >= 100, (
+            f"27B synthesis empty — check qwen36-27b-think has enable_thinking=false in LiteLLM config.\n"
+            f"Got {len(content)} chars (finish_reason={finish!r}).\n"
+            f"Content: {content[:200]!r}\n"
+            "Fix: add chat_template_kwargs: {{enable_thinking: false}} to the qwen36-27b-think "
+            "entry in apps/litellm/server/configmap.yaml in k3s-dean-gitops."
+        )
 
     def test_v1_full_research_with_real_results(self, owui, litellm, mcp_tool_defs):
         """
