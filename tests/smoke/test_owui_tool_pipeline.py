@@ -727,6 +727,47 @@ class TestMurderbotV1:
     and full research loop with real MCP results.
     """
 
+    def test_v1_thinking_does_not_consume_full_output_budget(self, litellm):
+        """
+        vLLM shares max_tokens between thinking tokens and visible content.
+
+        Regression: with max_output_tokens=2048 (the old value), the model spent ALL
+        2048 tokens on reasoning and produced 0 visible characters. Users saw blank
+        responses after "Thought for 2 minutes".
+
+        Fix: max_output_tokens=8192, truncate_prompt_tokens=8192 (8192+8192=16384).
+        With ~2000-3000 thinking tokens, 5000-6000 remain for visible content.
+
+        This test sends a simple prose request (no tools) with max_tokens=8192 and
+        asserts the response contains at least 200 chars of visible content.
+        """
+        resp = litellm.post(
+            "/v1/chat/completions",
+            json={
+                "model": BASE_MODEL,
+                "messages": [{"role": "user", "content": "Write a short paragraph about the history of e-readers."}],
+                "max_tokens": 8192,
+                "stream": False,
+            },
+            headers={"Accept": "application/json"},
+        )
+        assert resp.status_code == 200, f"LiteLLM HTTP {resp.status_code}: {resp.text[:300]}"
+        choice = resp.json()["choices"][0]
+        content = choice["message"].get("content") or ""
+        reasoning = choice["message"].get("reasoning_content") or ""
+        finish = choice["finish_reason"]
+
+        assert len(content) >= 200, (
+            f"murderbot-v1 produced no visible content ({len(content)} chars, finish={finish!r}, "
+            f"reasoning_len={len(reasoning)}).\n"
+            "Root cause: vLLM shares max_tokens between thinking + visible output. "
+            "Fix: increase max_output_tokens in litellm configmap (apps/litellm/server/configmap.yaml) "
+            "so OWU requests a larger budget. Current target: 8192 each for input and output."
+        )
+        assert finish in ("stop", "length"), (
+            f"Unexpected finish_reason={finish!r}. content={content[:100]!r}"
+        )
+
     def test_v1_no_xml_tool_calls(self, owui, mcp_tool_defs):
         """
         Model must return JSON tool_calls, never <function=...> XML in content.
