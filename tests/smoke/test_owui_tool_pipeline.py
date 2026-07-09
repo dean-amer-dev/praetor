@@ -46,11 +46,16 @@ PRAETOR_KEY   = os.environ.get("PRAETOR_API_KEY", "dRykVJyZp79Ute6JRKlZAgTuMs2jM
 
 SEARXNG_URL   = os.environ.get("SEARXNG_URL", "https://searxng.amer.dev")
 
-CUSTOM_MODEL  = "qwen3-35b-think-custom"
-BASE_MODEL    = "qwen3-35b-think"
+CUSTOM_MODEL  = "murderbot-v1-custom"
+BASE_MODEL    = "murderbot-v1-base"
 
-V1_CUSTOM_MODEL = "qwen3-27b-think-custom"
-V1_BASE_MODEL   = "qwen36-27b-think"
+# All 4 active OWU custom models: (custom_model_id, display_name, base_model_id)
+ALL_CUSTOM_MODELS = [
+    ("murderbot-v1-custom",            "murderbot-v1",            "murderbot-v1-base"),
+    ("murderbot-uncensored-v1-custom", "murderbot-uncensored-v1", "murderbot-uncensored-v1-base"),
+    ("archlinux-v0-custom",            "archlinux-v0",            "archlinux-v0-base"),
+    ("archlinux-uncensored-v0-custom", "archlinux-uncensored-v0", "archlinux-uncensored-v0-base"),
+]
 
 TIMEOUT       = int(os.environ.get("LLM_TIMEOUT", "120"))
 
@@ -252,17 +257,34 @@ class TestModelConfig:
     def test_custom_model_exists(self, owui):
         resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
         assert resp.status_code == 200, f"Custom model not found: HTTP {resp.status_code}"
-        assert resp.json().get("name") == "murderbot-v0"
+        assert resp.json().get("name") == "murderbot-v1"
+
+    def test_all_custom_models_exist(self, owui):
+        """All 4 active OWU custom models must exist with correct display name and base_model_id."""
+        for custom_id, display_name, base_id in ALL_CUSTOM_MODELS:
+            resp = owui.get(f"/api/v1/models/model?id={custom_id}")
+            assert resp.status_code == 200, (
+                f"Custom model {custom_id!r} not found (HTTP {resp.status_code}). "
+                "Run scripts/register_owui_tool.py to restore it."
+            )
+            data = resp.json()
+            assert data.get("name") == display_name, (
+                f"{custom_id}: expected name={display_name!r}, got {data.get('name')!r}"
+            )
+            assert data.get("base_model_id") == base_id, (
+                f"{custom_id}: expected base_model_id={base_id!r}, got {data.get('base_model_id')!r}"
+            )
 
     def test_function_calling_native(self, owui):
-        """function_calling must be 'native' — otherwise model outputs XML that OWU cannot execute."""
-        resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
-        assert resp.status_code == 200
-        fc = resp.json().get("params", {}).get("function_calling")
-        assert fc == "native", (
-            f"function_calling={fc!r}. Must be 'native' — text injection produces "
-            "<function=...> XML that OWU's parser ignores, silently breaking all tool calls."
-        )
+        """function_calling must be 'native' on all models — otherwise OWU outputs XML it cannot execute."""
+        for custom_id, display_name, _ in ALL_CUSTOM_MODELS:
+            resp = owui.get(f"/api/v1/models/model?id={custom_id}")
+            assert resp.status_code == 200
+            fc = resp.json().get("params", {}).get("function_calling")
+            assert fc == "native", (
+                f"{custom_id} function_calling={fc!r}. Must be 'native' — text injection produces "
+                "<function=...> XML that OWU's parser ignores, silently breaking all tool calls."
+            )
 
     def test_praetor_dispatch_in_tool_ids(self, owui):
         resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
@@ -271,13 +293,15 @@ class TestModelConfig:
         assert "praetor_dispatch" in tool_ids, f"praetor_dispatch missing from toolIds: {tool_ids}"
 
     def test_server_mcp_lm_in_tool_ids(self, owui):
-        """server:mcp:lm must be in toolIds — this is what provides lm_searxng_search etc."""
-        resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
-        assert resp.status_code == 200
-        tool_ids = resp.json().get("meta", {}).get("toolIds", [])
-        assert "server:mcp:lm" in tool_ids, (
-            f"server:mcp:lm missing from toolIds: {tool_ids}. Run scripts/register_owui_tool.py."
-        )
+        """server:mcp:lm must be in toolIds on all models — provides lm_searxng_search etc."""
+        for custom_id, _, _ in ALL_CUSTOM_MODELS:
+            resp = owui.get(f"/api/v1/models/model?id={custom_id}")
+            assert resp.status_code == 200
+            tool_ids = resp.json().get("meta", {}).get("toolIds", [])
+            assert "server:mcp:lm" in tool_ids, (
+                f"server:mcp:lm missing from {custom_id} toolIds: {tool_ids}. "
+                "Run scripts/register_owui_tool.py."
+            )
 
     def test_builtin_web_search_disabled(self, owui):
         """builtinTools.web_search must be False — web search comes from server:mcp:lm, not OWU builtins."""
@@ -289,10 +313,15 @@ class TestModelConfig:
         )
 
     def test_system_prompt_present(self, owui):
-        resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
-        assert resp.status_code == 200
-        system = resp.json().get("meta", {}).get("system", "")
-        assert len(system) > 50, f"system prompt missing or too short ({len(system)} chars)"
+        """All active models must have a system prompt."""
+        for custom_id, _, _ in ALL_CUSTOM_MODELS:
+            resp = owui.get(f"/api/v1/models/model?id={custom_id}")
+            assert resp.status_code == 200
+            system = resp.json().get("meta", {}).get("system", "")
+            assert len(system) > 50, (
+                f"{custom_id}: system prompt missing or too short ({len(system)} chars). "
+                "Run scripts/register_owui_tool.py."
+            )
 
     def test_date_injector_filter_active_and_global(self, owui):
         """date_injector filter must be active and global — prepends today's date to every system prompt."""
@@ -304,7 +333,7 @@ class TestModelConfig:
         assert f.get("is_global") is True, f"date_injector is not global (is_global={f.get('is_global')})"
 
     def test_base_model_active(self, owui):
-        """qwen3-35b-think must be active — OWU 0.9.6 requires base model active to route custom model completions."""
+        """murderbot-v1-base must be active — OWU 0.9.6 requires base model active to route custom model completions."""
         resp = owui.get(f"/api/v1/models/model?id={BASE_MODEL}")
         assert resp.status_code == 200, f"Base model not found: HTTP {resp.status_code}"
         assert resp.json().get("is_active") is True, f"Base model {BASE_MODEL} is inactive"
@@ -604,14 +633,19 @@ class TestLiteLLMMCP:
         assert "searxng_search" in names, f"searxng_search missing from LiteLLM MCP tools: {names}"
         assert "searxng_read_url" in names, f"searxng_read_url missing from LiteLLM MCP tools: {names}"
 
-    def test_litellm_serves_base_model(self, litellm):
+    def test_litellm_serves_all_base_models(self, litellm):
+        """All 4 base models must be served by LiteLLM — OWU custom models route through these."""
         resp = litellm.get("/v1/models", headers={"Accept": "application/json"})
         assert resp.status_code == 200
-        ids = [m["id"] for m in resp.json()["data"]]
-        assert BASE_MODEL in ids, f"{BASE_MODEL!r} not in LiteLLM models: {ids}"
+        ids = {m["id"] for m in resp.json()["data"]}
+        for _, _, base_id in ALL_CUSTOM_MODELS:
+            assert base_id in ids, (
+                f"{base_id!r} not in LiteLLM models: {sorted(ids)}. "
+                "Check apps/litellm/server/configmap.yaml in k3s-dean-gitops."
+            )
 
     def test_litellm_native_tool_call_baseline(self, litellm, mcp_tool_defs):
-        """Direct LiteLLM call must return tool_calls JSON. If this fails, llama.cpp tool calling is broken."""
+        """Direct LiteLLM call must return tool_calls JSON. If this fails, vLLM tool calling is broken."""
         tools = _select_tools(mcp_tool_defs, {"searxng_search"})
         resp = litellm.post(
             "/v1/chat/completions",
@@ -683,40 +717,15 @@ class TestPraetorAPI:
         assert status.json().get("task_id") == task_id
 
 
-# ── murderbot-v1 (Qwen3.6-27B) ───────────────────────────────────────────────
+# ── murderbot-v1 regression tests (Qwen3.6-27B, vLLM, RTX PRO 4000) ──────────
 
 class TestMurderbotV1:
     """
-    Smoke tests for murderbot-v1 (qwen3-27b-think-custom / qwen36-27b-think).
+    Regression tests specific to murderbot-v1 (murderbot-v1-custom / murderbot-v1-base).
 
-    Covers tool calling, no XML leakage, and full research loop with real results.
+    These cover synthesis-token-budget exhaustion (the original no-output regression)
+    and full research loop with real MCP results.
     """
-
-    def test_v1_model_exists_in_owu(self, owui):
-        resp = owui.get(f"/api/v1/models/model?id={V1_CUSTOM_MODEL}")
-        assert resp.status_code == 200, (
-            f"murderbot-v1 ({V1_CUSTOM_MODEL}) not found: HTTP {resp.status_code}"
-        )
-        assert resp.json().get("name") == "murderbot-v1"
-
-    def test_v1_function_calling_native(self, owui):
-        """function_calling must be 'native' — text injection produces XML blobs in content."""
-        resp = owui.get(f"/api/v1/models/model?id={V1_CUSTOM_MODEL}")
-        assert resp.status_code == 200
-        fc = resp.json().get("params", {}).get("function_calling")
-        assert fc == "native", (
-            f"murderbot-v1 function_calling={fc!r} — must be 'native'. "
-            "XML tool call blobs will leak into content otherwise."
-        )
-
-    def test_v1_base_model_in_litellm(self, litellm):
-        """qwen36-27b-think must be registered in LiteLLM."""
-        resp = litellm.get("/v1/models", headers={"Accept": "application/json"})
-        assert resp.status_code == 200
-        ids = [m["id"] for m in resp.json()["data"]]
-        assert V1_BASE_MODEL in ids, (
-            f"{V1_BASE_MODEL!r} not in LiteLLM: {ids}"
-        )
 
     def test_v1_no_xml_tool_calls(self, owui, mcp_tool_defs):
         """
@@ -728,7 +737,7 @@ class TestMurderbotV1:
         resp = owui.post(
             "/api/v1/chat/completions",
             json={
-                "model": V1_CUSTOM_MODEL,
+                "model": CUSTOM_MODEL,
                 "messages": [{"role": "user", "content": "Search for best laptops for elderly people."}],
                 "tools": tools,
                 "tool_choice": "required",
@@ -750,60 +759,16 @@ class TestMurderbotV1:
         )
         assert msg.get("tool_calls"), "tool_calls field is empty"
 
-    def test_v1_model_config(self, owui):
-        """
-        Composite config check for murderbot-v1 — parallels TestModelConfig for v0.
-
-        Catches restart-wipe regressions where OWU loses custom model settings.
-        Checks: model exists, function_calling=native, toolIds have required entries,
-        system prompt present.
-        """
-        resp = owui.get(f"/api/v1/models/model?id={V1_CUSTOM_MODEL}")
-        assert resp.status_code == 200, (
-            f"murderbot-v1 ({V1_CUSTOM_MODEL}) not found: HTTP {resp.status_code}. "
-            "Run scripts/register_owui_tool.py to restore it."
-        )
-        data = resp.json()
-
-        assert data.get("name") == "murderbot-v1", (
-            f"Expected name='murderbot-v1', got {data.get('name')!r}"
-        )
-
-        fc = data.get("params", {}).get("function_calling")
-        assert fc == "native", (
-            f"function_calling={fc!r} on murderbot-v1 — must be 'native'. "
-            "Text injection produces <function=...> XML that OWU cannot execute."
-        )
-
-        tool_ids = data.get("meta", {}).get("toolIds", [])
-        assert "praetor_dispatch" in tool_ids, (
-            f"praetor_dispatch missing from murderbot-v1 toolIds: {tool_ids}"
-        )
-        assert "server:mcp:lm" in tool_ids, (
-            f"server:mcp:lm missing from murderbot-v1 toolIds: {tool_ids}. "
-            "This provides lm_searxng_search and other research tools."
-        )
-
-        system = data.get("meta", {}).get("system", "")
-        assert len(system) > 50, (
-            f"murderbot-v1 system prompt missing or too short ({len(system)} chars)"
-        )
-
     def test_v1_research_produces_synthesis(self, owui, litellm, mcp_tool_defs):
         """
         Research question via murderbot-v1 must produce a substantive text answer.
 
         This is the test that would have caught the live regression: user sent a
-        research question, model called tools, response returned empty content
-        (finish_reason=stop but no text).
+        research question, model called tools, response returned empty content.
 
-        Root cause hypothesis: qwen36-27b-think exhausts max_tokens budget on thinking
-        during synthesis turn. Fix: enable_thinking=false in LiteLLM model config.
-
-        What this validates end-to-end:
-        - OWU routes qwen3-27b-think-custom → LiteLLM → llama.cpp
-        - Model calls real MCP tools (not mocks)
-        - Synthesis turn returns >100 chars of actual content
+        Root cause (fixed): 27B model (16K context limit) + 5+ real tool calls (~14K
+        input tokens) + synthesis requesting 2048 output = 16385 > 16384 → HTTP 400.
+        Fix: max_completion_tokens: 1024 in LiteLLM config for murderbot-v1-base.
         """
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -812,7 +777,7 @@ class TestMurderbotV1:
         tools = _select_tools(mcp_tool_defs, RESEARCH_TOOLS)
         tools.append(_dispatch_tool_def())
 
-        model_resp = owui.get(f"/api/v1/models/model?id={V1_CUSTOM_MODEL}")
+        model_resp = owui.get(f"/api/v1/models/model?id={CUSTOM_MODEL}")
         assert model_resp.status_code == 200, "Could not fetch murderbot-v1 config"
         system_prompt = model_resp.json().get("meta", {}).get("system", "")
         assert system_prompt, "murderbot-v1 has no system prompt"
@@ -826,11 +791,11 @@ class TestMurderbotV1:
         ]
 
         final_content, tool_calls_made, had_xml = _run_tool_loop(
-            owui, litellm, messages, tools, max_tool_turns=5, model=V1_CUSTOM_MODEL,
+            owui, litellm, messages, tools, max_tool_turns=5, model=CUSTOM_MODEL,
         )
 
         assert not had_xml, (
-            f"murderbot-v1 used XML tool syntax — function_calling must be 'native' on {V1_CUSTOM_MODEL}"
+            f"murderbot-v1 used XML tool syntax — function_calling must be 'native' on {CUSTOM_MODEL}"
         )
         assert len(tool_calls_made) >= 1, (
             "murderbot-v1 never called any tools for a research question — check toolIds config."
@@ -838,21 +803,22 @@ class TestMurderbotV1:
         assert len(final_content) > 100, (
             f"murderbot-v1 research synthesis too short ({len(final_content)} chars).\n"
             f"Tools called: {tool_calls_made}\nContent: {final_content!r}\n"
-            "If empty: check qwen36-27b-think has chat_template_kwargs.enable_thinking=false "
-            "in LiteLLM config (apps/litellm/server/configmap.yaml). Thinking exhausts "
-            "max_tokens budget and produces empty content."
+            "If empty or 400: check murderbot-v1-base has max_completion_tokens: 1024 "
+            "in apps/litellm/server/configmap.yaml (prevents context window overflow)."
         )
 
     def test_v1_synthesis_token_budget(self, owui, litellm, mcp_tool_defs):
         """
-        Diagnose thinking-budget exhaustion: 5 pre-baked tool turns + synthesis at max_tokens=1500.
+        Regression: 5 pre-baked tool turns + synthesis at max_tokens=1500 must not 400.
 
-        Reproduces the exact failure mode: if qwen36-27b-think has thinking enabled,
-        the model spends its entire token budget on <think> blocks and returns empty content.
-        Fix: chat_template_kwargs.enable_thinking=false in LiteLLM config.
+        Root cause: 27B model has 16K total context. 5 realistic tool results push
+        input tokens to ~10K. 1500 output tokens at LiteLLM level = fine (10K + 1500 = 11.5K).
+        But if LiteLLM config did NOT have truncate_prompt_tokens, a real 5-turn session
+        with large results could exceed 14K input → 14K + 1500 = 15.5K, still fine.
+        The hard cap is max_completion_tokens: 1024 set in LiteLLM for the base model
+        which caps synthesis output server-side regardless of what the client requests.
 
-        Uses pre-baked tool turns (no live MCP calls) so this test runs fast and
-        isolates the synthesis-budget issue from network/MCP availability.
+        Uses pre-baked tool turns (no live MCP calls) so this test runs fast.
         """
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -876,7 +842,6 @@ class TestMurderbotV1:
             {"role": "user", "content": "What are the best laptops for elderly parents?"},
         ]
 
-        # Inject 5 pre-baked tool turns — same pattern as test_27b_synthesis_no_thinking_regression
         for i in range(5):
             cid = f"call_{i:04d}"
             messages.append({
@@ -890,11 +855,10 @@ class TestMurderbotV1:
             })
             messages.append({"role": "tool", "tool_call_id": cid, "content": big_result})
 
-        # Synthesis call via OWU: no tools, max_tokens=1500 — tight enough to expose thinking budget exhaustion
         resp = owui.post(
             "/api/v1/chat/completions",
             json={
-                "model": V1_CUSTOM_MODEL,
+                "model": CUSTOM_MODEL,
                 "messages": messages,
                 "stream": False,
                 "max_tokens": 1500,
@@ -907,11 +871,9 @@ class TestMurderbotV1:
         finish = choice["finish_reason"]
 
         assert len(content) >= 100, (
-            f"27B synthesis empty — check qwen36-27b-think has enable_thinking=false in LiteLLM config.\n"
-            f"Got {len(content)} chars (finish_reason={finish!r}).\n"
+            f"27B synthesis empty or too short ({len(content)} chars, finish={finish!r}).\n"
             f"Content: {content[:200]!r}\n"
-            "Fix: add chat_template_kwargs: {{enable_thinking: false}} to the qwen36-27b-think "
-            "entry in apps/litellm/server/configmap.yaml in k3s-dean-gitops."
+            "Check murderbot-v1-base config in apps/litellm/server/configmap.yaml."
         )
 
     def test_v1_full_research_with_real_results(self, owui, litellm, mcp_tool_defs):
@@ -941,7 +903,7 @@ class TestMurderbotV1:
             },
         ]
 
-        final, called, had_xml = _run_tool_loop(owui, litellm, messages, tools, max_tool_turns=8, model=V1_CUSTOM_MODEL)
+        final, called, had_xml = _run_tool_loop(owui, litellm, messages, tools, max_tool_turns=8, model=CUSTOM_MODEL)
 
         assert not had_xml, (
             "murderbot-v1 produced <function=...> XML — native tool calling broken."
@@ -959,4 +921,83 @@ class TestMurderbotV1:
         assert any(m in content_lower for m in real_content_markers), (
             f"Answer does not mention any real laptop brands — model did not use search results.\n"
             f"Answer: {final[:500]!r}\nTools: {called}"
+        )
+
+
+# ── archlinux-v0 (Qwen3:14B, Ollama, RX 9070 XT) ─────────────────────────────
+
+class TestArchlinuxV0:
+    """
+    Smoke tests for archlinux-v0 (archlinux-v0-custom / archlinux-v0-base).
+
+    Different hardware path from murderbot: Ollama on AMD RX 9070 XT vs vLLM on
+    NVIDIA RTX PRO 4000. Separate test class catches host-specific routing failures.
+    """
+
+    ARCHLINUX_CUSTOM = "archlinux-v0-custom"
+    ARCHLINUX_BASE   = "archlinux-v0-base"
+
+    def test_archlinux_model_exists(self, owui):
+        resp = owui.get(f"/api/v1/models/model?id={self.ARCHLINUX_CUSTOM}")
+        assert resp.status_code == 200, (
+            f"archlinux-v0 ({self.ARCHLINUX_CUSTOM}) not found: HTTP {resp.status_code}. "
+            "Run scripts/register_owui_tool.py to restore it."
+        )
+        assert resp.json().get("name") == "archlinux-v0"
+
+    def test_archlinux_no_xml_tool_calls(self, owui, mcp_tool_defs):
+        """Model must return JSON tool_calls — XML means function_calling is not 'native'."""
+        tools = _select_tools(mcp_tool_defs, {"searxng_search"})
+        resp = owui.post(
+            "/api/v1/chat/completions",
+            json={
+                "model": self.ARCHLINUX_CUSTOM,
+                "messages": [{"role": "user", "content": "Search for recent Python releases."}],
+                "tools": tools,
+                "tool_choice": "required",
+                "stream": False,
+                "max_tokens": 300,
+            },
+        )
+        assert resp.status_code == 200, f"OWU HTTP {resp.status_code}: {resp.text[:300]}"
+        choice = resp.json()["choices"][0]
+        content = choice["message"].get("content") or ""
+        assert "<function=" not in content, (
+            f"archlinux-v0 produced XML — set function_calling='native' on {self.ARCHLINUX_CUSTOM}"
+        )
+        assert choice["finish_reason"] == "tool_calls", (
+            f"finish_reason={choice['finish_reason']!r}, content={content[:200]!r}"
+        )
+
+    def test_archlinux_research_produces_synthesis(self, owui, litellm, mcp_tool_defs):
+        """archlinux-v0 must call web search and produce a substantive text answer."""
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        tools = _select_tools(mcp_tool_defs, {"searxng_search", "searxng_read_url"})
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"Today's date is {today} (UTC).\n"
+                    "You are a helpful research assistant. Use web search tools to gather "
+                    "information, then write a concise answer. Stop after 3-4 tool calls."
+                ),
+            },
+            {"role": "user", "content": "What are some popular home automation platforms and their key features?"},
+        ]
+
+        final, called, had_xml = _run_tool_loop(
+            owui, litellm, messages, tools, max_tool_turns=5, model=self.ARCHLINUX_CUSTOM,
+        )
+
+        assert not had_xml, (
+            f"archlinux-v0 produced XML — function_calling must be 'native' on {self.ARCHLINUX_CUSTOM}"
+        )
+        assert any(n in ("searxng_search", "searxng_read_url") for n in called), (
+            f"archlinux-v0 did not call any web search tool. Tools called: {called}"
+        )
+        assert len(final) > 100, (
+            f"archlinux-v0 synthesis too short ({len(final)} chars).\n"
+            f"Tools: {called}\nContent: {final!r}"
         )
