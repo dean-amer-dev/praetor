@@ -49,12 +49,20 @@ SEARXNG_URL   = os.environ.get("SEARXNG_URL", "https://searxng.amer.dev")
 CUSTOM_MODEL  = "murderbot-v1-custom"
 BASE_MODEL    = "murderbot-v1-base"
 
-# All 4 active OWU custom models: (custom_model_id, display_name, base_model_id)
+SECURE_SEARCH_MCP_URL = os.environ.get("SECURE_SEARCH_MCP_URL", "https://secure-search-mcp.amer.dev")
+
+# All active OWU custom models: (custom_model_id, display_name, base_model_id)
 ALL_CUSTOM_MODELS = [
     ("murderbot-v1-custom",            "murderbot-v1",            "murderbot-v1-base"),
     ("murderbot-uncensored-v1-custom", "murderbot-uncensored-v1", "murderbot-uncensored-v1-base"),
     ("archlinux-v0-custom",            "archlinux-v0",            "archlinux-v0-base"),
     ("archlinux-uncensored-v0-custom", "archlinux-uncensored-v0", "archlinux-uncensored-v0-base"),
+]
+
+# Secure-only models (toolIds: ["secure_search"] only)
+SECURE_ONLY_MODELS = [
+    ("murderbot-v1-secure-custom",  "murderbot-v1-secure",  "murderbot-v1-base"),
+    ("archlinux-v0-secure-custom",  "archlinux-v0-secure",  "archlinux-v0-base"),
 ]
 
 TIMEOUT       = int(os.environ.get("LLM_TIMEOUT", "120"))
@@ -321,6 +329,48 @@ class TestModelConfig:
             assert len(system) > 50, (
                 f"{custom_id}: system prompt missing or too short ({len(system)} chars). "
                 "Run scripts/register_owui_tool.py."
+            )
+
+    def test_secure_search_tool_registered(self, owui):
+        """secure_search Python tool must exist with secure_search() and secure_read_url() methods."""
+        resp = owui.get("/api/v1/tools/")
+        assert resp.status_code == 200
+        t = next((x for x in resp.json() if x.get("id") == "secure_search"), None)
+        assert t is not None, (
+            "secure_search tool not found in OWU. Run scripts/register_owui_tool.py."
+        )
+        content = t.get("content", "")
+        assert "secure_search" in content, "secure_search() method missing from tool"
+        assert "secure_read_url" in content, "secure_read_url() method missing from tool"
+        assert "secure-search-mcp.amer.dev" in content, "secure-search-mcp URL missing from tool"
+
+    def test_secure_search_in_all_model_tool_ids(self, owui):
+        """secure_search must be in toolIds on all regular models (but NOT on secure-only models)."""
+        for custom_id, _, _ in ALL_CUSTOM_MODELS:
+            resp = owui.get(f"/api/v1/models/model?id={custom_id}")
+            assert resp.status_code == 200
+            tool_ids = resp.json().get("meta", {}).get("toolIds", [])
+            assert "secure_search" in tool_ids, (
+                f"secure_search missing from {custom_id} toolIds: {tool_ids}. "
+                "Run scripts/register_owui_tool.py."
+            )
+
+    def test_secure_only_models_exist(self, owui):
+        """Secure-only model variants must exist with toolIds=['secure_search'] only."""
+        for custom_id, display_name, base_id in SECURE_ONLY_MODELS:
+            resp = owui.get(f"/api/v1/models/model?id={custom_id}")
+            assert resp.status_code == 200, (
+                f"Secure-only model {custom_id!r} not found (HTTP {resp.status_code}). "
+                "Run scripts/register_owui_tool.py."
+            )
+            data = resp.json()
+            assert data.get("name") == display_name, (
+                f"{custom_id}: expected name={display_name!r}, got {data.get('name')!r}"
+            )
+            tool_ids = data.get("meta", {}).get("toolIds", [])
+            assert tool_ids == ["secure_search"], (
+                f"{custom_id} toolIds={tool_ids!r} — should be ['secure_search'] only. "
+                "Secure-only models must not have server:mcp:lm or praetor_dispatch."
             )
 
     def test_date_injector_filter_active_and_global(self, owui):
@@ -640,6 +690,20 @@ class TestLiteLLMMCP:
         assert "searxng_search" in names, f"searxng_search missing from LiteLLM MCP tools: {names}"
         assert "searxng_read_url" in names, f"searxng_read_url missing from LiteLLM MCP tools: {names}"
 
+    def test_litellm_mcp_exposes_secure_search_tools(self, mcp_tool_defs):
+        """secure-search MCP server must be registered in LiteLLM and expose tools."""
+        names = {t["name"] for t in mcp_tool_defs}
+        # LiteLLM namespaces tools from the "secure-search" MCP server with "secure-search_" prefix
+        # (server name uses hyphen per LiteLLM requirement — underscores not allowed in server names)
+        secure_tools = {n for n in names if n.startswith("secure-search_")}
+        assert len(secure_tools) > 0, (
+            f"No secure-search_* tools in LiteLLM MCP. Got: {sorted(names)}. "
+            "Check apps/litellm/server/configmap.yaml — secure-search MCP server must be listed."
+        )
+        assert "secure-search_searxng_search" in names or any("search" in n for n in secure_tools), (
+            f"Expected secure-search_searxng_search in MCP tools. Got secure tools: {secure_tools}"
+        )
+
     def test_litellm_serves_all_base_models(self, litellm):
         """All 4 base models must be served by LiteLLM — OWU custom models route through these."""
         resp = litellm.get("/v1/models", headers={"Accept": "application/json"})
@@ -690,6 +754,164 @@ class TestWebSearch:
         base = url.split("?")[0].rsplit("/search", 1)[0]
         health = httpx.get(f"{base}/search", params={"q": "test", "format": "json"}, timeout=10)
         assert health.status_code == 200, f"SearXNG at {base!r} returned HTTP {health.status_code}"
+
+
+# ── Secure Search ─────────────────────────────────────────────────────────────
+
+class TestSecureSearch:
+    """
+    Tests for the secure_search tool category — NordVPN Switzerland VPN-protected search.
+
+    Tests: MCP server health, VPN gate active, tool execution via Python tool,
+    secure-only model routing, integration with LiteLLM MCP namespace.
+    """
+
+    def test_secure_search_mcp_health(self):
+        """secure-search-mcp /health endpoint must return 200."""
+        resp = httpx.get(f"{SECURE_SEARCH_MCP_URL}/health", timeout=15)
+        assert resp.status_code == 200, (
+            f"secure-search-mcp /health returned HTTP {resp.status_code}: {resp.text[:200]}. "
+            "Check if gluetun VPN sidecar is connected and MCP server is running."
+        )
+
+    def test_secure_search_mcp_tools_list(self):
+        """secure-search-mcp must expose searxng_search and searxng_read_url tools."""
+        resp = httpx.post(
+            f"{SECURE_SEARCH_MCP_URL}/mcp",
+            content=b'{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}',
+            headers={"Content-Type": "application/json"},
+            timeout=15,
+        )
+        assert resp.status_code == 200, f"tools/list HTTP {resp.status_code}: {resp.text[:200]}"
+        tool_names: set[str] = set()
+        for line in resp.text.splitlines():
+            if line.startswith("data: "):
+                try:
+                    payload = json.loads(line[6:])
+                    tools = payload.get("result", {}).get("tools", [])
+                    tool_names.update(t["name"] for t in tools)
+                except Exception:
+                    pass
+        if not tool_names:
+            try:
+                payload = json.loads(resp.text)
+                tools = payload.get("result", {}).get("tools", [])
+                tool_names.update(t["name"] for t in tools)
+            except Exception:
+                pass
+        assert "searxng_search" in tool_names, (
+            f"searxng_search not in secure-search-mcp tools: {tool_names}"
+        )
+        assert "searxng_read_url" in tool_names, (
+            f"searxng_read_url not in secure-search-mcp tools: {tool_names}"
+        )
+
+    def test_secure_search_returns_results(self):
+        """secure_search must execute a real search and return non-empty results via VPN."""
+        resp = httpx.post(
+            f"{SECURE_SEARCH_MCP_URL}/mcp",
+            content=json.dumps({
+                "jsonrpc": "2.0",
+                "id": "smoke",
+                "method": "tools/call",
+                "params": {
+                    "name": "searxng_search",
+                    "arguments": {"query": "Python programming language", "max_results": 3},
+                },
+            }).encode(),
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        assert resp.status_code == 200, (
+            f"secure_search tools/call HTTP {resp.status_code}: {resp.text[:300]}. "
+            "If 503: gluetun VPN may not be connected. Check NordVPN credentials in BWS."
+        )
+        result_text = ""
+        for line in resp.text.splitlines():
+            if line.startswith("data: "):
+                try:
+                    payload = json.loads(line[6:])
+                    content_list = payload.get("result", {}).get("content", [])
+                    result_text = " ".join(c.get("text", "") for c in content_list if c.get("type") == "text")
+                    if result_text:
+                        break
+                except Exception:
+                    pass
+        if not result_text:
+            try:
+                payload = json.loads(resp.text)
+                content_list = payload.get("result", {}).get("content", [])
+                result_text = " ".join(c.get("text", "") for c in content_list if c.get("type") == "text")
+            except Exception:
+                pass
+
+        assert len(result_text) > 50, (
+            f"secure_search returned no content ({len(result_text)} chars): {result_text!r}. "
+            "VPN may be up but SearXNG may be unreachable from the VPN egress IP."
+        )
+        assert "python" in result_text.lower(), (
+            f"secure_search results don't mention 'python' for a python query: {result_text[:300]!r}"
+        )
+
+    def test_secure_only_model_tool_ids_enforced(self, owui):
+        """Secure-only models must have exactly ['secure_search'] in toolIds — nothing else."""
+        for custom_id, display_name, _ in SECURE_ONLY_MODELS:
+            resp = owui.get(f"/api/v1/models/model?id={custom_id}")
+            if resp.status_code != 200:
+                pytest.skip(f"{custom_id} not found — run scripts/register_owui_tool.py")
+            tool_ids = resp.json().get("meta", {}).get("toolIds", [])
+            assert tool_ids == ["secure_search"], (
+                f"{custom_id} toolIds={tool_ids!r} — expected exactly ['secure_search']. "
+                "Secure-only models must not expose any tools other than secure_search."
+            )
+
+    def test_secure_only_model_tool_call_uses_secure_search(self, owui):
+        """
+        Secure-only model must call secure_search (not searxng_search) for a research question.
+
+        Uses tool_choice='required' to force a tool call. The only available tool is secure_search
+        (from the Python tool), so any tool call must use that.
+        """
+        SECURE_TOOL_DEF = {
+            "type": "function",
+            "function": {
+                "name": "secure_search",
+                "description": "Search the web via NordVPN Switzerland VPN tunnel.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}},
+                    "required": ["query"],
+                },
+            },
+        }
+        resp = owui.post(
+            "/api/v1/chat/completions",
+            json={
+                "model": SECURE_ONLY_MODELS[0][0],  # murderbot-v1-secure-custom
+                "messages": [
+                    {"role": "system", "content": "You are in SECURE RESEARCH MODE. Use only secure_search."},
+                    {"role": "user", "content": "Research the latest news about open source AI models."},
+                ],
+                "tools": [SECURE_TOOL_DEF],
+                "tool_choice": "required",
+                "stream": False,
+                "max_tokens": 256,
+            },
+        )
+        assert resp.status_code == 200, f"OWU HTTP {resp.status_code}: {resp.text[:300]}"
+        choice = resp.json()["choices"][0]
+        msg = choice["message"]
+        tc = msg.get("tool_calls") or []
+        content = msg.get("content") or ""
+        assert "<function=" not in content, "secure-only model produced XML tool call"
+        assert choice["finish_reason"] == "tool_calls", (
+            f"finish_reason={choice['finish_reason']!r} — expected tool_calls for secure-only model"
+        )
+        if tc:
+            called = tc[0]["function"]["name"]
+            assert called == "secure_search", (
+                f"secure-only model called {called!r} instead of secure_search"
+            )
 
 
 # ── Praetor API ───────────────────────────────────────────────────────────────

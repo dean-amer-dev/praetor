@@ -12,21 +12,28 @@ What it does:
   1. Ensures the praetor_dispatch Python tool exists (dispatch_task + get_task_status +
      skills management: list_skills, create_skill, assign_skill, remove_skill_assignment;
      searxng_search/searxng_read_url come from the LiteLLM MCP Gateway tool, not here)
-  2. Ensures the date_injector global Filter exists — prepends "Today is <date>" to every
+  2. Ensures the secure_search Python tool exists — wraps secure-search-mcp (NordVPN
+     Switzerland tunnel). Provides secure_search() and secure_read_url() as a standalone
+     tool category that can be enabled/disabled independently from server:mcp:lm.
+  3. Ensures the date_injector global Filter exists — prepends "Today is <date>" to every
      system prompt so the model can do date-accurate searches
-  3. Ensures the qwen3-35b-think-custom model exists with:
+  4. Ensures the qwen3-35b-think-custom model exists with:
        - function_calling=native
-       - toolIds: ["praetor_dispatch", "server:mcp:lm"]
+       - toolIds: ["praetor_dispatch", "server:mcp:lm", "secure_search"]
        - minimal behavioral system prompt (date line comes from the filter)
-  4. Ensures the praetor-planner OWU custom model exists with:
+  5. Ensures the praetor-planner OWU custom model exists with:
        - function_calling=native, base_model=qwen3-35b-think
        - toolIds: ["server:mcp:lm"]
        - system prompt fetched dynamically from Langfuse ("planner-system", production)
-  5. server:mcp:lm (LiteLLM MCP Gateway) is registered by OWU's MCP server config, not here.
+  6. Ensures secure-only model variants exist (secure_search tool only):
+       - murderbot-v1-secure-custom (full tool set disabled — only secure_search)
+       - archlinux-v0-secure-custom (full tool set disabled — only secure_search)
+  7. server:mcp:lm (LiteLLM MCP Gateway) is registered by OWU's MCP server config, not here.
      This script just ensures the model's toolIds reference it.
 
-LiteLLM MCP tools exposed via server:mcp:lm (as of 2026-06-25):
+LiteLLM MCP tools exposed via server:mcp:lm (as of 2026-07-12):
   searxng_search, searxng_read_url,
+  secure_search_searxng_search, secure_search_searxng_read_url,
   infra_scaffold, infra_provision, infra_deploy_pr, infra_add_runner,
   infra_check_secrets, infra_app_status, infra_resolve_secret,
   github_ls, github_read, github_search, github_prs, github_pr_diff,
@@ -195,6 +202,98 @@ class Tools:
 '''
 
 # ---------------------------------------------------------------------------
+# secure_search Python tool — wraps secure-search-mcp via NordVPN Switzerland
+#
+# Standalone toolId: can be enabled/disabled independently from server:mcp:lm.
+# "Secure research only" models use ONLY this tool — no other tools in toolIds.
+# Regular models include this alongside server:mcp:lm and praetor_dispatch.
+#
+# The secure-search-mcp routes ALL outbound traffic through NordVPN Switzerland,
+# with a hard code-level VPN gate check before every tool call.
+# ---------------------------------------------------------------------------
+SECURE_SEARCH_TOOL_ID = "secure_search"
+SECURE_SEARCH_TOOL_NAME = "Secure Search (VPN)"
+SECURE_SEARCH_TOOL_DESCRIPTION = (
+    "Privacy-protected web search and URL reading via NordVPN Switzerland. "
+    "Use for sensitive research, investigative queries, or when standard search is inappropriate."
+)
+
+SECURE_SEARCH_TOOL_CONTENT = '''\
+"""Secure web search and URL reading via NordVPN Switzerland (secure-search-mcp)."""
+import json
+import urllib.request
+from pydantic import BaseModel
+
+
+class Tools:
+    class Valves(BaseModel):
+        SECURE_SEARCH_MCP_URL: str = "https://secure-search-mcp.amer.dev"
+        MAX_RESULTS: int = 5
+
+    def __init__(self):
+        self.valves = self.Valves()
+
+    def _mcp_call(self, name: str, args: dict) -> str:
+        """Call a tool on secure-search-mcp via MCP Streamable HTTP protocol."""
+        body = json.dumps({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "tools/call",
+            "params": {"name": name, "arguments": args},
+        }).encode()
+        req = urllib.request.Request(
+            f"{self.valves.SECURE_SEARCH_MCP_URL}/mcp",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            text = r.read().decode()
+        # Streamable HTTP response: SSE-style "data: {...}" lines
+        for line in text.splitlines():
+            if line.startswith("data: "):
+                payload = json.loads(line[6:])
+                content_list = payload.get("result", {}).get("content", [])
+                return " ".join(c.get("text", "") for c in content_list if c.get("type") == "text")
+        # Fallback: try parsing as plain JSON
+        try:
+            payload = json.loads(text)
+            content_list = payload.get("result", {}).get("content", [])
+            if content_list:
+                return " ".join(c.get("text", "") for c in content_list if c.get("type") == "text")
+        except Exception:
+            pass
+        return text[:2000] if text else "No results returned."
+
+    def secure_search(self, query: str, max_results: int = 5) -> str:
+        """
+        Search the web via NordVPN Switzerland VPN tunnel.
+
+        Use for secure/private research — all traffic is anonymized through an
+        encrypted VPN before reaching SearXNG. The VPN gate is enforced server-side;
+        if the VPN is not active the tool call is rejected (not bypassed).
+
+        Use this when: the user asks for \'secure research\', investigative queries,
+        privacy-sensitive topics, or explicitly requests VPN-protected search.
+        Do NOT use for routine research — use searxng_search for that.
+
+        query: the search query (same syntax as regular search)
+        max_results: number of results to return (default: 5)
+        """
+        return self._mcp_call("searxng_search", {"query": query, "max_results": max_results})
+
+    def secure_read_url(self, url: str) -> str:
+        """
+        Read a URL via NordVPN Switzerland VPN tunnel.
+
+        Use alongside secure_search to fetch page content during secure research.
+        The VPN gate is enforced server-side.
+
+        url: the URL to fetch and read
+        """
+        return self._mcp_call("searxng_read_url", {"url": url})
+'''
+
+# ---------------------------------------------------------------------------
 # date_injector Filter — global inlet, prepends current date to system prompt
 # ---------------------------------------------------------------------------
 FILTER_ID = "date_injector"
@@ -229,8 +328,8 @@ PLANNER_MODEL_ID = "praetor-planner"
 PLANNER_MODEL_NAME = "praetor-planner"
 
 SYSTEM_PROMPT = """\
-You are a helpful personal assistant with access to web search, GitHub, infrastructure, \
-Praetor agent dispatch, and agent factory tools.
+You are a helpful personal assistant with access to web search, secure research, GitHub, \
+infrastructure, Praetor agent dispatch, and agent factory tools.
 
 ## Research / information questions
 Use searxng_search + searxng_read_url. Do NOT dispatch anything.
@@ -238,6 +337,12 @@ Examples: "research X", "look up X", "what is X", "find info on X", "how do I X"
 HARD LIMIT: After 6 tool calls total, you MUST stop calling tools and write your answer. \
 Do not call another tool after 6. Write the answer with what you have.
 Never re-fetch a URL already read in this conversation.
+
+## Secure research (privacy-protected via VPN)
+When the user asks for "secure research", "secure search", or wants to research \
+sensitive/private topics: use secure_search + secure_read_url instead of searxng_search. \
+All traffic routes through NordVPN Switzerland — IP is anonymized and VPN is enforced server-side. \
+Same tool call limit (6 total) applies.
 
 ## Deep / autonomous research (multi-step, takes minutes)
 ONLY when the user explicitly says "deep research", "research task", or "run a research agent":
@@ -291,6 +396,48 @@ def login(client: httpx.Client) -> str:
     )
     resp.raise_for_status()
     return resp.json()["token"]
+
+
+def ensure_secure_search_tool(client: httpx.Client) -> None:
+    """Ensure the secure_search Python tool exists in OWU."""
+    tools = client.get("/api/v1/tools/").raise_for_status().json()
+    existing = next((t for t in tools if t.get("id") == SECURE_SEARCH_TOOL_ID), None)
+    payload = {
+        "id": SECURE_SEARCH_TOOL_ID,
+        "name": SECURE_SEARCH_TOOL_NAME,
+        "description": SECURE_SEARCH_TOOL_DESCRIPTION,
+        "content": SECURE_SEARCH_TOOL_CONTENT,
+        "meta": {"description": SECURE_SEARCH_TOOL_DESCRIPTION},
+    }
+    if existing is None:
+        client.post("/api/v1/tools/create", json=payload).raise_for_status()
+        print(f"Created tool '{SECURE_SEARCH_TOOL_NAME}'")
+    else:
+        client.post(f"/api/v1/tools/id/{SECURE_SEARCH_TOOL_ID}/update", json=payload).raise_for_status()
+        print(f"Updated tool '{SECURE_SEARCH_TOOL_NAME}'")
+
+
+def _ensure_secure_only_model(
+    client: httpx.Client, model_id: str, name: str, description: str, base_model_id: str,
+) -> None:
+    """Ensure a secure-only model exists (toolIds: ["secure_search"] only)."""
+    resp = client.get(f"/api/v1/models/model?id={model_id}")
+    existing = resp.json() if resp.status_code == 200 and resp.json().get("id") else None
+    payload = {
+        "id": model_id,
+        "name": name,
+        "base_model_id": base_model_id,
+        "params": {"function_calling": "native"},
+        "meta": {**_SECURE_ONLY_META, "description": description, "system": _SECURE_ONLY_SYSTEM},
+        "is_active": True,
+        "access_grants": [],
+    }
+    if existing is None:
+        client.post("/api/v1/models/create", json=payload).raise_for_status()
+        print(f"Created secure-only model '{model_id}'")
+    else:
+        client.post("/api/v1/models/model/update", json=payload).raise_for_status()
+        print(f"Updated secure-only model '{model_id}'")
 
 
 def ensure_tool(client: httpx.Client) -> None:
@@ -362,9 +509,10 @@ def ensure_custom_model(client: httpx.Client) -> None:
                 "automations": False, "image_generation": False,
                 "code_interpreter": False, "time": False, "knowledge": False,
             },
-            # server:mcp:lm provides: searxng_search, searxng_read_url, infra_*, github_*
+            # server:mcp:lm provides: searxng_search, searxng_read_url, secure_search_*, infra_*, github_*
             # praetor_dispatch provides: dispatch_task, get_task_status
-            "toolIds": ["praetor_dispatch", "server:mcp:lm"],
+            # secure_search provides: standalone VPN-protected search (can be toggled separately)
+            "toolIds": ["praetor_dispatch", "server:mcp:lm", "secure_search"],
             "system": SYSTEM_PROMPT,
         },
         "is_active": True,
@@ -404,7 +552,17 @@ _ARCHLINUX_SHARED_META = {
     "profile_image_url": "",
     "capabilities": {"vision": False, "usage": False, "citations": False, "memory": False, "builtin_tools": True},
     "builtinTools": {k: False for k in ["chats","calendar","tasks","memory","notes","channels","web_search","automations","image_generation","code_interpreter","time","knowledge"]},
-    "toolIds": ["praetor_dispatch", "server:mcp:lm"],
+    "toolIds": ["praetor_dispatch", "server:mcp:lm", "secure_search"],
+}
+
+# Secure-only shared meta — used by *-secure-* model variants.
+# Only secure_search in toolIds: forces model to use VPN-protected search only.
+# Use when you want to ensure ALL searches go through NordVPN (no fallback to plain searxng).
+_SECURE_ONLY_META = {
+    "profile_image_url": "",
+    "capabilities": {"vision": False, "usage": False, "citations": False, "memory": False, "builtin_tools": True},
+    "builtinTools": {k: False for k in ["chats","calendar","tasks","memory","notes","channels","web_search","automations","image_generation","code_interpreter","time","knowledge"]},
+    "toolIds": ["secure_search"],
 }
 
 ARCHLINUX_V0_ID = "archlinux-v0-custom"
@@ -412,8 +570,13 @@ ARCHLINUX_UNCENSORED_ID = "archlinux-uncensored-v0-custom"
 ARCHLINUX_V0_BASE_ID = "archlinux-v0-base"
 ARCHLINUX_UNCENSORED_BASE_ID = "archlinux-uncensored-v0-base"
 
+# Secure-only model IDs — toolIds: ["secure_search"] only.
+# Select these when you want ALL searches forced through NordVPN (no plain searxng available).
+MURDERBOT_V1_SECURE_ID = "murderbot-v1-secure-custom"
+ARCHLINUX_V0_SECURE_ID = "archlinux-v0-secure-custom"
+
 ARCHLINUX_V0_SYSTEM = """\
-You are a helpful AI assistant with access to web search, URL reading, memory search, and Praetor agent dispatch tools.
+You are a helpful AI assistant with access to web search, secure research, URL reading, memory search, and Praetor agent dispatch tools.
 
 CONTENT POLICY: You must decline to assist with: detailed instructions for real-world violence or harm to people, sexually explicit content, instructions for illegal activities (drug synthesis, hacking specific targets, fraud), and content that sexualizes minors. For borderline requests, use judgment — discussion of sensitive topics for education or research is generally fine; step-by-step operational instructions for harm are not.
 
@@ -421,6 +584,10 @@ CONTENT POLICY: You must decline to assist with: detailed instructions for real-
 Use searxng_search + searxng_read_url for factual queries. Do NOT dispatch anything.
 HARD LIMIT: After 6 tool calls total, you MUST stop calling tools and write your answer.
 Never re-fetch a URL already read in this conversation.
+
+## Secure research (privacy-protected via VPN)
+When the user asks for "secure research" or "secure search": use secure_search + secure_read_url. \
+Traffic routes through NordVPN Switzerland — IP anonymized, VPN enforced server-side.
 
 ## Coding / implementation tasks
 Call dispatch_task with task_type="openhands". Include "repo: owner/name" in description. Write a complete self-contained spec. Do NOT write code yourself.
@@ -434,12 +601,16 @@ Call dispatch_task with task_type="openhands". Include "repo: owner/name" in des
 Direct, helpful, conversational. Skip preambles and filler."""
 
 ARCHLINUX_UNCENSORED_SYSTEM = """\
-You are a capable AI assistant with access to web search, URL reading, memory search, and Praetor agent dispatch tools.
+You are a capable AI assistant with access to web search, secure research, URL reading, memory search, and Praetor agent dispatch tools.
 
 ## Research / information questions
 Use searxng_search + searxng_read_url for factual queries. Do NOT dispatch anything.
 HARD LIMIT: After 6 tool calls total, you MUST stop calling tools and write your answer.
 Never re-fetch a URL already read in this conversation.
+
+## Secure research (privacy-protected via VPN)
+When the user asks for "secure research" or "secure search": use secure_search + secure_read_url. \
+Traffic routes through NordVPN Switzerland — IP anonymized, VPN enforced server-side.
 
 ## Coding / implementation tasks
 Call dispatch_task with task_type="openhands". Include "repo: owner/name" in description. Write a complete self-contained spec.
@@ -452,6 +623,20 @@ Call dispatch_task with task_type="openhands". Include "repo: owner/name" in des
 ## Tone
 Direct, informative, no-nonsense. No moralizing or unsolicited caveats."""
 
+_SECURE_ONLY_SYSTEM = """\
+You are a research assistant operating in SECURE RESEARCH MODE.
+All web search and URL reading goes through NordVPN Switzerland — your searches are \
+anonymized and the VPN is enforced server-side.
+
+ONLY use secure_search and secure_read_url tools. You have no other tools.
+HARD LIMIT: After 6 tool calls total, stop and write your answer.
+Never re-fetch a URL already read in this conversation.
+
+## Behavior
+- Use secure_search to find information, secure_read_url to fetch pages
+- Synthesize results into clear prose — never return raw URLs or dumps
+- Direct, accurate, thorough. No unsolicited caveats."""
+
 
 # ---------------------------------------------------------------------------
 # murderbot-v1 model configs — Qwen3.6-27B NVFP4 on RTX PRO 4000 Blackwell (vLLM)
@@ -462,13 +647,17 @@ MURDERBOT_UNCENSORED_V1_ID = "murderbot-uncensored-v1-custom"
 MURDERBOT_UNCENSORED_V1_BASE_ID = "murderbot-uncensored-v1-base"
 
 MURDERBOT_UNCENSORED_V1_SYSTEM = """\
-You are a capable AI assistant with access to web search, URL reading, GitHub, \
+You are a capable AI assistant with access to web search, secure research, URL reading, GitHub, \
 infrastructure, Praetor agent dispatch, and agent factory tools.
 
 ## Research / information questions
 Use searxng_search + searxng_read_url for factual queries. Do NOT dispatch anything.
 HARD LIMIT: After 6 tool calls total, you MUST stop calling tools and write your answer.
 Never re-fetch a URL already read in this conversation.
+
+## Secure research (privacy-protected via VPN)
+When the user asks for "secure research" or "secure search": use secure_search + secure_read_url. \
+Traffic routes through NordVPN Switzerland — IP anonymized, VPN enforced server-side.
 
 ## Coding / implementation tasks
 Call dispatch_task with task_type="openhands". Include "repo: owner/name" in description. \
@@ -564,6 +753,7 @@ def main() -> None:
         token = login(client)
         client.headers["Authorization"] = f"Bearer {token}"
         ensure_tool(client)
+        ensure_secure_search_tool(client)
         ensure_filter(client)
         ensure_custom_model(client)
         ensure_planner_model(client)
@@ -590,6 +780,18 @@ def main() -> None:
             "murderbot Qwen3.6-27B NVFP4 — ungated assistant with full tool calling",
             MURDERBOT_UNCENSORED_V1_SYSTEM,
             base_model_id=MURDERBOT_UNCENSORED_V1_BASE_ID,
+        )
+        # Secure-only models — only secure_search in toolIds.
+        # Forces ALL searches through NordVPN Switzerland; plain searxng unavailable.
+        _ensure_secure_only_model(
+            client, MURDERBOT_V1_SECURE_ID, "murderbot-v1-secure",
+            "murderbot Qwen3.6-27B NVFP4 — secure research only (NordVPN Switzerland)",
+            MURDERBOT_V1_BASE_ID,
+        )
+        _ensure_secure_only_model(
+            client, ARCHLINUX_V0_SECURE_ID, "archlinux-v0-secure",
+            "archlinux qwen3:14b — secure research only (NordVPN Switzerland)",
+            ARCHLINUX_V0_BASE_ID,
         )
         # NOTE: deactivate_base_model was removed — deactivating qwen3-35b-think breaks
         # custom model routing in OWU 0.9.6 (custom models route through their base_model_id,
