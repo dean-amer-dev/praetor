@@ -691,16 +691,17 @@ class TestLiteLLMMCP:
         assert "searxng_read_url" in names, f"searxng_read_url missing from LiteLLM MCP tools: {names}"
 
     def test_litellm_mcp_exposes_secure_search_tools(self, mcp_tool_defs):
-        """secure_search MCP server must be registered in LiteLLM and expose tools."""
+        """secure-search MCP server must be registered in LiteLLM and expose tools."""
         names = {t["name"] for t in mcp_tool_defs}
-        # LiteLLM namespaces tools from the "secure_search" MCP server with "secure_search_" prefix
-        secure_tools = {n for n in names if n.startswith("secure_search_")}
+        # LiteLLM namespaces tools from the "secure-search" MCP server with "secure-search_" prefix
+        # (server name uses hyphen per LiteLLM requirement — underscores not allowed in server names)
+        secure_tools = {n for n in names if n.startswith("secure-search_")}
         assert len(secure_tools) > 0, (
-            f"No secure_search_* tools in LiteLLM MCP. Got: {sorted(names)}. "
-            "Check apps/litellm/server/configmap.yaml — secure_search MCP server must be listed."
+            f"No secure-search_* tools in LiteLLM MCP. Got: {sorted(names)}. "
+            "Check apps/litellm/server/configmap.yaml — secure-search MCP server must be listed."
         )
-        assert "secure_search_searxng_search" in names or any("search" in n for n in secure_tools), (
-            f"Expected secure_search_searxng_search in MCP tools. Got secure tools: {secure_tools}"
+        assert "secure-search_searxng_search" in names or any("search" in n for n in secure_tools), (
+            f"Expected secure-search_searxng_search in MCP tools. Got secure tools: {secure_tools}"
         )
 
     def test_litellm_serves_all_base_models(self, litellm):
