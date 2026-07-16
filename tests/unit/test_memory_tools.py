@@ -49,15 +49,15 @@ class TestAddMemory:
         result = await add_memory("x", "a")
         assert result == "stored"
 
-    async def test_raises_on_http_error(self, mock_http):
+    async def test_returns_skipped_on_http_error(self, mock_http):
         instance, _ = mock_http
         mock_resp = MagicMock()
         mock_resp.raise_for_status.side_effect = Exception("500 Internal Server Error")
         instance.post.return_value = mock_resp
 
         from common.memory_tools import add_memory
-        with pytest.raises(Exception, match="500"):
-            await add_memory("x", "a")
+        result = await add_memory("x", "a")
+        assert result == "skipped"
 
 
 class TestSearchMemory:
@@ -224,9 +224,9 @@ class TestClientSingleton:
         call_kwargs = MockClass.call_args[1]
         assert call_kwargs["base_url"] == "https://custom-mem0.test"
 
-    async def test_missing_env_raises_key_error(self, monkeypatch):
+    async def test_missing_env_returns_skipped(self, monkeypatch):
         monkeypatch.delenv("MEM0_BASE_URL", raising=False)
         monkeypatch.delenv("MEM0_API_KEY", raising=False)
-        with pytest.raises(KeyError):
-            from common.memory_tools import add_memory
-            await add_memory("x", "y")
+        from common.memory_tools import add_memory
+        result = await add_memory("x", "y")
+        assert result == "skipped"
