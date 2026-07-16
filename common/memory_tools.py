@@ -5,11 +5,18 @@ The MemoryClient SDK sends Authorization: Token which the self-hosted server rej
 
 search_memory and add_memory are async so that Langfuse @observe() creates proper child
 spans when awaited from an async trace context (run_in_executor breaks span propagation).
+
+Both functions are fault-tolerant: mem0 failures (502, embedding model down, timeout)
+return empty/no-op results rather than propagating exceptions to callers. Agents must
+continue to function when mem0 is degraded.
 """
 import asyncio
+import logging
 import os
 import httpx
 from common.langfuse_tools import observe
+
+logger = logging.getLogger(__name__)
 
 _client: httpx.Client | None = None
 
@@ -41,7 +48,11 @@ async def add_memory(content: str, agent_id: str) -> str:
         )
         resp.raise_for_status()
         return "stored"
-    return await asyncio.to_thread(_sync)
+    try:
+        return await asyncio.to_thread(_sync)
+    except Exception as exc:
+        logger.warning("mem0 add_memory failed (agent_id=%s): %s", agent_id, exc)
+        return "skipped"
 
 
 @observe()
@@ -55,7 +66,11 @@ async def search_memory(query: str, agent_id: str) -> list[str]:
         resp.raise_for_status()
         results = resp.json().get("results", [])
         return [r["memory"] for r in results]
-    return await asyncio.to_thread(_sync)
+    try:
+        return await asyncio.to_thread(_sync)
+    except Exception as exc:
+        logger.warning("mem0 search_memory failed (agent_id=%s): %s", agent_id, exc)
+        return []
 
 
 def get_all_memories(agent_id: str) -> list[str]:
