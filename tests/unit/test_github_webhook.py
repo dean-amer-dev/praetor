@@ -95,20 +95,36 @@ class TestGitHubRouting:
         assert resp.json()["status"] == "ignored"
         hatchet.event.push.assert_not_called()
 
-    def test_pr_synchronize_ignored(self, client):
+    def test_pr_review_disabled_by_default(self, client):
+        """
+        Auto-review-on-PR is disabled: cancelled Hatchet steps don't abort the
+        in-flight LiteLLM/vLLM request, so a timed-out review permanently occupied
+        the single-session backend's one execution slot. Every pull_request action
+        must short-circuit to "disabled" without dispatching, until re-enabled.
+        """
+        c, hatchet = client
+        resp = _post(c, _pr_payload(action="opened"))
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "disabled"}
+        hatchet.event.push.assert_not_called()
+
+    def test_pr_synchronize_ignored(self, client, monkeypatch):
+        monkeypatch.setattr("webhooks.github._PR_REVIEW_ENABLED", True)
         c, hatchet = client
         resp = _post(c, _pr_payload(action="synchronize"))
         assert resp.status_code == 200
         assert resp.json()["status"] == "ignored"
         hatchet.event.push.assert_not_called()
 
-    def test_pr_closed_ignored(self, client):
+    def test_pr_closed_ignored(self, client, monkeypatch):
+        monkeypatch.setattr("webhooks.github._PR_REVIEW_ENABLED", True)
         c, hatchet = client
         resp = _post(c, _pr_payload(action="closed"))
         assert resp.status_code == 200
         assert resp.json()["status"] == "ignored"
 
-    def test_pr_opened_dispatches_event(self, client):
+    def test_pr_opened_dispatches_event(self, client, monkeypatch):
+        monkeypatch.setattr("webhooks.github._PR_REVIEW_ENABLED", True)
         c, hatchet = client
         resp = _post(c, _pr_payload(action="opened"))
         assert resp.status_code == 200
@@ -116,7 +132,8 @@ class TestGitHubRouting:
         hatchet.event.push.assert_called_once()
         assert hatchet.event.push.call_args[0][0] == "github:pr_opened"
 
-    def test_pr_payload_fields_forwarded(self, client):
+    def test_pr_payload_fields_forwarded(self, client, monkeypatch):
+        monkeypatch.setattr("webhooks.github._PR_REVIEW_ENABLED", True)
         c, hatchet = client
         _post(c, _pr_payload(action="opened", repo="amerenda/sazed", pr_number=99))
         push_payload = hatchet.event.push.call_args[0][1]
@@ -126,7 +143,8 @@ class TestGitHubRouting:
         assert ".diff" in push_payload["diff_url"]
         assert push_payload["author"] == "human-dev"
 
-    def test_pr_number_is_string(self, client):
+    def test_pr_number_is_string(self, client, monkeypatch):
+        monkeypatch.setattr("webhooks.github._PR_REVIEW_ENABLED", True)
         c, hatchet = client
         _post(c, _pr_payload(action="opened", pr_number=123))
         push_payload = hatchet.event.push.call_args[0][1]
