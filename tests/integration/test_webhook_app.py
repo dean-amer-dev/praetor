@@ -102,7 +102,8 @@ class TestGitHubWebhookIntegration:
         assert resp.status_code == 200
         assert resp.json() == {"status": "pong"}
 
-    def test_pr_opened_dispatches(self, app_client):
+    def test_pr_opened_dispatches(self, app_client, monkeypatch):
+        monkeypatch.setattr("webhooks.github._PR_REVIEW_ENABLED", True)
         client, hatchet = app_client
         payload = {
             "action": "opened",

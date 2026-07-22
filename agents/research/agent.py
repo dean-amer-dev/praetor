@@ -26,7 +26,7 @@ _SEARXNG_URL = os.environ.get("SEARXNG_URL", "https://searxng.amer.dev")
 
 def _build_model() -> OpenAIChatModel:
     return OpenAIChatModel(
-        model_name=os.environ.get("LLM_MODEL", "qwen3-35b"),
+        model_name=os.environ.get("LLM_MODEL", "coder"),
         provider=OpenAIProvider(
             base_url=os.environ["LITELLM_BASE_URL"],
             api_key=os.environ["LITELLM_API_KEY"],

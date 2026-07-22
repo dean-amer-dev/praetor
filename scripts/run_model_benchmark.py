@@ -6,7 +6,7 @@ Use this for quick local testing; production runs go through POST /api/v1/model/
 Usage:
     python scripts/run_model_benchmark.py --model qwen3:14b
     python scripts/run_model_benchmark.py --model qwen3:30b --runner archlinux --verbose
-    python scripts/run_model_benchmark.py --model qwen3-35b  --runner murderbot --no-langfuse
+    python scripts/run_model_benchmark.py --model coder      --runner murderbot --no-langfuse
     python scripts/run_model_benchmark.py --model qwen3:8b   --skip capability
 
 Runners: archlinux (default), mac-mini, murderbot
@@ -64,7 +64,7 @@ def _write_langfuse(model: str, runner: str, scores: dict[str, float], run_name:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Praetor Phase 29 model benchmark suite")
     parser.add_argument("--model", required=True,
-                        help="Model to benchmark, e.g. qwen3:14b or qwen3-35b")
+                        help="Model to benchmark, e.g. qwen3:14b or coder")
     parser.add_argument("--runner", default="archlinux", choices=list(RUNNERS),
                         help="Runner to target")
     parser.add_argument("--no-langfuse", action="store_true",

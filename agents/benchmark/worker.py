@@ -16,7 +16,7 @@ class BenchmarkInput(BaseModel):
     dataset_name: str
     dataset_item_id: str
     agent_type: str        # "research" | "review"
-    model: str = "qwen3-35b"
+    model: str = "coder"
     prompt_version: str = ""
     run_name: str = ""     # Langfuse experiment name; auto-generated if empty
 

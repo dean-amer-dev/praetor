@@ -48,6 +48,14 @@ def _dispatch_pr_event(repo: str, pr_number: str, pr_url: str, diff_url: str, au
     logger.info("dispatched github:pr_opened for %s#%s", repo, pr_number)
 
 
+# Auto-review-on-PR disabled: pr-reviewer runs were piling up on the shared single-session
+# murderbot backend faster than Hatchet's step timeout would clear them, and a cancelled
+# Hatchet step does not abort the in-flight LiteLLM/vLLM request — the orphaned generation
+# just keeps running server-side, permanently occupying the one execution slot. Re-enable
+# only once cancellation actually propagates to an aborted upstream HTTP request.
+_PR_REVIEW_ENABLED = False
+
+
 @router.post("/webhooks/github")
 async def github_webhook(request: Request, background_tasks: BackgroundTasks) -> dict:
     body = await request.body()
@@ -58,6 +66,8 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
         return {"status": "pong"}
     if event != "pull_request":
         return {"status": "ignored", "event": event}
+    if not _PR_REVIEW_ENABLED:
+        return {"status": "disabled"}
 
     payload = await request.json()
     action = payload.get("action", "")

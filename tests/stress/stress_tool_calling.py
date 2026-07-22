@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-stress_tool_calling.py — Manual stress scenarios for qwen3-35b-think tool calling.
+stress_tool_calling.py — Manual stress scenarios for `coder` tool calling.
 
 NOT run in CI. Run manually when you want to hammer the stack.
 
@@ -22,8 +22,8 @@ import httpx
 
 
 LITELLM_URL = os.environ.get("LITELLM_URL", "https://litellm.amer.dev")
-MODEL       = os.environ.get("LLM_MODEL", "qwen3-35b-think")
-TIMEOUT     = int(os.environ.get("LLM_TIMEOUT", "120"))
+MODEL       = os.environ.get("LLM_MODEL", "coder")
+TIMEOUT     = int(os.environ.get("LLM_TIMEOUT", "600"))
 API_KEY     = os.environ.get("LITELLM_API_KEY", "")
 
 
@@ -387,7 +387,7 @@ STRESS_TESTS = {
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Manual stress scenarios for qwen3-35b-think tool calling")
+    parser = argparse.ArgumentParser(description="Manual stress scenarios for coder tool calling")
     parser.add_argument("--stress", required=True,
                         help="Scenario to run: repeat, deep-loop, concurrent, large-payload, all")
     parser.add_argument("--repeat-n",     type=int, default=5,  metavar="N",

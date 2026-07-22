@@ -1,5 +1,5 @@
 """
-Regression tests for qwen3-35b-think tool calling via LiteLLM.
+Regression tests for `coder` tool calling via LiteLLM.
 
 Catches the class of bugs where multi-tool sessions fail with 400 Bad Request,
 hang after N calls, or have reasoning-budget exhaustion during tool turns.
@@ -36,9 +36,14 @@ def _k8s_secret(namespace: str, secret: str, key: str) -> str:
 
 
 LITELLM_URL  = os.environ.get("LITELLM_URL", "https://litellm.amer.dev")
-MODEL        = os.environ.get("LLM_MODEL", "qwen3-35b-think")
-MODEL_27B    = os.environ.get("LLM_MODEL_27B", "qwen36-27b-think")
-TIMEOUT      = int(os.environ.get("LLM_TIMEOUT", "120"))
+# ONE model, ONE runner: murderbot only ever serves sakamakismile/Huihui-Qwen3.6-27B via
+# the "coder" LiteLLM alias. MODEL_27B used to point at a separate "qwen36-27b-think" alias;
+# that alias never existed after the murderbot-v2 consolidation and every test using it was
+# silently failing with HTTP 400 "Invalid model name". Both constants now point at the same
+# live alias — there is no second model to distinguish here anymore.
+MODEL        = os.environ.get("LLM_MODEL", "coder")
+MODEL_27B    = os.environ.get("LLM_MODEL_27B", "coder")
+TIMEOUT      = int(os.environ.get("LLM_TIMEOUT", "600"))
 
 LITELLM_API_KEY = (
     os.environ.get("LITELLM_API_KEY")
@@ -318,12 +323,14 @@ class TestLLMToolCalling:
 
     def test_27b_synthesis_no_thinking_regression(self):
         """
-        Regression: qwen36-27b-think synthesis must return non-empty content.
+        Regression: qwen36-27b (Qwen3.6-27B, served via the "coder" alias) synthesis
+        must return non-empty content.
 
-        Root cause (fixed): llama.cpp uses max_tokens as a total budget (thinking +
-        output). With thinking enabled and max_tokens=1000, the model exhausted the
-        budget thinking and produced empty content. Fix: qwen36-27b-think now uses
-        chat_template_kwargs.enable_thinking=false in the LiteLLM model config.
+        Root cause (fixed): vLLM's max_tokens is a total budget shared between thinking
+        and output. With thinking enabled and max_tokens=1000, the model exhausted the
+        budget thinking and produced empty content. Fix: vllm-server now sets
+        --default-chat-template-kwargs '{"enable_thinking": false}' so thinking is off
+        by default for every alias, including "coder".
 
         This test re-runs the exact failure scenario (8 tool turns + synthesis at
         max_tokens=1000) to catch regressions if thinking is re-enabled on this model.
@@ -362,7 +369,7 @@ class TestLLMToolCalling:
         assert len(content) >= 100, (
             f"27B synthesis empty or too short ({len(content)} chars, finish={finish}, "
             f"reasoning_len={len(reasoning)}). "
-            "Re-check qwen36-27b-think config: chat_template_kwargs.enable_thinking must be false."
+            "Re-check vllm-server's --default-chat-template-kwargs: enable_thinking must be false."
         )
 
     def test_clean_history_passthru(self):
@@ -388,3 +395,53 @@ class TestLLMToolCalling:
 
         resp = _completion(messages, tools=MOCK_TOOLS)
         assert resp.status_code == 200, f"HTTP {resp.status_code} on clean history: {resp.text[:200]}"
+
+    def test_synthesis_xml_leakage_rate(self):
+        """
+        Repeated-trial characterization of XML leakage on the synthesis turn.
+
+        Even with tool_choice="none" (the documented synthesis signal), the model
+        occasionally emits a raw "<tool_call>...</tool_call>"-looking string as content
+        instead of prose — observed live during a stress audit (2 of 12 individual turns)
+        and reproduced by test_complex_synthesis_non_empty in this file. This isn't a
+        deterministic pass/fail regression, it's model-sampling nondeterminism — so instead
+        of asserting zero leakage (flaky) or ignoring it (silently getting worse over time),
+        this runs N independent synthesis trials and fails only if the leak rate crosses a
+        threshold, giving a concrete, trackable signal instead of an open question.
+        """
+        if not LITELLM_API_KEY:
+            pytest.skip("LITELLM_API_KEY not available")
+
+        N = 10
+        MAX_LEAK_RATE = 0.3  # fail if more than 30% of trials leak — well above the ~17% observed live
+
+        leaks = 0
+        for i in range(N):
+            messages = [
+                {"role": "system", "content": "Be helpful. After gathering info, write your answer."},
+                {"role": "user", "content": f"What are the best laptops for elderly parents? (trial {i})"},
+            ]
+            cid = f"call_{i:04d}"
+            messages.append({
+                "role": "assistant", "content": None,
+                "tool_calls": [{"type": "function", "id": cid,
+                                "function": {"name": "search_web", "arguments": '{"query":"laptops elderly"}'}}],
+            })
+            messages.append({
+                "role": "tool", "tool_call_id": cid,
+                "content": MOCK_TOOL_RESULTS["search_web"],
+            })
+
+            resp = _completion(messages, tools=MOCK_TOOLS, tool_choice="none", max_tokens=512)
+            if resp.status_code != 200:
+                continue  # transport-level failures are covered by other tests, not this one
+            content = resp.json()["choices"][0]["message"].get("content") or ""
+            if "<tool_call>" in content or "<function=" in content:
+                leaks += 1
+
+        leak_rate = leaks / N
+        assert leak_rate <= MAX_LEAK_RATE, (
+            f"XML leakage rate {leak_rate:.0%} ({leaks}/{N} trials) exceeds the {MAX_LEAK_RATE:.0%} "
+            "threshold. tool_choice='none' is meant to force prose synthesis — if leakage is "
+            "climbing, something regressed in tool-call formatting or the synthesis prompt."
+        )

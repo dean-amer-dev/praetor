@@ -159,7 +159,8 @@ class TestReviewerRedispatch:
 # ---------------------------------------------------------------------------
 
 class TestWebhookSynchronize:
-    def test_synchronize_on_praetor_branch_dispatches(self, web_client):
+    def test_synchronize_on_praetor_branch_dispatches(self, web_client, monkeypatch):
+        monkeypatch.setattr("webhooks.github._PR_REVIEW_ENABLED", True)
         c, hatchet = web_client
         payload = _pr_payload(action="synchronize", head_ref="praetor-coder/task-99")
         resp = _post(c, payload)
@@ -172,7 +173,8 @@ class TestWebhookSynchronize:
         assert pushed["attempt"] == 1
         assert pushed["head_branch"] == "praetor-coder/task-99"
 
-    def test_synchronize_on_non_praetor_branch_ignored(self, web_client):
+    def test_synchronize_on_non_praetor_branch_ignored(self, web_client, monkeypatch):
+        monkeypatch.setattr("webhooks.github._PR_REVIEW_ENABLED", True)
         c, hatchet = web_client
         payload = _pr_payload(action="synchronize", head_ref="feature/my-branch")
         resp = _post(c, payload)

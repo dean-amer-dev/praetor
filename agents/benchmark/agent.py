@@ -34,7 +34,7 @@ def score_output(agent_output: str, expected_criteria: dict) -> tuple[float, str
     resp = httpx.post(
         f"{os.environ['LITELLM_BASE_URL']}/chat/completions",
         json={
-            "model": os.environ.get("LLM_MODEL", "qwen3-35b"),
+            "model": os.environ.get("LLM_MODEL", "coder"),
             "messages": [{"role": "user", "content": judge_prompt}],
             "max_tokens": 128,
         },
@@ -70,7 +70,7 @@ async def run_research_benchmark(item_input: dict, agent_id: str) -> str:
     resp = httpx.post(
         f"{os.environ['LITELLM_BASE_URL']}/chat/completions",
         json={
-            "model": os.environ.get("LLM_MODEL", "qwen3-35b"),
+            "model": os.environ.get("LLM_MODEL", "coder"),
             "messages": [
                 {"role": "system", "content": _RESEARCH_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
@@ -103,7 +103,7 @@ async def run_reviewer_benchmark(item_input: dict) -> str:
     resp = httpx.post(
         f"{os.environ['LITELLM_BASE_URL']}/chat/completions",
         json={
-            "model": os.environ.get("LLM_MODEL", "qwen3-35b"),
+            "model": os.environ.get("LLM_MODEL", "coder"),
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
