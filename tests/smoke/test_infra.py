@@ -92,7 +92,7 @@ class TestPhase1LiteLLM:
         assert resp.status_code == 200
         data = resp.json()
         model_ids = [m["id"] for m in data.get("data", [])]
-        assert "qwen3-35b" in model_ids, f"qwen3-35b not in model list: {model_ids}"
+        assert "coder" in model_ids, f"coder not in model list: {model_ids}"
 
     def test_litellm_chat_completion(self):
         if not LITELLM_API_KEY:
@@ -100,7 +100,7 @@ class TestPhase1LiteLLM:
         resp = httpx.post(
             "https://litellm.amer.dev/v1/chat/completions",
             json={
-                "model": "qwen3-35b",
+                "model": "coder",
                 "messages": [{"role": "user", "content": "Reply with just the word: ok"}],
                 "max_tokens": 10,
             },
@@ -117,7 +117,7 @@ class TestPhase1LiteLLM:
             pytest.skip("LITELLM_API_KEY not available")
         resp = httpx.post(
             "https://litellm.amer.dev/v1/chat/completions",
-            json={"model": "qwen3-35b", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
+            json={"model": "coder", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
             headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
             timeout=120,
         )
@@ -449,7 +449,9 @@ class TestPhase13OpenWebUI:
         assert any("infra_scaffold" in p for p in paths), \
             f"infra_scaffold tool not in mcp-bridge paths: {paths}"
 
-    def test_qwen3_think_system_prompt_set(self):
+    def test_murderbot_v2_system_prompt_set(self):
+        """murderbot-v2-custom is the current production OWU preset (murderbot-v0/qwen3-35b-think
+        was retired — its base model no longer exists in LiteLLM)."""
         if not OPENWEBUI_ADMIN_PASSWORD:
             pytest.skip("OPENWEBUI_ADMIN_PASSWORD not available")
         token = _owu_token()
@@ -465,16 +467,16 @@ class TestPhase13OpenWebUI:
         assert resp.status_code == 200
         models = resp.json().get("data", [])
         ids = [m.get("id") for m in models]
-        assert "qwen3-35b-think" in ids, f"qwen3-35b-think not in model list: {ids}"
+        assert "murderbot-v2-custom" in ids, f"murderbot-v2-custom not in model list: {ids}"
         # Verify the custom model entry with system prompt exists in the DB
         result = subprocess.run(
             ["ssh", "mini",
              "/Users/alex/.orbstack/bin/docker exec postgres psql -U postgres -d openwebui "
-             "-c \"SELECT id FROM model WHERE id = 'qwen3-35b-think';\""],
+             "-c \"SELECT id FROM model WHERE id = 'murderbot-v2-custom';\""],
             capture_output=True, text=True, timeout=15,
         )
-        assert "qwen3-35b-think" in result.stdout, \
-            "Custom model entry for qwen3-35b-think not found in DB — system prompt not set"
+        assert "murderbot-v2-custom" in result.stdout, \
+            "Custom model entry for murderbot-v2-custom not found in DB — system prompt not set"
 
     def test_openwebui_memory_enabled(self):
         if not OPENWEBUI_ADMIN_PASSWORD:

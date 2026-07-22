@@ -53,7 +53,7 @@ def post_qa_result(repo: str, pr_number: int | None, summary: str, passed: bool)
 
 def build_agent(system_prompt: str | None = None) -> Agent:
     model = OpenAIChatModel(
-        model_name=os.environ.get("LLM_MODEL", "qwen3-35b"),
+        model_name=os.environ.get("LLM_MODEL", "coder"),
         provider=OpenAIProvider(
             base_url=os.environ["LITELLM_BASE_URL"],
             api_key=os.environ["LITELLM_API_KEY"],

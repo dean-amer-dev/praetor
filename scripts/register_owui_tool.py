@@ -17,14 +17,14 @@ What it does:
      tool category that can be enabled/disabled independently from server:mcp:lm.
   3. Ensures the date_injector global Filter exists — prepends "Today is <date>" to every
      system prompt so the model can do date-accurate searches
-  4. Ensures the qwen3-35b-think-custom model exists with:
+  4. Ensures the praetor-planner OWU custom model exists with:
+       - function_calling=native, base_model=murderbot-v2-base
+       - toolIds: ["server:mcp:lm"]
+       - system prompt fetched dynamically from Langfuse ("planner-system", production)
+  5. Ensures the murderbot-v1/v2 and archlinux-v0 custom model presets exist with:
        - function_calling=native
        - toolIds: ["praetor_dispatch", "server:mcp:lm", "secure_search"]
        - minimal behavioral system prompt (date line comes from the filter)
-  5. Ensures the praetor-planner OWU custom model exists with:
-       - function_calling=native, base_model=qwen3-35b-think
-       - toolIds: ["server:mcp:lm"]
-       - system prompt fetched dynamically from Langfuse ("planner-system", production)
   6. Ensures secure-only model variants exist (secure_search tool only):
        - murderbot-v1-secure-custom (full tool set disabled — only secure_search)
        - archlinux-v0-secure-custom (full tool set disabled — only secure_search)
@@ -319,11 +319,8 @@ class Filter:
 '''
 
 # ---------------------------------------------------------------------------
-# murderbot-v0 model config
+# Shared system prompt — used as the murderbot-v1 (gated) system prompt below.
 # ---------------------------------------------------------------------------
-CUSTOM_MODEL_ID = "qwen3-35b-think-custom"
-CUSTOM_MODEL_NAME = "murderbot-v0"
-BASE_MODEL_ID = "qwen3-35b-think"
 PLANNER_MODEL_ID = "praetor-planner"
 PLANNER_MODEL_NAME = "praetor-planner"
 
@@ -485,46 +482,8 @@ def ensure_filter(client: httpx.Client) -> None:
         print(f"Updated filter '{FILTER_NAME}'")
 
 
-def ensure_custom_model(client: httpx.Client) -> None:
-    # Use the direct model endpoint — /api/v1/models/base only returns LiteLLM base models,
-    # not OWU custom models, causing false "not found" → failed create on restart.
-    resp = client.get(f"/api/v1/models/model?id={CUSTOM_MODEL_ID}")
-    existing = resp.json() if resp.status_code == 200 else None
-
-    model_payload = {
-        "id": CUSTOM_MODEL_ID,
-        "name": CUSTOM_MODEL_NAME,
-        "base_model_id": BASE_MODEL_ID,
-        "params": {"function_calling": "native"},
-        "meta": {
-            "profile_image_url": "",
-            "description": "murderbot qwen3-35b — personal assistant with tool calling",
-            "capabilities": {
-                "vision": False, "usage": False, "citations": False,
-                "memory": False, "builtin_tools": True,
-            },
-            "builtinTools": {
-                "chats": False, "calendar": False, "tasks": False, "memory": False,
-                "notes": False, "channels": False, "web_search": False,
-                "automations": False, "image_generation": False,
-                "code_interpreter": False, "time": False, "knowledge": False,
-            },
-            # server:mcp:lm provides: searxng_search, searxng_read_url, secure_search_*, infra_*, github_*
-            # praetor_dispatch provides: dispatch_task, get_task_status
-            # secure_search provides: standalone VPN-protected search (can be toggled separately)
-            "toolIds": ["praetor_dispatch", "server:mcp:lm", "secure_search"],
-            "system": SYSTEM_PROMPT,
-        },
-        "is_active": True,
-        "access_grants": [],
-    }
-
-    if existing is None:
-        client.post("/api/v1/models/create", json=model_payload).raise_for_status()
-        print(f"Created custom model '{CUSTOM_MODEL_ID}'")
-    else:
-        client.post("/api/v1/models/model/update", json=model_payload).raise_for_status()
-        print(f"Custom model '{CUSTOM_MODEL_ID}' updated (toolIds now include server:mcp:lm)")
+# murderbot-v0 (qwen3-35b-think-custom) retired — superseded by murderbot-v1/v2,
+# and its base model (qwen3-35b-think) no longer exists in LiteLLM.
 
 
 def _fetch_langfuse_prompt(client: httpx.Client) -> str:
@@ -773,7 +732,7 @@ def ensure_planner_model(client: httpx.Client) -> None:
     model_payload = {
         "id": PLANNER_MODEL_ID,
         "name": PLANNER_MODEL_NAME,
-        "base_model_id": BASE_MODEL_ID,
+        "base_model_id": "murderbot-v2-base",
         "params": {"function_calling": "native"},
         "meta": {
             "profile_image_url": "",
@@ -814,7 +773,6 @@ def main() -> None:
         ensure_tool(client)
         ensure_secure_search_tool(client)
         ensure_filter(client)
-        ensure_custom_model(client)
         ensure_planner_model(client)
         _ensure_archlinux_model(
             client, ARCHLINUX_V0_ID, "archlinux-v0",
@@ -864,9 +822,9 @@ def main() -> None:
             "archlinux qwen3:14b — secure research only (NordVPN Switzerland)",
             ARCHLINUX_V0_BASE_ID,
         )
-        # NOTE: deactivate_base_model was removed — deactivating qwen3-35b-think breaks
-        # custom model routing in OWU 0.9.6 (custom models route through their base_model_id,
-        # which OWU requires to be active in the model list)
+        # NOTE: deactivate_base_model was removed — deactivating a base model (e.g.
+        # murderbot-v2-base) breaks custom model routing in OWU 0.9.6 (custom models route
+        # through their base_model_id, which OWU requires to be active in the model list)
         print("Done.")
 
 

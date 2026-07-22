@@ -46,7 +46,7 @@ def main() -> None:
     parser.add_argument("--dataset", required=True, help="Langfuse dataset name, e.g. research-eval")
     parser.add_argument("--agent-type", required=True, choices=["research", "review"],
                         help="Agent type to benchmark")
-    parser.add_argument("--model", default="qwen3-35b", help="LiteLLM model alias")
+    parser.add_argument("--model", default="coder", help="LiteLLM model alias")
     parser.add_argument("--prompt-version", default="", help="Langfuse prompt name:version, e.g. research-system:v2")
     parser.add_argument("--run-name", default="", help="Experiment name override")
     args = parser.parse_args()

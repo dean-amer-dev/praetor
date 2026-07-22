@@ -55,6 +55,8 @@ SECURE_SEARCH_MCP_URL = os.environ.get("SECURE_SEARCH_MCP_URL", "https://secure-
 ALL_CUSTOM_MODELS = [
     ("murderbot-v1-custom",            "murderbot-v1",            "murderbot-v1-base"),
     ("murderbot-uncensored-v1-custom", "murderbot-uncensored-v1", "murderbot-uncensored-v1-base"),
+    ("murderbot-v2-custom",            "murderbot-v2",            "murderbot-v2-base"),
+    ("murderbot-v2-uncensored-custom", "murderbot-v2-uncensored", "murderbot-v2-base"),
     ("archlinux-v0-custom",            "archlinux-v0",            "archlinux-v0-base"),
     ("archlinux-uncensored-v0-custom", "archlinux-uncensored-v0", "archlinux-uncensored-v0-base"),
 ]
@@ -65,7 +67,12 @@ SECURE_ONLY_MODELS = [
     ("archlinux-v0-secure-custom",  "archlinux-v0-secure",  "archlinux-v0-base"),
 ]
 
-TIMEOUT       = int(os.environ.get("LLM_TIMEOUT", "120"))
+# Direct-LiteLLM aliases used by non-OWU consumers (OpenHands, opencode, coder-worker,
+# and the other headless praetor agent workers) — not surfaced as an OWU custom model,
+# so they need their own liveness coverage instead of riding along with ALL_CUSTOM_MODELS.
+DIRECT_LITELLM_ALIASES = ["coder"]
+
+TIMEOUT       = int(os.environ.get("LLM_TIMEOUT", "600"))
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -158,6 +165,58 @@ def _dispatch_tool_def() -> dict:
     }
 
 
+def _secure_search_session_headers() -> dict:
+    """
+    Establish an MCP session against secure-search-mcp and return headers for follow-up calls.
+
+    secure-search-mcp's streamable-HTTP transport is stateful: a bare tools/list or
+    tools/call without first calling "initialize" gets rejected with 400 "Missing session
+    ID" (previously this was masked by a 406 on the missing Accept header — fixing the
+    header alone wasn't sufficient, the session handshake was always required underneath).
+    """
+    base_headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    resp = httpx.post(
+        f"{SECURE_SEARCH_MCP_URL}/mcp",
+        content=json.dumps({
+            "jsonrpc": "2.0", "id": "init", "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "praetor-smoke-test", "version": "1.0"},
+            },
+        }).encode(),
+        headers=base_headers,
+        timeout=15,
+    )
+    assert resp.status_code == 200, f"MCP initialize failed: HTTP {resp.status_code}: {resp.text[:200]}"
+    session_id = resp.headers.get("mcp-session-id")
+    assert session_id, f"initialize response had no Mcp-Session-Id header: {dict(resp.headers)}"
+    return {**base_headers, "Mcp-Session-Id": session_id}
+
+
+def _model_output_budget(litellm: httpx.Client, model_name: str) -> int:
+    """Fetch max_output_tokens for a model from LiteLLM's live config. Falls back to 4096."""
+    resp = litellm.get("/model/info", headers={"Accept": "application/json"})
+    resp.raise_for_status()
+    for m in resp.json().get("data", []):
+        if m.get("model_name") == model_name:
+            return m.get("model_info", {}).get("max_output_tokens") or 4096
+    return 4096
+
+
+def _liveness_timeout(max_output_tokens: int, floor_tokens_per_sec: float = 15.0, buffer_s: float = 90.0) -> float:
+    """
+    Compute a request timeout from a model's real output budget instead of a guessed constant.
+
+    This is the exact bug class that broke murderbot-v2-base in production: its LiteLLM
+    timeout was hardcoded to 120s, but max_output_tokens=4096 alone takes ~164s to generate
+    at this backend's real ~25 tok/s throughput — a deterministic timeout with zero
+    contention required. Deriving the timeout from the model's actual budget instead of a
+    guessed constant makes this bug class structurally impossible to silently reintroduce.
+    """
+    return (max_output_tokens / floor_tokens_per_sec) + buffer_s
+
+
 def _execute_mcp_tool(litellm: httpx.Client, name: str, args: dict) -> str:
     """Execute a tool via LiteLLM MCP and return the text result."""
     resp = litellm.post(
@@ -238,11 +297,12 @@ def _run_tool_loop(
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
 
     # Model used all tool turns — force it to synthesize now.
-    # max_tokens=1024: qwen36-27b-think has a 16K context limit. After 5+ real
-    # tool calls, the conversation can grow to ~14K input tokens. Using 2048 here
-    # would push the total to 16385 → 400 ContextWindowExceededError. 1024 keeps
-    # us within budget (14337 + 1024 = 15361 < 16384) while still producing a
-    # substantive answer (the >100 char assertion is easily satisfied at 1024 tokens).
+    # max_tokens=1024: comfortably within every current alias's output budget
+    # (murderbot-v1-base: 8192, murderbot-v2-base: 4096) even after 5+ real tool
+    # calls have grown the input context — and easily satisfies the >100 char
+    # assertion below. Not tied to a specific model's context window; if a future
+    # alias's max_output_tokens ever drops below this, LiteLLM's server-side cap
+    # (max_completion_tokens in configmap.yaml) truncates gracefully rather than 400ing.
     resp = owui.post(
         "/api/v1/chat/completions",
         json={
@@ -775,11 +835,12 @@ class TestSecureSearch:
         )
 
     def test_secure_search_mcp_tools_list(self):
-        """secure-search-mcp must expose searxng_search and searxng_read_url tools."""
+        """secure-search-mcp must expose search and read_url tools."""
+        headers = _secure_search_session_headers()
         resp = httpx.post(
             f"{SECURE_SEARCH_MCP_URL}/mcp",
             content=b'{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}',
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             timeout=15,
         )
         assert resp.status_code == 200, f"tools/list HTTP {resp.status_code}: {resp.text[:200]}"
@@ -799,15 +860,16 @@ class TestSecureSearch:
                 tool_names.update(t["name"] for t in tools)
             except Exception:
                 pass
-        assert "searxng_search" in tool_names, (
-            f"searxng_search not in secure-search-mcp tools: {tool_names}"
+        assert "search" in tool_names, (
+            f"search not in secure-search-mcp tools: {tool_names}"
         )
-        assert "searxng_read_url" in tool_names, (
-            f"searxng_read_url not in secure-search-mcp tools: {tool_names}"
+        assert "read_url" in tool_names, (
+            f"read_url not in secure-search-mcp tools: {tool_names}"
         )
 
     def test_secure_search_returns_results(self):
         """secure_search must execute a real search and return non-empty results via VPN."""
+        headers = _secure_search_session_headers()
         resp = httpx.post(
             f"{SECURE_SEARCH_MCP_URL}/mcp",
             content=json.dumps({
@@ -815,11 +877,11 @@ class TestSecureSearch:
                 "id": "smoke",
                 "method": "tools/call",
                 "params": {
-                    "name": "searxng_search",
+                    "name": "search",
                     "arguments": {"query": "Python programming language", "max_results": 3},
                 },
             }).encode(),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             timeout=30,
         )
         assert resp.status_code == 200, (
@@ -1261,3 +1323,117 @@ class TestArchlinuxV0:
             f"archlinux-v0 synthesis too short ({len(final)} chars).\n"
             f"Tools: {called}\nContent: {final!r}"
         )
+
+
+# ── Liveness — "is this up and working" ───────────────────────────────────────
+
+class TestLiveness:
+    """
+    Is OWU actually up and responding — the single most important test in this file.
+
+    No date checks, no brand-name checks, no tool-routing checks: just, does the model
+    return a real, non-empty response within a bounded time. If this fails, OWU (or the
+    backend behind it) is broken for that model, full stop. If it passes, that model is
+    genuinely up.
+
+    Root incident this exists to catch: murderbot-v2-custom, murderbot-v2-uncensored-custom,
+    and the coder alias all returned litellm.APIConnectionError ("Timeout on reading data
+    from socket") in production while this file's existing tests — scoped only to
+    murderbot-v1/archlinux-v0 — stayed green. There was no test anywhere that would have
+    caught this for the models actually in use. Every currently active OWU model and every
+    direct-LiteLLM consumer alias gets covered here so that gap can't reopen silently.
+    """
+
+    @pytest.mark.parametrize("custom_id,_display,base_id", ALL_CUSTOM_MODELS)
+    def test_owui_model_responds(self, owui, litellm, custom_id, _display, base_id):
+        max_out = _model_output_budget(litellm, base_id)
+        resp = owui.post(
+            "/api/v1/chat/completions",
+            json={
+                "model": custom_id,
+                # No "tools" key — vLLM rejects empty tool arrays, and this test has
+                # nothing to do with tool calling anyway.
+                "messages": [{"role": "user", "content": "Reply with one short sentence confirming you're working."}],
+                "stream": False,
+                "max_tokens": min(max_out, 256),
+            },
+            timeout=_liveness_timeout(max_out),
+        )
+        assert resp.status_code == 200, (
+            f"{custom_id} did not respond: HTTP {resp.status_code}: {resp.text[:300]}. "
+            "OWU/LiteLLM/vLLM is broken for this model — this is the core liveness failure."
+        )
+        choice = resp.json()["choices"][0]
+        content = choice["message"].get("content") or ""
+        assert content.strip(), (
+            f"{custom_id} returned an empty response (finish_reason={choice.get('finish_reason')!r}). "
+            "The HTTP request succeeded but produced no usable output — OWU is broken for "
+            "this model even though this wouldn't show up as a connection/timeout error."
+        )
+
+    @pytest.mark.parametrize("model_name", DIRECT_LITELLM_ALIASES)
+    def test_direct_litellm_alias_responds(self, litellm, model_name):
+        """
+        Non-OWU consumers (OpenHands, opencode, coder-worker, and the other headless
+        praetor agent workers) call these aliases directly against LiteLLM, never through
+        OWU. Verify the alias itself is alive, independent of the OWU-facing tests above.
+        """
+        max_out = _model_output_budget(litellm, model_name)
+        resp = litellm.post(
+            "/v1/chat/completions",
+            json={
+                "model": model_name,
+                "messages": [{"role": "user", "content": "Reply with one short sentence confirming you're working."}],
+                "max_tokens": min(max_out, 256),
+            },
+            headers={"Accept": "application/json"},
+            timeout=_liveness_timeout(max_out),
+        )
+        assert resp.status_code == 200, (
+            f"{model_name} did not respond: HTTP {resp.status_code}: {resp.text[:300]}"
+        )
+        content = resp.json()["choices"][0]["message"].get("content") or ""
+        assert content.strip(), f"{model_name} returned an empty response"
+
+
+# ── Concurrency — single-session backend behavior under load ─────────────────
+
+class TestConcurrency:
+    """
+    Characterizes single-session (--max-num-seqs 1) backend behavior under concurrent load.
+
+    murderbot's vLLM backend deliberately serializes every caller — OWU, opencode, and
+    every praetor worker — onto one execution slot, trading concurrency for a much larger
+    per-session context window. This test doesn't require concurrent requests to be fast;
+    it asserts the backend queues them gracefully (every request eventually completes with
+    real content) rather than silently dropping, corrupting, or permanently hanging one of
+    them. That distinction — queued-and-succeeds vs. clean-reject vs. silent-corruption —
+    was previously untested and only surfaced as a live incident.
+    """
+
+    def test_concurrent_requests_all_complete(self, owui):
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _call(i: int):
+            return owui.post(
+                "/api/v1/chat/completions",
+                json={
+                    "model": CUSTOM_MODEL,
+                    "messages": [{"role": "user", "content": f"Reply with just the digit {i}."}],
+                    "stream": False,
+                    "max_tokens": 20,
+                },
+                timeout=600,
+            )
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            responses = list(pool.map(_call, range(3)))
+
+        statuses = [r.status_code for r in responses]
+        assert all(s == 200 for s in statuses), (
+            f"Concurrent requests did not all complete cleanly: statuses={statuses}. "
+            "A single-session backend should queue requests, not drop or corrupt them."
+        )
+        for i, r in enumerate(responses):
+            content = r.json()["choices"][0]["message"].get("content") or ""
+            assert content.strip(), f"Concurrent request {i} returned an empty response"

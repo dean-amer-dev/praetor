@@ -162,7 +162,7 @@ Confidence guidance:
 async def _research_mcp(capability: str) -> McpResearchResult:
     """Ask the LLM to discover existing MCP servers for the given capability."""
     payload = {
-        "model": os.environ.get("LLM_MODEL", "qwen3-35b"),
+        "model": os.environ.get("LLM_MODEL", "coder"),
         "messages": [
             {"role": "system", "content": _RESEARCH_SYSTEM},
             {"role": "user", "content": f"Find an MCP server for: {capability}"},
