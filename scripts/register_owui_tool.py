@@ -233,21 +233,47 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
 
-    def _mcp_call(self, name: str, args: dict) -> str:
-        """Call a tool on secure-search-mcp via MCP Streamable HTTP protocol."""
-        body = json.dumps({
-            "jsonrpc": "2.0",
-            "id": "1",
-            "method": "tools/call",
-            "params": {"name": name, "arguments": args},
-        }).encode()
+    def _mcp_request(self, session_id: str, body: dict) -> tuple:
+        """POST one JSON-RPC request to secure-search-mcp, return (headers, text)."""
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if session_id:
+            headers["Mcp-Session-Id"] = session_id
         req = urllib.request.Request(
             f"{self.valves.SECURE_SEARCH_MCP_URL}/mcp",
-            data=body,
-            headers={"Content-Type": "application/json"},
+            data=json.dumps(body).encode(),
+            headers=headers,
         )
         with urllib.request.urlopen(req, timeout=30) as r:
-            text = r.read().decode()
+            return dict(r.getheaders()), r.read().decode()
+
+    def _mcp_call(self, name: str, args: dict) -> str:
+        """Call a tool on secure-search-mcp via MCP Streamable HTTP protocol.
+
+        The server requires a stateful session: initialize first to obtain an
+        Mcp-Session-Id, then include it on the tools/call request. A bare
+        tools/call with no prior initialize is rejected with 400 Missing session ID.
+        """
+        init_headers, _ = self._mcp_request(None, {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "owui-secure-search", "version": "1.0"},
+            },
+        })
+        session_id = init_headers.get("Mcp-Session-Id") or init_headers.get("mcp-session-id")
+
+        _, text = self._mcp_request(session_id, {
+            "jsonrpc": "2.0",
+            "id": "2",
+            "method": "tools/call",
+            "params": {"name": name, "arguments": args},
+        })
         # Streamable HTTP response: SSE-style "data: {...}" lines
         for line in text.splitlines():
             if line.startswith("data: "):
@@ -279,7 +305,7 @@ class Tools:
         query: the search query (same syntax as regular search)
         max_results: number of results to return (default: 5)
         """
-        return self._mcp_call("searxng_search", {"query": query, "max_results": max_results})
+        return self._mcp_call("search", {"query": query, "max_results": max_results})
 
     def secure_read_url(self, url: str) -> str:
         """
@@ -290,7 +316,7 @@ class Tools:
 
         url: the URL to fetch and read
         """
-        return self._mcp_call("searxng_read_url", {"url": url})
+        return self._mcp_call("read_url", {"url": url})
 '''
 
 # ---------------------------------------------------------------------------
