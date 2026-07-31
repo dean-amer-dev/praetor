@@ -375,12 +375,47 @@ async def request_mcp(req: McpRequest) -> McpRequestResponse:
         f"Create {name}/server.py in this repo using FastMCP with the appropriate tools, "
         f"a Dockerfile, and a /health endpoint. Follow the existing sibling MCP servers in "
         f"this repo (e.g. mcp-searxng, secure-search-mcp) for project layout and conventions.\n"
+        f"\n"
+        f"Also create {name}/mcp.json — this is the single source of truth the MCP factory "
+        f"deployment manifest gets generated from later, so it must match the server code "
+        f"exactly (container port, health path, and every env var/secret the server actually "
+        f"reads). Shape:\n"
+        f'{{\n'
+        f'  "port": 8000,\n'
+        f'  "health_path": null,\n'
+        f'  "env_vars": {{}},\n'
+        f'  "env_secrets": {{}},\n'
+        f'  "service_account_name": null,\n'
+        f'  "cluster_role": null\n'
+        f'}}\n'
+        f'"env_vars" is {{ENV_VAR_NAME: literal_value}} for non-secret config; "env_secrets" is '
+        f'{{ENV_VAR_NAME: bws_secret_key}} for anything that must come from Bitwarden — never '
+        f'hardcode a credential in server.py or mcp.json itself. Leave health_path null and '
+        f'service_account_name/cluster_role null unless the server actually implements a '
+        f'/health endpoint or needs in-cluster Kubernetes API access.\n'
+        f"\n"
         f"Also add .github/workflows/build-{name}.yaml: copy the structure of an existing "
         f"sibling workflow (e.g. build-mcp-searxng.yaml) for the test/build/push jobs "
         f"(building and pushing amerenda/{name}:latest and amerenda/{name}:sha-<short-sha> on "
         f"push to main), but do NOT include a 'deploy' job that opens a k3s-dean-gitops PR — "
         f"unlike the older hand-written sibling servers, this one is deployed by a separate "
-        f"MCP factory registration call, not by CI. Open a PR."
+        f"MCP factory registration call, not by CI.\n"
+        f"\n"
+        f"At the end of the build job (after the image push step), add one more step that "
+        f"posts {name}/mcp.json to the praetor MCP factory's CI callback so the first "
+        f"successful build auto-opens the registration PR — no manual /mcp/register call "
+        f"needed:\n"
+        f'      - name: Notify MCP factory\n'
+        f'        env:\n'
+        f'          PRAETOR_API_KEY: ${{{{ secrets.PRAETOR_API_KEY }}}}\n'
+        f'        run: |\n'
+        f'          curl -sf -X POST https://praetor.amer.dev/api/v1/mcp/register-from-ci \\\n'
+        f'            -H "Authorization: Bearer ${{PRAETOR_API_KEY}}" \\\n'
+        f'            -H "Content-Type: application/json" \\\n'
+        f'            -d "$(python3 -c \'import json; d=json.load(open("{name}/mcp.json")); '
+        f'd["name"]="{name}"; d["image"]="${{{{ env.IMAGE }}}}:latest"; print(json.dumps(d))\')"\n'
+        f"PRAETOR_API_KEY is already available as a dean-mcp repo Actions secret — reference it "
+        f"exactly as above, do not create or modify it. Open a PR."
     )
     try:
         dispatch_agent(task_id, f"Scaffold MCP: {name}", description, "scaffold")

@@ -553,6 +553,104 @@ class TestRegisterEndpoint:
         assert len(root_app_updates) == 0, "root-app.yaml must not be updated when ArgoCD entry already exists"
 
 
+def _minimal_ci_payload(**kwargs) -> dict:
+    return {"name": "ci-mcp", "image": "amerenda/ci-mcp:latest", **kwargs}
+
+
+class TestRegisterFromCiEndpoint:
+    def test_auth_required(self, client):
+        resp = client.post("/api/v1/mcp/register-from-ci", json=_minimal_ci_payload())
+        assert resp.status_code in (401, 403)
+
+    def test_wrong_key_rejected(self, client):
+        resp = client.post(
+            "/api/v1/mcp/register-from-ci", json=_minimal_ci_payload(), headers=_auth("bad"),
+        )
+        assert resp.status_code == 401
+
+    def test_already_registered_is_a_noop(self, client):
+        existing = {
+            "ci-mcp": {
+                "current": {
+                    "name": "ci-mcp", "image": "amerenda/ci-mcp:latest", "port": 8000,
+                    "transport": "http", "pr_url": "https://github.com/pr/42",
+                },
+                "history": [],
+            }
+        }
+        create_branch_mock = AsyncMock()
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value=existing)),
+            patch("webhooks.mcp_factory._create_branch", new=create_branch_mock),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register-from-ci", json=_minimal_ci_payload(), headers=_auth(),
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "already_registered"
+        assert data["pr_url"] == "https://github.com/pr/42"
+        create_branch_mock.assert_not_awaited()
+
+    def test_new_mcp_opens_registration_pr(self, client):
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc123")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=(_MOCK_CM, "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch(
+                "webhooks.mcp_factory._get_or_create_pr",
+                new=AsyncMock(return_value="https://github.com/amerenda/k3s-dean-gitops/pull/101"),
+            ),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register-from-ci",
+                json=_minimal_ci_payload(
+                    port=9000,
+                    env_vars={"KOMODO_BASE": "https://komodo.amer.dev"},
+                    env_secrets={"KOMODO_API_KEY": "komodo-dean-api-key"},
+                ),
+                headers=_auth(),
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["name"] == "ci-mcp"
+        assert data["status"] == "registered"
+        assert "pull/101" in data["pr_url"]
+
+    def test_manifest_fields_flow_into_registration(self, client):
+        """port/health_path/env from the ci payload must reach the generated deployment.yaml."""
+        create_file_mock = AsyncMock()
+        with (
+            patch("webhooks.mcp_factory._load_registry", new=AsyncMock(return_value={})),
+            patch("webhooks.mcp_factory._save_registry", new=AsyncMock()),
+            patch("webhooks.mcp_factory.get_installation_token", return_value="gh-token"),
+            patch("webhooks.mcp_factory._get_main_sha", new=AsyncMock(return_value="abc123")),
+            patch("webhooks.mcp_factory._create_branch", new=AsyncMock()),
+            patch("webhooks.mcp_factory._create_file", new=create_file_mock),
+            patch("webhooks.mcp_factory._get_file", new=AsyncMock(return_value=(_MOCK_CM, "sha1"))),
+            patch("webhooks.mcp_factory._update_file", new=AsyncMock()),
+            patch("webhooks.mcp_factory._get_or_create_pr", new=AsyncMock(return_value="https://github.com/pr/1")),
+        ):
+            resp = client.post(
+                "/api/v1/mcp/register-from-ci",
+                json=_minimal_ci_payload(port=9000, health_path="/health"),
+                headers=_auth(),
+            )
+        assert resp.status_code == 200
+        deployment_calls = [
+            call for call in create_file_mock.await_args_list if "deployment.yaml" in call.args[2]
+        ]
+        assert len(deployment_calls) == 1
+        deployment_content = deployment_calls[0].args[3]
+        assert "containerPort: 9000" in deployment_content
+        assert "path: /health" in deployment_content
+
+
 class TestListEndpoint:
     def test_auth_required(self, client):
         resp = client.get("/api/v1/mcp")
