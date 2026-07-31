@@ -702,7 +702,7 @@ async def _call_review_llm(manifests: dict[str, str], reg: McpRegistration) -> t
         manifest_text += f"\n### {fname}\n```yaml\n{content.strip()}\n```\n"
 
     payload = {
-        "model": "openai/gpt-4o",
+        "model": os.environ.get("LLM_MODEL", "coder"),
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Review these MCP manifests for `{reg.name}`:\n\n{manifest_text}\n"},
