@@ -374,8 +374,13 @@ async def request_mcp(req: McpRequest) -> McpRequestResponse:
         f"\n"
         f"Create {name}/server.py in this repo using FastMCP with the appropriate tools, "
         f"a Dockerfile, and a /health endpoint. Follow the existing sibling MCP servers in "
-        f"this repo (e.g. mcp-searxng, secure-search-mcp) for project layout and conventions. "
-        f"Open a PR."
+        f"this repo (e.g. mcp-searxng, secure-search-mcp) for project layout and conventions.\n"
+        f"Also add .github/workflows/build-{name}.yaml: copy the structure of an existing "
+        f"sibling workflow (e.g. build-mcp-searxng.yaml) for the test/build/push jobs "
+        f"(building and pushing amerenda/{name}:latest and amerenda/{name}:sha-<short-sha> on "
+        f"push to main), but do NOT include a 'deploy' job that opens a k3s-dean-gitops PR — "
+        f"unlike the older hand-written sibling servers, this one is deployed by a separate "
+        f"MCP factory registration call, not by CI. Open a PR."
     )
     try:
         dispatch_agent(task_id, f"Scaffold MCP: {name}", description, "scaffold")
