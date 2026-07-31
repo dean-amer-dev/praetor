@@ -406,6 +406,7 @@ async def request_mcp(req: McpRequest) -> McpRequestResponse:
         f"successful build auto-opens the registration PR — no manual /mcp/register call "
         f"needed:\n"
         f'      - name: Notify MCP factory\n'
+        f'        continue-on-error: true  # don\'t fail the build if PRAETOR_API_KEY isn\'t wired up yet\n'
         f'        env:\n'
         f'          PRAETOR_API_KEY: ${{{{ secrets.PRAETOR_API_KEY }}}}\n'
         f'        run: |\n'
@@ -414,8 +415,11 @@ async def request_mcp(req: McpRequest) -> McpRequestResponse:
         f'            -H "Content-Type: application/json" \\\n'
         f'            -d "$(python3 -c \'import json; d=json.load(open("{name}/mcp.json")); '
         f'd["name"]="{name}"; d["image"]="${{{{ env.IMAGE }}}}:latest"; print(json.dumps(d))\')"\n'
-        f"PRAETOR_API_KEY is already available as a dean-mcp repo Actions secret — reference it "
-        f"exactly as above, do not create or modify it. Open a PR."
+        f"PRAETOR_API_KEY is meant to be a dean-mcp repo Actions secret (same pattern as "
+        f"CODER_APP_ID) — reference it exactly as above, do not create or modify the secret "
+        f"itself. The continue-on-error guard means the build is never blocked if the secret "
+        f"is missing or wrong; someone will need to add it separately for this step to "
+        f"actually take effect. Open a PR."
     )
     try:
         dispatch_agent(task_id, f"Scaffold MCP: {name}", description, "scaffold")
