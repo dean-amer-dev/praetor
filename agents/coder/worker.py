@@ -231,7 +231,7 @@ def main() -> None:
 
     run_coder = hatchet.task(
         name="coder",
-        on_events=["agent:code"],
+        on_events=["agent:code", "agent:scaffold"],
         input_validator=CoderInput,
         execution_timeout=timedelta(minutes=20),
         retries=1,

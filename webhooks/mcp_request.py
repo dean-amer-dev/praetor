@@ -22,6 +22,7 @@ _LITELLM_BASE = os.environ.get("LITELLM_BASE_URL", "http://litellm.praetor.svc.c
 _LITELLM_KEY = os.environ.get("LITELLM_API_KEY", "")
 _PRAETOR_BASE = os.environ.get("PRAETOR_BASE_URL", "http://localhost:8000")
 _PRAETOR_API_KEY_ENV = "PRAETOR_API_KEY"
+_SEARXNG_URL = os.environ.get("SEARXNG_URL", "https://searxng.amer.dev")
 
 CONFIDENCE_THRESHOLD = 0.85
 
@@ -159,13 +160,53 @@ Confidence guidance:
 """
 
 
+async def _searxng_search(query: str, max_results: int = 5) -> str:
+    """Search the web via the self-hosted SearXNG instance. Returns formatted text, or a
+    'No results' / error string on failure — never raises, so research can proceed without it."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{_SEARXNG_URL}/search",
+                params={"q": query, "format": "json", "engines": "google,bing,duckduckgo,github"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        results = data.get("results", [])[:max_results]
+        if not results:
+            return "No search results found."
+        lines = []
+        for r in results:
+            title = r.get("title", "")
+            url = r.get("url", "")
+            snippet = r.get("content", "")[:300]
+            lines.append(f"- {title}\n  {url}\n  {snippet}")
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("mcp-request: searxng search failed (%s) — proceeding without it", exc)
+        return "Search unavailable."
+
+
 async def _research_mcp(capability: str) -> McpResearchResult:
-    """Ask the LLM to discover existing MCP servers for the given capability."""
+    """Search the web for existing MCP servers, then ask the LLM to evaluate the results."""
+    search_results = await _searxng_search(f"MCP server (Model Context Protocol) {capability}")
+
     payload = {
         "model": os.environ.get("LLM_MODEL", "coder"),
         "messages": [
             {"role": "system", "content": _RESEARCH_SYSTEM},
-            {"role": "user", "content": f"Find an MCP server for: {capability}"},
+            {
+                "role": "user",
+                "content": (
+                    f"Find an MCP server for: {capability}\n\n"
+                    f"Web search results:\n{search_results}\n\n"
+                    "Base your answer on these search results where they name a real, specific "
+                    "server/image/repo. If the results are generic, unrelated, or say "
+                    "'Search unavailable' / 'No search results found', treat this the same as "
+                    "finding nothing — do not fall back to guessing from memory, and keep "
+                    "confidence below 0.85 unless a search result directly confirms a public "
+                    "Docker image or GitHub repo for an MCP server."
+                ),
+            },
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0,
@@ -325,12 +366,15 @@ async def request_mcp(req: McpRequest) -> McpRequestResponse:
 
     task_id = int(time.time())
     description = (
+        f"repo: amerenda/dean-mcp\n"
         f"Scaffold a new MCP server named '{name}'.\n"
         f"Capability: {req.capability}\n"
         f"Research notes: {research.notes}\n"
         f"\n"
-        f"Create dean-mcp/{name}/server.py using FastMCP with the appropriate tools, "
-        f"a Dockerfile, and a /health endpoint. Open a PR on amerenda/dean-mcp."
+        f"Create {name}/server.py in this repo using FastMCP with the appropriate tools, "
+        f"a Dockerfile, and a /health endpoint. Follow the existing sibling MCP servers in "
+        f"this repo (e.g. mcp-searxng, secure-search-mcp) for project layout and conventions. "
+        f"Open a PR."
     )
     try:
         dispatch_agent(task_id, f"Scaffold MCP: {name}", description, "scaffold")
