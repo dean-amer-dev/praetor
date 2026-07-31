@@ -162,6 +162,26 @@ class McpRegisterResponse(BaseModel):
     message: str
 
 
+class McpCiRegistration(BaseModel):
+    """Payload posted by a dean-mcp CI build job — the coder agent's own mcp.json
+    manifest, plus the name/image CI fills in at build time."""
+    name: str
+    image: str
+    port: int = 8000
+    health_path: str | None = None
+    env_vars: dict[str, str] = {}
+    env_secrets: dict[str, str] = {}
+    service_account_name: str | None = None
+    cluster_role: str | None = None
+
+
+class McpCiRegisterResponse(BaseModel):
+    name: str
+    status: str  # "registered" | "already_registered"
+    pr_url: str | None = None
+    message: str
+
+
 class McpListResponse(BaseModel):
     mcps: list[McpStatusEntry]
 
@@ -919,6 +939,45 @@ async def register_mcp(reg: McpRegistration) -> McpRegisterResponse:
         name=reg.name,
         pr_url=pr_url,
         message=f"MCP '{reg.name}' registration PR created. Merge to deploy.",
+    )
+
+
+@router.post(
+    "/api/v1/mcp/register-from-ci",
+    response_model=McpCiRegisterResponse,
+    dependencies=[Depends(_check_auth)],
+)
+async def register_mcp_from_ci(payload: McpCiRegistration) -> McpCiRegisterResponse:
+    """CI callback fired by dean-mcp after a scaffolded MCP's first successful build.
+
+    Reads the coder agent's own mcp.json manifest (forwarded as this payload) as the
+    single source of truth for the deployment contract, instead of a one-time guess
+    made before the code existed. No-ops if already registered — only the first
+    successful build after a scaffold PR merge should open a registration PR;
+    later builds just update the running `:latest` image, no new PR needed.
+    """
+    registry = await _load_registry()
+    if payload.name in registry:
+        return McpCiRegisterResponse(
+            name=payload.name,
+            status="already_registered",
+            pr_url=registry[payload.name]["current"].get("pr_url"),
+            message=f"MCP '{payload.name}' is already registered — no action taken.",
+        )
+
+    reg = McpRegistration(
+        name=payload.name,
+        image=payload.image,
+        port=payload.port,
+        health_path=payload.health_path,
+        env_vars=payload.env_vars,
+        env_secrets=payload.env_secrets,
+        service_account_name=payload.service_account_name,
+        cluster_role=payload.cluster_role,
+    )
+    result = await register_mcp(reg)
+    return McpCiRegisterResponse(
+        name=payload.name, status="registered", pr_url=result.pr_url, message=result.message,
     )
 
 
