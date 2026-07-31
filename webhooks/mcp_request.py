@@ -367,6 +367,7 @@ async def request_mcp(req: McpRequest) -> McpRequestResponse:
     task_id = int(time.time())
     description = (
         f"repo: amerenda/dean-mcp\n"
+        f"scaffold: true\n"
         f"Scaffold a new MCP server named '{name}'.\n"
         f"Capability: {req.capability}\n"
         f"Research notes: {research.notes}\n"
