@@ -139,7 +139,10 @@ async def _run_coder(input: CoderInput, context: Context) -> dict:
         branch    = branch_match.group(1)        if branch_match  else None
         attempt   = int(attempt_match.group(1))  if attempt_match else 0
         feedback  = feedback_match.group(1).strip() if feedback_match else ""
-        request_limit = 50
+        # Scaffold tasks build an entire new service from a blank slate — more tool
+        # calls than a typical existing-PR edit, so they need a higher request budget.
+        is_scaffold = bool(re.search(r"scaffold:\s*true", input.task_description))
+        request_limit = 120 if is_scaffold else 50
 
         prior = await search_memory(f"{input.task_title} {input.task_description}", memory_agent_id)
         prior_context = "\n".join(prior) if prior else "No prior memory found for this repo."
