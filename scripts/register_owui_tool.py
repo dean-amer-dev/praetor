@@ -500,12 +500,19 @@ class Filter:
         except Exception:
             return None
 
+    def _strip_tool_blocks(self, text: str) -> str:
+        # OWU wraps tool-call traces (raw search results, etc.) in <details type="tool_calls"
+        # ...>...</details>. That's internet content the model quoted, not its own
+        # recommendation — scanning it or feeding it back into a correction request just
+        # anchors the model on ingredients it saw in someone else's blog post.
+        return re.sub(r"<details[^>]*>.*?</details>", "", text, flags=re.DOTALL).strip()
+
     def outlet(self, body: dict, __user: Optional[dict] = None) -> dict:
         messages = body.get("messages", [])
         if not messages or messages[-1].get("role") != "assistant":
             return body
 
-        current = messages[-1].get("content") or ""
+        current = self._strip_tool_blocks(messages[-1].get("content") or "")
         hits = self._find_hits(current)
         if not hits:
             return body
@@ -518,7 +525,7 @@ class Filter:
             fixed = self._ask_model_to_fix(model, history, current, hits)
             if fixed is None:
                 break
-            current = fixed
+            current = self._strip_tool_blocks(fixed)
             hits = self._find_hits(current)
 
         if hits:
@@ -874,6 +881,15 @@ MURDERBOT_V2_UNCENSORED_SYSTEM = (
     "- Code tasks: dispatch_task(type=\"openhands\") with repo and full spec\n"
     "- Deep research: dispatch_task(type=\"research\") only when explicitly requested\n"
     "- Personal memory: praetor_memory_search / praetor_memory_add\n\n"
+    "## Recipe/cooking questions — search is fine, but search compliant\n"
+    "Feel free to use searxng_search for recipe/meal-prep ideas — there's no shortage of good "
+    "vegetarian/vegan/pescatarian sources out there. But scope every recipe search query with "
+    "\"vegetarian\" or \"vegan\" (e.g. \"vegetarian meal prep protein ideas\", not \"meal prep "
+    "protein ideas\") so the results you get are actually usable. Most recipe content defaults "
+    "to meat, so treat any meat/poultry/gelatin ingredient mentioned in a search result as "
+    "something to swap out or ignore, never something to copy into your answer just because a "
+    "source page said it. Re-check your final answer against the dietary rules below regardless "
+    "of what the search results said.\n\n"
     "## Personal memory (reactions, evolving preferences, history)\n"
     "Call praetor_memory_search before answering anything that depends on the user's personal "
     "preferences, restrictions, or history beyond the standing dietary rules below — "
