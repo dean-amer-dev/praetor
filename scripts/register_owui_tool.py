@@ -433,11 +433,30 @@ class Filter:
     def _scrub(self, text: str) -> str:
         for phrase in self._SAFE_PHRASES:
             text = text.replace(phrase, "")
+
+        # Negation windows: the ~45 chars after each trigger word, capped at the next
+        # sentence boundary. Computed once against the untouched text (the trigger word
+        # itself is never removed), so a whole negated list — "no mayo or eggplant/
+        # cauliflower/sweet potato", "no meat, no egg, no mayo" — blanks every listed
+        # term, not just the first one adjacent to the trigger.
+        windows = []
+        for m in re.finditer(rf"\\b{self._NEGATION}\\b", text):
+            end = min(len(text), m.end() + 45)
+            stop = re.search(r"[.!?\\n]", text[m.end():end])
+            if stop:
+                end = m.end() + stop.start()
+            windows.append((m.end(), end))
+
+        def _negated(pos: int) -> bool:
+            return any(start <= pos < end for start, end in windows)
+
+        chars = list(text)
         for term in self._WORD_TERMS + self._PHRASE_TERMS + ["egg", "eggs"]:
-            text = re.sub(
-                rf"\\b{self._NEGATION}\\s+(?:any\\s+|the\\s+)?{re.escape(term)}s?\\b", "", text,
-            )
-        return text
+            for m in re.finditer(rf"\\b{re.escape(term)}s?\\b", text):
+                if _negated(m.start()):
+                    for i in range(*m.span()):
+                        chars[i] = " "
+        return "".join(chars)
 
     def _find_hits(self, text: str) -> set:
         lowered = self._scrub(text.lower())
