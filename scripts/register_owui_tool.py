@@ -464,24 +464,28 @@ class Filter:
         for phrase in self._SAFE_PHRASES:
             text = text.replace(phrase, "")
 
-        # Negation windows: the ~45 chars after each trigger word, capped at the next
-        # sentence boundary. Computed once against the untouched text (the trigger word
-        # itself is never removed), so a whole negated list — "no mayo or eggplant/
-        # cauliflower/sweet potato", "no meat, no egg, no mayo" — blanks every listed
-        # term, not just the first one adjacent to the trigger.
+        # Negation windows: the ~200 chars after each trigger word (long compliance-summary
+        # lists do run this long — "avoiding meat, gelatin, egg, mayo, and your disliked
+        # veggies (eggplant, cauliflower, sweet potato)" is ~90 chars on its own), capped
+        # at the next sentence boundary OR contrast conjunction ("but"/"however"/etc.) —
+        # a negation earlier in a sentence must never suppress a real violation introduced
+        # by a "but" later in that same sentence ("avoiding X, but this also has chicken").
+        # Computed once against the untouched text (the trigger word itself is never
+        # removed), so a whole negated list blanks every listed term, not just the first.
+        _BOUNDARY = r"[.!?\\n]|\\bbut\\b|\\bhowever\\b|\\balthough\\b|\\byet\\b|\\bexcept\\b"
         windows = []
         for m in re.finditer(rf"\\b{self._NEGATION}\\b", text):
-            end = min(len(text), m.end() + 45)
-            stop = re.search(r"[.!?\\n]", text[m.end():end])
+            end = min(len(text), m.end() + 200)
+            stop = re.search(_BOUNDARY, text[m.end():end])
             if stop:
                 end = m.end() + stop.start()
             windows.append((m.end(), end))
 
-        # Backward windows for passive constructions — the ~45 chars BEFORE the
-        # trigger, capped at the previous sentence boundary.
+        # Backward windows for passive constructions — the ~200 chars BEFORE the
+        # trigger, capped at the previous sentence boundary or contrast conjunction.
         for m in re.finditer(rf"\\b{self._PASSIVE_NEGATION}", text):
-            start = max(0, m.start() - 45)
-            stop = re.search(r"[.!?\\n](?!.*[.!?\\n])", text[start:m.start()])
+            start = max(0, m.start() - 200)
+            stop = re.search(rf"(?:{_BOUNDARY})(?!.*(?:{_BOUNDARY}))", text[start:m.start()])
             if stop:
                 start = start + stop.end()
             windows.append((start, m.start()))
