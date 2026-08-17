@@ -447,7 +447,11 @@ class Filter:
     # "No egg", "without mayo", "removed the chicken", "not mayo-based" — the model
     # explaining what it avoided/omitted must not trip the same scanner it's reassuring
     # about. Stripped before matching, for every term below.
-    _NEGATION = r"(?:no|not|never|without|free of|avoid(?:ing|ed|s)?|skip(?:ping|ped|s)?|omit(?:ting|ted|s)?|remov(?:ing|ed|es)|exclud(?:ing|ed|es))"
+    _NEGATION = (
+        r"(?:no|not|never|without|free of|avoid(?:ing|ed|s)?|skip(?:ping|ped|s)?|"
+        r"omit(?:ting|ted|s)?|remov(?:ing|ed|es)|exclud(?:ing|ed|es)|distinct from|"
+        r"different from|unlike|as opposed to|rather than|instead of|in place of)"
+    )
 
     def _scrub(self, text: str) -> str:
         for phrase in self._SAFE_PHRASES:
