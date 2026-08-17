@@ -345,6 +345,107 @@ class Filter:
 '''
 
 # ---------------------------------------------------------------------------
+# Dietary guardrail filter — cheap deterministic net behind the system-prompt
+# rules (praetor_memory_search/add + the standing dietary block in the
+# murderbot-v2-uncensored prompt). Outlet hook: scans the assistant's own
+# response for likely violations of Alex's pescatarian/vegetarian-default
+# rules and prepends a non-blocking warning banner if anything looks off.
+# Does not block or auto-regenerate — just flags, so a false positive costs
+# nothing more than an ignorable banner.
+# ---------------------------------------------------------------------------
+DIETARY_FILTER_ID = "dietary_guardrail"
+DIETARY_FILTER_NAME = "Dietary Guardrail"
+DIETARY_FILTER_DESCRIPTION = (
+    "Flags likely violations of Alex's dietary rules (meat, gelatin, eggplant/"
+    "cauliflower/sweet potato, non-dessert egg, mayo) in the assistant's response."
+)
+
+DIETARY_FILTER_CONTENT = '''\
+"""Flag likely dietary-rule violations in the assistant response before Alex sees it."""
+import re
+from typing import Optional
+
+
+class Filter:
+    class Valves:
+        pass
+
+    def __init__(self):
+        self.valves = self.Valves()
+
+    # Phrases that would otherwise trigger a false positive — stripped before scanning.
+    _SAFE_PHRASES = [
+        "beyond meat", "daring chicken", "daring plant", "daring vegan chicken",
+        "impossible meat", "impossible burger", "gardein chicken", "gardein beef",
+        "meatless", "meat-free", "meat substitute", "plant-based meat",
+        "plant-based chicken", "plant-based beef", "plant-based sausage",
+        "vegan mayo", "vegan mayonnaise", "vegan gelatin", "vegan marshmallow",
+    ]
+
+    # Single-word terms, matched with word boundaries (so "hamburger" doesn't
+    # match "ham", "eggplant" doesn't match "egg", etc.)
+    _WORD_TERMS = [
+        "beef", "steak", "pork", "ham", "bacon", "sausage", "pepperoni", "salami",
+        "prosciutto", "chorizo", "chicken", "turkey", "duck", "lamb", "veal",
+        "venison", "mutton", "meatball", "brisket", "gelatin", "gelatine",
+        "jello", "marshmallow", "eggplant", "aubergine", "cauliflower", "yam",
+        "mayonnaise", "mayo", "aioli",
+    ]
+
+    # Multi-word phrases, matched as plain substrings.
+    _PHRASE_TERMS = [
+        "ground beef", "ground pork", "ground turkey", "ground chicken",
+        "pulled pork", "pork chop", "pork belly", "meat stock", "meat broth",
+        "chicken stock", "chicken broth", "beef stock", "beef broth",
+        "jell-o", "gummy bear", "gummy candy", "sweet potato",
+    ]
+
+    # Egg is fine in sweet baked goods/desserts, never in a savory context
+    # (including as a minor binder — egg wash, egg noodles, egg in fried rice).
+    _DESSERT_INDICATORS = [
+        "cake", "cookie", "waffle", "pancake", "muffin", "brownie", "custard",
+        "pudding", "dessert", "pastry", "meringue", "french toast",
+        "quick bread", "crepe", "crêpe",
+    ]
+
+    def _scrub(self, text: str) -> str:
+        for phrase in self._SAFE_PHRASES:
+            text = text.replace(phrase, "")
+        return text
+
+    def outlet(self, body: dict, __user: Optional[dict] = None) -> dict:
+        messages = body.get("messages", [])
+        if not messages or messages[-1].get("role") != "assistant":
+            return body
+
+        original = messages[-1].get("content") or ""
+        lowered = self._scrub(original.lower())
+
+        hits = set()
+        for term in self._PHRASE_TERMS:
+            if term in lowered:
+                hits.add(term)
+        for term in self._WORD_TERMS:
+            if re.search(rf"\\b{re.escape(term)}\\b", lowered):
+                hits.add(term)
+
+        has_dessert_context = any(d in lowered for d in self._DESSERT_INDICATORS)
+        if not has_dessert_context and re.search(r"\\begg(s)?\\b", lowered):
+            hits.add("egg (outside a dessert/baked-good context)")
+
+        if hits:
+            banner = (
+                "> ⚠️ **Dietary check flagged this response** — possible issue(s): "
+                + ", ".join(sorted(hits))
+                + ". If this is wrong, tell me and I\\'ll fix it.\\n\\n---\\n\\n"
+            )
+            messages[-1]["content"] = banner + original
+            body["messages"] = messages
+
+        return body
+'''
+
+# ---------------------------------------------------------------------------
 # Shared system prompt — used as the murderbot-v1 (gated) system prompt below.
 # ---------------------------------------------------------------------------
 PLANNER_MODEL_ID = "praetor-planner"
@@ -481,31 +582,33 @@ def ensure_tool(client: httpx.Client) -> None:
         print(f"Updated tool '{TOOL_NAME}'")
 
 
-def ensure_filter(client: httpx.Client) -> None:
+def ensure_filter(
+    client: httpx.Client, filter_id: str, name: str, content: str, description: str,
+) -> None:
     funcs = client.get("/api/v1/functions/").raise_for_status().json()
-    existing = next((f for f in funcs if f.get("id") == FILTER_ID), None)
+    existing = next((f for f in funcs if f.get("id") == filter_id), None)
     payload = {
-        "id": FILTER_ID,
-        "name": FILTER_NAME,
+        "id": filter_id,
+        "name": name,
         "type": "filter",
-        "content": FILTER_CONTENT,
-        "meta": {"description": FILTER_DESCRIPTION, "manifest": {}},
+        "content": content,
+        "meta": {"description": description, "manifest": {}},
     }
     if existing is None:
         client.post("/api/v1/functions/create", json=payload).raise_for_status()
         # OWU create endpoint ignores is_active/is_global — toggle separately
-        client.post(f"/api/v1/functions/id/{FILTER_ID}/toggle").raise_for_status()
-        client.post(f"/api/v1/functions/id/{FILTER_ID}/toggle/global").raise_for_status()
-        print(f"Created filter '{FILTER_NAME}' (active, global)")
+        client.post(f"/api/v1/functions/id/{filter_id}/toggle").raise_for_status()
+        client.post(f"/api/v1/functions/id/{filter_id}/toggle/global").raise_for_status()
+        print(f"Created filter '{name}' (active, global)")
     else:
-        client.post(f"/api/v1/functions/id/{FILTER_ID}/update", json=payload).raise_for_status()
+        client.post(f"/api/v1/functions/id/{filter_id}/update", json=payload).raise_for_status()
         # Ensure active + global regardless of previous state
         f = existing
         if not f.get("is_active"):
-            client.post(f"/api/v1/functions/id/{FILTER_ID}/toggle").raise_for_status()
+            client.post(f"/api/v1/functions/id/{filter_id}/toggle").raise_for_status()
         if not f.get("is_global"):
-            client.post(f"/api/v1/functions/id/{FILTER_ID}/toggle/global").raise_for_status()
-        print(f"Updated filter '{FILTER_NAME}'")
+            client.post(f"/api/v1/functions/id/{filter_id}/toggle/global").raise_for_status()
+        print(f"Updated filter '{name}'")
 
 
 # murderbot-v0 (qwen3-35b-think-custom) retired — superseded by murderbot-v1/v2,
@@ -680,12 +783,30 @@ MURDERBOT_V2_UNCENSORED_SYSTEM = (
     "- Code tasks: dispatch_task(type=\"openhands\") with repo and full spec\n"
     "- Deep research: dispatch_task(type=\"research\") only when explicitly requested\n"
     "- Personal memory: praetor_memory_search / praetor_memory_add\n\n"
-    "## Personal memory (preferences, history, recipes, etc.)\n"
+    "## Dietary rules (always apply — Alex is pescatarian, no exceptions)\n"
+    "- Default every recipe to vegetarian. Suggest fish/seafood ONLY when Alex explicitly asks "
+    "for a fish or seafood dish — never otherwise. No other meat or poultry (beef, pork, "
+    "chicken, turkey, lamb, etc.) or gelatin, ever, under any circumstances.\n"
+    "- Fish-derived flavorings (fish sauce, anchovies, oyster sauce, Worcestershire, "
+    "bonito/dashi) are fine as background seasoning even in a dish that isn't presented as "
+    "fish-based.\n"
+    "- Never suggest eggplant, cauliflower, or sweet potato.\n"
+    "- Egg is allowed ONLY in sweet baked goods/desserts (waffles, pancakes, cakes, cookies, "
+    "custards). Never in a savory dish — including as a minor binder (egg wash, egg noodles, "
+    "egg stirred into fried rice, shakshuka, huevos rancheros, scrambled/fried/poached egg).\n"
+    "- Never suggest mayonnaise or aioli as a dish component — regular (egg) mayo is never "
+    "fine; vegan mayo only in a small condiment role Alex specifically asks for (e.g. on a "
+    "banh mi), not suggested proactively.\n"
+    "- Don't default to Beyond Meat / Daring Chicken or other branded meat substitutes. Only "
+    "suggest one when you're specifically confident it fits that exact recipe well — not as a "
+    "generic swap for \"missing\" meat.\n"
+    "- Alex likes: spicy food, tofu, nut butters, bok choy, Italian food.\n\n"
+    "## Personal memory (everything else — reactions, evolving preferences, history)\n"
     "Call praetor_memory_search before answering anything that depends on the user's personal "
-    "preferences, restrictions, or history — recipe/food requests, recommendations, \"what do I "
-    "like\", past decisions, and similar. Call praetor_memory_add whenever the user states a "
-    "lasting preference, restriction, opinion, or reaction (e.g. \"I'm vegetarian\", \"I can't "
-    "eat eggplant\", \"that pasta was too salty\", \"I loved X\") — not just after finishing "
+    "preferences, restrictions, or history beyond the standing dietary rules above — "
+    "recommendations, \"what do I like\", past decisions, and similar. Call praetor_memory_add "
+    "whenever the user states a lasting preference, restriction, opinion, or reaction (e.g. "
+    "\"that pasta was too salty\", \"I loved X\", a new restriction) — not just after finishing "
     "tasks. Keep entries short and factual. Don't ask permission to search or save — do it "
     "silently as part of answering.\n\n"
     "JSON tool calls only. Synthesize results — don't dump raw output."
@@ -807,7 +928,11 @@ def main() -> None:
         client.headers["Authorization"] = f"Bearer {token}"
         ensure_tool(client)
         ensure_secure_search_tool(client)
-        ensure_filter(client)
+        ensure_filter(client, FILTER_ID, FILTER_NAME, FILTER_CONTENT, FILTER_DESCRIPTION)
+        ensure_filter(
+            client, DIETARY_FILTER_ID, DIETARY_FILTER_NAME,
+            DIETARY_FILTER_CONTENT, DIETARY_FILTER_DESCRIPTION,
+        )
         ensure_planner_model(client)
         _ensure_archlinux_model(
             client, ARCHLINUX_V0_ID, "archlinux-v0",
