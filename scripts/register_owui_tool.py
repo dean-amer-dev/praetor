@@ -361,14 +361,31 @@ DIETARY_FILTER_DESCRIPTION = (
 )
 
 DIETARY_FILTER_CONTENT = '''\
-"""Flag likely dietary-rule violations in the assistant response before Alex sees it."""
+"""Catch and auto-correct likely dietary-rule violations in the assistant response.
+
+A pure prompt instruction wasn't enough on its own (observed live: the model suggested
+chicken thighs for a meal-prep "protein" slot despite a standing vegetarian-default rule).
+This outlet filter detects likely violations, then asks the same model to rewrite its own
+response so it complies (self-critique/self-refine — cheaper and more reliable than
+regenerating from scratch, since the model keeps everything that was already right and
+only fixes the flagged ingredients). Bounded retries; if still non-compliant after that,
+falls back to a visible warning banner rather than silently shipping a bad answer.
+"""
+import os
 import re
 from typing import Optional
 
+import httpx
+from pydantic import BaseModel, Field
+
 
 class Filter:
-    class Valves:
-        pass
+    class Valves(BaseModel):
+        LITELLM_BASE_URL: str = "https://litellm.amer.dev/v1"
+        LITELLM_API_KEY: str = Field(
+            default_factory=lambda: os.environ.get("LITELLM_API_KEY", "fmxVy6bPQTClCDy9QOsjBMN3sfScX38JpjlyUv9Q")
+        )
+        MAX_RETRIES: int = 2
 
     def __init__(self):
         self.valves = self.Valves()
@@ -413,14 +430,8 @@ class Filter:
             text = text.replace(phrase, "")
         return text
 
-    def outlet(self, body: dict, __user: Optional[dict] = None) -> dict:
-        messages = body.get("messages", [])
-        if not messages or messages[-1].get("role") != "assistant":
-            return body
-
-        original = messages[-1].get("content") or ""
-        lowered = self._scrub(original.lower())
-
+    def _find_hits(self, text: str) -> set:
+        lowered = self._scrub(text.lower())
         hits = set()
         for term in self._PHRASE_TERMS:
             if term in lowered:
@@ -428,20 +439,71 @@ class Filter:
         for term in self._WORD_TERMS:
             if re.search(rf"\\b{re.escape(term)}\\b", lowered):
                 hits.add(term)
-
         has_dessert_context = any(d in lowered for d in self._DESSERT_INDICATORS)
         if not has_dessert_context and re.search(r"\\begg(s)?\\b", lowered):
             hits.add("egg (outside a dessert/baked-good context)")
+        return hits
+
+    def _ask_model_to_fix(self, model: str, history: list, bad_response: str, hits: set) -> Optional[str]:
+        correction = (
+            "That response violates my dietary rules: it contains "
+            + ", ".join(sorted(hits))
+            + ". Rewrite the COMPLETE response so every single recipe/item fully complies — "
+            "vegetarian by default (tofu/tempeh/seitan/beans/lentils/chickpeas as the protein, "
+            "never meat/poultry/gelatin), fish/seafood only if I explicitly asked for it, no "
+            "eggplant/cauliflower/sweet potato, no egg outside sweet baked goods, no mayo/aioli "
+            "unless it's vegan mayo I specifically asked for. Give the full corrected answer, "
+            "not just an apology or a note about what changed."
+        )
+        retry_messages = history + [
+            {"role": "assistant", "content": bad_response},
+            {"role": "user", "content": correction},
+        ]
+        try:
+            resp = httpx.post(
+                f"{self.valves.LITELLM_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {self.valves.LITELLM_API_KEY}"},
+                json={"model": model, "messages": retry_messages, "temperature": 0.3},
+                timeout=90,
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+        except Exception:
+            return None
+
+    def outlet(self, body: dict, __user: Optional[dict] = None) -> dict:
+        messages = body.get("messages", [])
+        if not messages or messages[-1].get("role") != "assistant":
+            return body
+
+        current = messages[-1].get("content") or ""
+        hits = self._find_hits(current)
+        if not hits:
+            return body
+
+        model = body.get("model", "")
+        history = messages[:-1]
+        attempts = 0
+        while hits and attempts < self.valves.MAX_RETRIES:
+            attempts += 1
+            fixed = self._ask_model_to_fix(model, history, current, hits)
+            if fixed is None:
+                break
+            current = fixed
+            hits = self._find_hits(current)
 
         if hits:
             banner = (
-                "> ⚠️ **Dietary check flagged this response** — possible issue(s): "
+                "> ⚠️ **Dietary check flagged this response after "
+                + str(attempts)
+                + " correction attempt(s)** — possible issue(s) remaining: "
                 + ", ".join(sorted(hits))
-                + ". If this is wrong, tell me and I\\'ll fix it.\\n\\n---\\n\\n"
+                + ". Tell me and I\\'ll fix it.\\n\\n---\\n\\n"
             )
-            messages[-1]["content"] = banner + original
-            body["messages"] = messages
+            current = banner + current
 
+        messages[-1]["content"] = current
+        body["messages"] = messages
         return body
 '''
 
@@ -783,14 +845,32 @@ MURDERBOT_V2_UNCENSORED_SYSTEM = (
     "- Code tasks: dispatch_task(type=\"openhands\") with repo and full spec\n"
     "- Deep research: dispatch_task(type=\"research\") only when explicitly requested\n"
     "- Personal memory: praetor_memory_search / praetor_memory_add\n\n"
-    "## Dietary rules (always apply — Alex is pescatarian, no exceptions)\n"
-    "- Default every recipe to vegetarian. Suggest fish/seafood ONLY when Alex explicitly asks "
-    "for a fish or seafood dish — never otherwise. No other meat or poultry (beef, pork, "
-    "chicken, turkey, lamb, etc.) or gelatin, ever, under any circumstances.\n"
+    "## Personal memory (reactions, evolving preferences, history)\n"
+    "Call praetor_memory_search before answering anything that depends on the user's personal "
+    "preferences, restrictions, or history beyond the standing dietary rules below — "
+    "recommendations, \"what do I like\", past decisions, and similar. Call praetor_memory_add "
+    "whenever the user states a lasting preference, restriction, opinion, or reaction (e.g. "
+    "\"that pasta was too salty\", \"I loved X\", a new restriction) — not just after finishing "
+    "tasks. Keep entries short and factual. Don't ask permission to search or save — do it "
+    "silently as part of answering.\n\n"
+    "JSON tool calls only. Synthesize results — don't dump raw output.\n\n"
+    "## DIETARY RULES — READ THIS LAST SECTION EVERY TIME, NO EXCEPTIONS\n"
+    "Alex is pescatarian. These rules override any generic default (including your own instinct "
+    "to reach for chicken/beef/pork as \"the protein\" in bowls, meal prep, stir-fries, tacos, "
+    "pasta, or any other dish type). They apply to every single recipe you write, with no "
+    "exceptions, even in long lists of multiple recipes/sets — check EVERY item, not just the "
+    "first.\n"
+    "- Default every recipe to vegetarian. When a dish needs a \"protein\" component (meal-prep "
+    "bowls, stir-fries, tacos, etc.), default to tofu, tempeh, seitan, beans, lentils, or "
+    "chickpeas — never chicken, beef, pork, turkey, lamb, or any other meat/poultry, and never "
+    "gelatin. No exceptions, ever.\n"
+    "- Fish/seafood is the ONE allowed animal protein, and ONLY when Alex explicitly asks for a "
+    "fish or seafood dish in that message — never offered by default, never as \"the protein\" "
+    "in a generic bowl/meal-prep suggestion unless asked.\n"
     "- Fish-derived flavorings (fish sauce, anchovies, oyster sauce, Worcestershire, "
     "bonito/dashi) are fine as background seasoning even in a dish that isn't presented as "
-    "fish-based.\n"
-    "- Never suggest eggplant, cauliflower, or sweet potato.\n"
+    "fish-based — this is the one exception to the fish-only-if-asked rule above.\n"
+    "- Never suggest eggplant, cauliflower, or sweet potato, in any recipe.\n"
     "- Egg is allowed ONLY in sweet baked goods/desserts (waffles, pancakes, cakes, cookies, "
     "custards). Never in a savory dish — including as a minor binder (egg wash, egg noodles, "
     "egg stirred into fried rice, shakshuka, huevos rancheros, scrambled/fried/poached egg).\n"
@@ -800,16 +880,9 @@ MURDERBOT_V2_UNCENSORED_SYSTEM = (
     "- Don't default to Beyond Meat / Daring Chicken or other branded meat substitutes. Only "
     "suggest one when you're specifically confident it fits that exact recipe well — not as a "
     "generic swap for \"missing\" meat.\n"
-    "- Alex likes: spicy food, tofu, nut butters, bok choy, Italian food.\n\n"
-    "## Personal memory (everything else — reactions, evolving preferences, history)\n"
-    "Call praetor_memory_search before answering anything that depends on the user's personal "
-    "preferences, restrictions, or history beyond the standing dietary rules above — "
-    "recommendations, \"what do I like\", past decisions, and similar. Call praetor_memory_add "
-    "whenever the user states a lasting preference, restriction, opinion, or reaction (e.g. "
-    "\"that pasta was too salty\", \"I loved X\", a new restriction) — not just after finishing "
-    "tasks. Keep entries short and factual. Don't ask permission to search or save — do it "
-    "silently as part of answering.\n\n"
-    "JSON tool calls only. Synthesize results — don't dump raw output."
+    "- Alex likes: spicy food, tofu, nut butters, bok choy, Italian food.\n"
+    "Before sending any response that includes a recipe, re-read it and confirm every single "
+    "ingredient complies with the rules above."
 )
 
 # ---------------------------------------------------------------------------
