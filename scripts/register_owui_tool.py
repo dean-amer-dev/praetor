@@ -452,6 +452,13 @@ class Filter:
         r"omit(?:ting|ted|s)?|remov(?:ing|ed|es)|exclud(?:ing|ed|es)|distinct from|"
         r"different from|unlike|as opposed to|rather than|instead of|in place of)"
     )
+    # Passive voice puts the term BEFORE the negation ("Eggs are excluded", "mayo is
+    # avoided") instead of after it ("no eggs", "excludes mayo") — needs a
+    # backward-looking window, not just the forward one above.
+    _PASSIVE_NEGATION = (
+        r"(?:is|are|was|were)\\s+(?:not\\s+)?"
+        r"(?:excluded|avoided|omitted|removed|skipped|left out|not (?:used|included|present))\\b"
+    )
 
     def _scrub(self, text: str) -> str:
         for phrase in self._SAFE_PHRASES:
@@ -469,6 +476,15 @@ class Filter:
             if stop:
                 end = m.end() + stop.start()
             windows.append((m.end(), end))
+
+        # Backward windows for passive constructions — the ~45 chars BEFORE the
+        # trigger, capped at the previous sentence boundary.
+        for m in re.finditer(rf"\\b{self._PASSIVE_NEGATION}", text):
+            start = max(0, m.start() - 45)
+            stop = re.search(r"[.!?\\n](?!.*[.!?\\n])", text[start:m.start()])
+            if stop:
+                start = start + stop.end()
+            windows.append((start, m.start()))
 
         def _negated(pos: int) -> bool:
             return any(start <= pos < end for start, end in windows)
