@@ -425,9 +425,18 @@ class Filter:
         "quick bread", "crepe", "crêpe",
     ]
 
+    # "No egg", "without mayo", "removed the chicken", "not mayo-based" — the model
+    # explaining what it avoided/omitted must not trip the same scanner it's reassuring
+    # about. Stripped before matching, for every term below.
+    _NEGATION = r"(?:no|not|never|without|free of|avoid(?:ing|ed|s)?|skip(?:ping|ped|s)?|omit(?:ting|ted|s)?|remov(?:ing|ed|es)|exclud(?:ing|ed|es))"
+
     def _scrub(self, text: str) -> str:
         for phrase in self._SAFE_PHRASES:
             text = text.replace(phrase, "")
+        for term in self._WORD_TERMS + self._PHRASE_TERMS + ["egg", "eggs"]:
+            text = re.sub(
+                rf"\\b{self._NEGATION}\\s+(?:any\\s+|the\\s+)?{re.escape(term)}s?\\b", "", text,
+            )
         return text
 
     def _find_hits(self, text: str) -> set:
@@ -452,8 +461,9 @@ class Filter:
             "vegetarian by default (tofu/tempeh/seitan/beans/lentils/chickpeas as the protein, "
             "never meat/poultry/gelatin), fish/seafood only if I explicitly asked for it, no "
             "eggplant/cauliflower/sweet potato, no egg outside sweet baked goods, no mayo/aioli "
-            "unless it's vegan mayo I specifically asked for. Give the full corrected answer, "
-            "not just an apology or a note about what changed."
+            "unless it's vegan mayo I specifically asked for. Give ONLY the full corrected "
+            "recipe(s) — no apology, no compliance recap or checklist, and don't restate which "
+            "banned ingredients you removed."
         )
         retry_messages = history + [
             {"role": "assistant", "content": bad_response},
@@ -882,7 +892,8 @@ MURDERBOT_V2_UNCENSORED_SYSTEM = (
     "generic swap for \"missing\" meat.\n"
     "- Alex likes: spicy food, tofu, nut butters, bok choy, Italian food.\n"
     "Before sending any response that includes a recipe, re-read it and confirm every single "
-    "ingredient complies with the rules above."
+    "ingredient complies with the rules above. Just give the recipe — don't add a \"why this "
+    "fits your dietary rules\" recap or checklist unless Alex asks for one."
 )
 
 # ---------------------------------------------------------------------------
