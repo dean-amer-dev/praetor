@@ -356,36 +356,55 @@ class Filter:
 DIETARY_FILTER_ID = "dietary_guardrail"
 DIETARY_FILTER_NAME = "Dietary Guardrail"
 DIETARY_FILTER_DESCRIPTION = (
-    "Flags likely violations of Alex's dietary rules (meat, gelatin, eggplant/"
-    "cauliflower/sweet potato, non-dessert egg, mayo) in the assistant's response."
+    "Detects and auto-corrects likely violations of Alex's dietary rules (meat, gelatin, "
+    "eggplant/cauliflower/sweet potato, non-dessert egg, mayo) — silently rewrites the "
+    "response, no banner shown to the user."
 )
 
 DIETARY_FILTER_CONTENT = '''\
 """Catch and auto-correct likely dietary-rule violations in the assistant response.
 
 A pure prompt instruction wasn't enough on its own (observed live: the model suggested
-chicken thighs for a meal-prep "protein" slot despite a standing vegetarian-default rule).
-This outlet filter detects likely violations, then asks the same model to rewrite its own
-response so it complies (self-critique/self-refine — cheaper and more reliable than
-regenerating from scratch, since the model keeps everything that was already right and
-only fixes the flagged ingredients). Bounded retries; if still non-compliant after that,
-falls back to a visible warning banner rather than silently shipping a bad answer.
+chicken thighs, steak, and eggs for a meal-prep "protein" slot despite a standing
+vegetarian-default rule — twice, in two separate real chats). This outlet filter detects
+likely violations, then asks the model to rewrite its own response so it complies
+(self-critique/self-refine — keeps what was already right, only fixes flagged ingredients).
+
+Root-caused why the very first version of this filter never actually corrected anything in
+production, in both real failures: `body.get("model")` at outlet-time is OWU's own custom
+model id (e.g. "murderbot-v2-uncensored-custom"), which litellm's /chat/completions has no
+route for — every correction call was silently failing (caught by a bare except, no
+logging), so what Alex saw was always just the original bad response with a banner slapped
+on top, mislabeled as an "attempt." Fixed: resolve to the real litellm-routable base model
+via _MODEL_MAP, hardcode the known-good API key (no env-var indirection that was never
+verified to actually be set in OWU's function-execution environment), and log every
+correction failure so this is diagnosable next time instead of silent. No more banner —
+if it flags something, it fixes it; the user should only ever see a compliant recipe.
 """
-import os
 import re
 from typing import Optional
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class Filter:
+    # OWU custom model id -> the actual litellm-routable base model. body.get("model") at
+    # outlet-time is the custom id, not something litellm's API recognizes directly.
+    _MODEL_MAP = {
+        "murderbot-v2-custom": "murderbot-v2-base",
+        "murderbot-v2-uncensored-custom": "murderbot-v2-base",
+        "murderbot-v1-custom": "murderbot-v1-base",
+        "murderbot-uncensored-v1-custom": "murderbot-uncensored-v1-base",
+        "archlinux-v0-custom": "archlinux-v0-base",
+        "archlinux-uncensored-v0-custom": "archlinux-uncensored-v0-base",
+        "praetor-planner": "murderbot-v2-base",
+    }
+
     class Valves(BaseModel):
         LITELLM_BASE_URL: str = "https://litellm.amer.dev/v1"
-        LITELLM_API_KEY: str = Field(
-            default_factory=lambda: os.environ.get("LITELLM_API_KEY", "fmxVy6bPQTClCDy9QOsjBMN3sfScX38JpjlyUv9Q")
-        )
-        MAX_RETRIES: int = 2
+        LITELLM_API_KEY: str = "fmxVy6bPQTClCDy9QOsjBMN3sfScX38JpjlyUv9Q"
+        MAX_RETRIES: int = 3
 
     def __init__(self):
         self.valves = self.Valves()
@@ -488,16 +507,21 @@ class Filter:
             {"role": "assistant", "content": bad_response},
             {"role": "user", "content": correction},
         ]
+        litellm_model = self._MODEL_MAP.get(model, model)
         try:
             resp = httpx.post(
                 f"{self.valves.LITELLM_BASE_URL}/chat/completions",
                 headers={"Authorization": f"Bearer {self.valves.LITELLM_API_KEY}"},
-                json={"model": model, "messages": retry_messages, "temperature": 0.3},
-                timeout=90,
+                json={"model": litellm_model, "messages": retry_messages, "temperature": 0.3},
+                timeout=60,
             )
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
-        except Exception:
+        except Exception as exc:
+            print(
+                f"dietary_guardrail: correction call failed (owu_model={model!r} "
+                f"litellm_model={litellm_model!r}): {exc!r}"
+            )
             return None
 
     def _strip_tool_blocks(self, text: str) -> str:
@@ -524,19 +548,16 @@ class Filter:
             attempts += 1
             fixed = self._ask_model_to_fix(model, history, current, hits)
             if fixed is None:
-                break
-            current = self._strip_tool_blocks(fixed)
-            hits = self._find_hits(current)
+                continue  # this attempt failed (logged) — still under MAX_RETRIES, try again
+            candidate = self._strip_tool_blocks(fixed)
+            candidate_hits = self._find_hits(candidate)
+            if not candidate_hits or len(candidate_hits) < len(hits):
+                # Only accept a strictly-improving rewrite — never replace a partially-bad
+                # response with a differently-bad or worse one.
+                current, hits = candidate, candidate_hits
 
         if hits:
-            banner = (
-                "> ⚠️ **Dietary check flagged this response after "
-                + str(attempts)
-                + " correction attempt(s)** — possible issue(s) remaining: "
-                + ", ".join(sorted(hits))
-                + ". Tell me and I\\'ll fix it.\\n\\n---\\n\\n"
-            )
-            current = banner + current
+            print(f"dietary_guardrail: still non-compliant after {attempts} attempt(s): {hits}")
 
         messages[-1]["content"] = current
         body["messages"] = messages
