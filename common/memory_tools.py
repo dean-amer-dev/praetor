@@ -97,7 +97,11 @@ async def delete_memory(query: str, agent_id: str) -> int:
             memory_id = r.get("id")
             if memory_id:
                 del_resp = client.delete(f"/memories/{memory_id}")
-                if del_resp.status_code in (200, 204):
+                try:
+                    del_resp.raise_for_status()
                     deleted += 1
+                except httpx.HTTPStatusError as exc:
+                    logger.warning("Failed to delete memory %s: %d %s", memory_id, del_resp.status_code, del_resp.text)
+                    raise
         return deleted
     return await asyncio.to_thread(_sync)
