@@ -101,6 +101,24 @@ N+1 until phase N's "Done when" is fully met. A phase involving a PR is
 never done until that PR is merged — unconditionally, even if the phase's
 own "Done when" text doesn't mention merge.
 
+## Plan execution: update on stop
+
+A plan is a resumable unit of work, not a one-shot script — whoever picks
+it up next (a cleared context, a different session) needs to read it cold
+and know exactly where things stand. So whenever executing a plan, update
+the plan file itself at every stopping point — a step or phase completes,
+a blocker is hit, permission is needed, or the turn simply ends — before
+yielding control back:
+
+- Check off every step that's actually done (not "started").
+- If a phase is left mid-way, leave a short note of what was done and
+  what's next — in that phase's section of the plan, or its
+  `notes/<slug>-phaseN-notes.md` — rather than leaving the next session to
+  re-derive it from git history or memory.
+
+This is how every phased plan in this vault is meant to be executed,
+standing rule — not busywork added only when a plan happens to ask for it.
+
 ## Documentation graduation boundary
 
 `notes/` holds work-in-progress research/status. Once a note matures into
