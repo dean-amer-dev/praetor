@@ -97,9 +97,10 @@ of content instead of accumulating the whole project's history, and lets
 an agent load only the phase note relevant to the phase it's working on.
 
 **Phase discipline:** phases are strictly sequential. Don't start phase
-N+1 until phase N's "Done when" is fully met. A phase involving a PR is
-never done until that PR is merged — unconditionally, even if the phase's
-own "Done when" text doesn't mention merge.
+N+1 until phase N's "Done when" is fully met. A phase involving one or
+more PRs is never done until **all** of those PRs are merged —
+unconditionally, even if the phase's own "Done when" text doesn't mention
+merge, and regardless of how many PRs the phase has.
 
 ## Plan execution: update on stop
 
