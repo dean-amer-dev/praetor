@@ -11,6 +11,14 @@ Access from an agent: the `obsidian-mcp` server (`read_note`, `write_note`,
 `move_note`, `get_note_metadata`). No filesystem mirror exists — the vault
 is reached only over the CouchDB LiveSync protocol via that MCP server.
 
+That server is a third-party community project (`es617/obsidian-sync-mcp`)
+and is intentionally generic — it has no template or path-enforcement
+feature, and it should stay that way (forking it to bake in vault-specific
+policy would be exactly the bespoke, hard-to-maintain fork this project
+avoids elsewhere). Template selection and path conventions below are
+enforced by the calling agent reading the right `Templates/*.md` file and
+following this doc — a workflow-layer convention, not a server feature.
+
 ## Structure (PARA)
 
 ```
@@ -19,11 +27,13 @@ Areas/                 # standing responsibilities, no end state
     _status.md
     notes/
     Plans/
+    Decisions/
 Projects/               # bounded initiatives with a finish line
   <Name>/
     _status.md
     notes/
     Plans/
+    Decisions/
 Documentation/           # durable "how a live system works" docs
 Incidents/               # postmortems, YYYY-MM-DD-slug.md
 Life/                    # personal, non-project
@@ -38,8 +48,10 @@ category, a hosted service). A Project will eventually be done or
 archived. Ask which kind before creating a new folder — don't default to
 Projects for everything.
 
-**Folder shape:** every Area/Project gets exactly `_status.md`, `notes/`,
-`Plans/` — created implicitly on first write, no scaffolding step needed.
+**Folder shape:** every Area/Project gets `_status.md`, `notes/`, `Plans/`
+— created implicitly on first write, no scaffolding step needed.
+`Decisions/` is the same: created on first write, only when a settled
+decision actually needs recording.
 
 ## Casing (do not drift)
 
@@ -58,7 +70,7 @@ required:
 ```yaml
 ---
 status: active | stale | expired
-type: plan | note | status | incident
+type: plan | note | status | incident | decision
 ---
 ```
 
@@ -68,14 +80,37 @@ type: plan | note | status | incident
 - `type` classifies the note for future sweeps — no Dataview plugin,
   sweeps are agent-driven by reading frontmatter directly.
 
-## The four note types
+## The five note types
 
-| Type | Template | Where | Purpose |
-|------|----------|-------|---------|
-| Status | `templates/status.md` | `<Area\|Project>/_status.md` (one per folder) | Current state snapshot, always overwritten in place |
-| Plan | `templates/plan.md` | `<Area\|Project>/Plans/<slug>.md` | Action checklist only — see rule below |
-| Notes | `templates/notes.md` | `<Area\|Project>/notes/<slug>-background.md` (shared) or `<slug>-phaseN-notes.md` (per phase) | Freeform background/diagnosis, scoped per phase — see below |
-| Incident | `templates/incident.md` | `Incidents/YYYY-MM-DD-<slug>.md` | Postmortem for a user-visible or infra-impacting event |
+| Type | Template | Where | Purpose | Length budget |
+|------|----------|-------|---------|---------------|
+| Status | `templates/status.md` | `<Area\|Project>/_status.md` (one per folder) | Current state snapshot — **overwritten in place**, never appended to | ~20 lines |
+| Plan | `templates/plan.md` | `<Area\|Project>/Plans/<slug>.md` | Action checklist only — see rule below | no hard cap, but each phase's steps stay to a handful of bullets |
+| Notes | `templates/notes.md` | `<Area\|Project>/notes/<slug>-background.md` (shared) or `<slug>-phaseN-notes.md` (per phase) | Freeform background/diagnosis, scoped per phase — see below | ~40 lines; past that, split further or pull a decision out (see below) |
+| Decision | `templates/decision.md` | `<Area\|Project>/Decisions/<slug>.md` | MADR-lite record of one settled decision — context, decision, consequences | ~1 page (~40 lines) |
+| Incident | `templates/incident.md` | `Incidents/YYYY-MM-DD-<slug>.md` | Postmortem for a user-visible or infra-impacting event | as long as the timeline genuinely needs |
+
+These budgets are a signal, not a hard limit enforced anywhere — if a
+file is running 2x over, that's the cue to split or move content out
+rather than a reason to keep writing.
+
+**Decisions get pulled out, not inlined.** Any rationale for a settled
+choice — why X over Y, alternatives considered, tradeoffs accepted —
+goes in its own `Decisions/<slug>.md`, one page max, linked from
+wherever it's relevant (a plan step, a notes file, `_status.md`). Never
+append reasoning to a plan or notes file as it accumulates; write the
+decision once and link to it. Reversing a decision later means writing a
+**new** dated decision file that supersedes the old one (old file's
+`status: expired`, with a one-line pointer forward) — never edit a
+decision file in place to reverse its own outcome.
+
+**Status files are overwritten, not accumulated** (borrowed from the
+"memory bank" pattern used by Cline/Roo-style coding-agent conventions:
+a small, rarely-changing foundation plus one frequently-rewritten
+current-state file). `_status.md` reflects what's true *right now* —
+when it's updated, prune stale bullets instead of leaving old state
+sitting alongside new state. History belongs in a Decision or Incident
+file, not in a growing `_status.md`.
 
 ## Plans are action checklists, not history
 

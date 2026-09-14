@@ -25,4 +25,7 @@ diagnosis notes.>
 
 ## Open decisions
 <Optional — questions that need a human answer before implementation can
-proceed. Don't assume when implementing.>
+proceed. Don't assume when implementing. Once answered, the decision
+and its rationale move to a `Decisions/<slug>.md` file (see decision.md
+template) — replace this section with a link, don't leave the answered
+reasoning sitting here.>
